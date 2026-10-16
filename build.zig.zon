@@ -1,0 +1,14 @@
+.{
+    .name = .gear,
+    .version = "0.0.0",
+    .fingerprint = 0xb44539bd8c82bb3,
+    .minimum_zig_version = "0.17.0",
+    .dependencies = .{
+        .hearsay = .{ .path = "../hearsay" },
+        .gesso = .{
+            .url = "git+https://github.com/wakamex/gesso.git#35986cc0c69e485b2a9c561484d5f0ae902143b7",
+            .hash = "gesso-0.0.0-LFvUr_DbRgCvdYm1rI1MMtj2GaVcPtlKU9Ulqbke4KI5",
+        },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "README.md", "BRIEF.md" },
+}
