@@ -5,10 +5,12 @@
 #include <stdlib.h>
 #include "gs_mix.h"
 #include "gs_voice.h"
+#include "agent.h"
 #include "hear.h"
 #include "listen.h"
 #include "models.h"
 #include "pipeline.h"
+#include "relay.h"
 #include "say.h"
 #include "wav.h"
 
@@ -16,14 +18,17 @@ enum { MIX_RATE = 48000, MIX_STEP = MIX_RATE / 100 };  // the mix, rendered 10 m
 
 static const char usage[] =
     "usage: gear fetch                         download the models\n"
-    "       gear listen [--speak-back]         talk; each message is printed when its countdown ends\n"
+    "       gear agents                        the agents Wakterm can reach\n"
+    "       gear listen --to AGENT             talk to AGENT; its replies are read aloud\n"
+    "       gear listen [--speak-back]         talk; each message is printed, and read back with --speak-back\n"
+    "       gear send --to AGENT TEXT          send TEXT to AGENT and print its reply\n"
     "       gear hear FILE.wav                 the pipeline on a recording, as if spoken\n"
     "       gear say TEXT OUT.wav              speak TEXT through the player, recorded to OUT.wav\n"
     "       gear interrupt TEXT MIC.wav OUT.wav  speak TEXT while MIC.wav plays as the microphone\n"
     "options: --countdown SECONDS (3)  --hear-threads N (1)  --say-threads N (2)  --no-echo\n"
     "models:  GEAR_MODELS, or a models folder in the user's data folder for gear\n";
 
-static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; } opt = { 3.0, 1, 2, false, false };
+static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to; } opt = { 3.0, 1, 2, false, false, NULL };
 
 static void progress(void *user, long long received, long long total, double eta) {
     if (eta >= 0) fprintf(stderr, "\r%5.1f%% of %.0f MB, %.0f s left   ", 100.0 * (double)received / (double)total, (double)total / 1e6, eta);
@@ -72,6 +77,33 @@ static gs_voice *open_voice(void) {
     return gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (echo ? GS_VOICE_ECHO : 0));
 }
 
+static int agents(void) {
+    enum { MAX = 512 };
+    static gear_agent all[MAX];
+    char error[512];
+    int n = gear_agents_list(all, MAX, error, sizeof error);
+    if (n < 0) { fprintf(stderr, "gear: %s\n", error); return 1; }
+    for (int i = 0; i < n; i++) printf("%-40s %-8s %s\n", all[i].name, all[i].harness, all[i].status);
+    return 0;
+}
+
+static int send_text(const char *text) {
+    gear_agent a;
+    char error[512];
+    if (!opt.to) { fputs("gear: send needs --to AGENT\n", stderr); return 2; }
+    if (!gear_agent_find(opt.to, &a, error, sizeof error)) { fprintf(stderr, "gear: %s\n", error); return 1; }
+    gear_relay *r = gear_relay_new(&a);
+    gear_relay_send(r, text);
+    char *reply = NULL;
+    bool failed = false;
+    while (!(reply = gear_relay_take(r, &failed, error, sizeof error)) && !failed) SDL_Delay(100);
+    gear_relay_free(r);
+    if (failed) { fprintf(stderr, "gear: %s\n", error); return 1; }
+    printf("%s\n", reply);
+    SDL_free(reply);
+    return 0;
+}
+
 // The live loop: the microphone into the pipeline, messages printed and, with --speak-back, read back.
 static int listen_live(void) {
     const char *dir = models();
@@ -80,7 +112,15 @@ static int listen_live(void) {
     gear_hear *hear = open_hear(dir);
     gear_say *say = NULL;
     if (!hear) return 1;
-    if (opt.speak_back) {
+    gear_relay *relay = NULL;
+    if (opt.to) {
+        gear_agent a;
+        char error[512];
+        if (!gear_agent_find(opt.to, &a, error, sizeof error)) { fprintf(stderr, "gear: %s\n", error); return 1; }
+        relay = gear_relay_new(&a);
+        fprintf(stderr, "gear: talking to %s (%s)\n", a.name, a.harness);
+    }
+    if (opt.speak_back || relay) {
         if (!gs_mix_open(MIX_RATE)) { fprintf(stderr, "gear: no playback device: %s\n", SDL_GetError()); return 1; }
         if (!(say = open_say(dir, voice))) return 1;
     }
@@ -105,14 +145,25 @@ static int listen_live(void) {
             if (*shown) fprintf(stderr, "… %s\n", shown);
         }
         if (message) {
-            printf("%s\n", message);
+            printf("> %s\n", message);
             fflush(stdout);
-            if (say) gear_say_speak(say, message);
+            if (relay) gear_relay_send(relay, message);
+            else if (say) gear_say_speak(say, message);
             SDL_free(message);
+        }
+        char error[512];
+        bool failed;
+        for (char *reply; relay && ((reply = gear_relay_take(relay, &failed, error, sizeof error)) || failed);) {
+            if (failed) { fprintf(stderr, "gear: %s\n", error); break; }
+            printf("%s\n", reply);
+            fflush(stdout);
+            gear_say_speak(say, reply);
+            SDL_free(reply);
         }
         SDL_Delay(10);
     }
     gear_pipeline_free(p);
+    gear_relay_free(relay);
     SDL_DestroyAudioStream(mic);
     gear_say_close(say);
     gear_hear_close(hear);
@@ -252,6 +303,7 @@ int main(int argc, char **argv) {
         else if (!SDL_strcmp(argv[i], "--say-threads") && i + 1 < argc) opt.say_threads = SDL_atoi(argv[++i]);
         else if (!SDL_strcmp(argv[i], "--speak-back")) opt.speak_back = true;
         else if (!SDL_strcmp(argv[i], "--no-echo")) opt.no_echo = true;
+        else if (!SDL_strcmp(argv[i], "--to") && i + 1 < argc) opt.to = argv[++i];
         else if (nargs < 4 && argv[i][0] != '-') args[nargs++] = argv[i];
         else { fputs(usage, stderr); return 2; }
     }
@@ -259,6 +311,8 @@ int main(int argc, char **argv) {
     if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }
     int rc = 2;
     if (!SDL_strcmp(args[0], "fetch") && nargs == 1) rc = fetch();
+    else if (!SDL_strcmp(args[0], "agents") && nargs == 1) rc = agents();
+    else if (!SDL_strcmp(args[0], "send") && nargs == 2) rc = send_text(args[1]);
     else if (!SDL_strcmp(args[0], "listen") && nargs == 1) rc = listen_live();
     else if (!SDL_strcmp(args[0], "hear") && nargs == 2) rc = hear_file(args[1]);
     else if (!SDL_strcmp(args[0], "say") && nargs == 3) rc = say_file(args[1], args[2]);

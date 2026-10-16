@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include "gs_mix.h"
 #include "gs_voice.h"
+#include "agent.h"
 #include "hear.h"
 #include "listen.h"
 #include "models.h"
@@ -188,12 +189,26 @@ static void test_end_to_end(const char *dir, const char *data) {
     SDL_free(speech);
 }
 
+// Against the real wakterm, with an agent that does not exist, so nothing is delivered: the refusal
+// (which wakterm reports with exit code 0) must come back as a failure with its reason.
+static void test_agent_refused(void) {
+    char error[512], id[37];
+    gear_agent nobody = { .name = "nobody", .id = "gear-test-no-such-agent", .incarnation = "none" };
+    bool sent = gear_agent_send(&nobody, "test", id, error, sizeof error);
+    if (SDL_strstr(error, "Could not run")) { printf("agent test skipped: %s\n", error); return; }
+    CHECK(!sent);
+    CHECK(SDL_strstr(error, "not available") != NULL);
+    gear_agent found;
+    CHECK(!gear_agent_find("gear-test-no-such-agent", &found, error, sizeof error));
+}
+
 int main(int argc, char **argv) {
     const char *data = argc > 1 ? argv[1] : "tests";
     SDL_Init(SDL_INIT_AUDIO);
     char *tmp = SDL_GetPrefPath("wakamex", "gear-tests");
     test_listen();
     test_wav(tmp);
+    test_agent_refused();
     const char *dir = SDL_getenv("GEAR_MODELS");
     if (dir && gear_models_present(dir)) test_end_to_end(dir, data);
     else printf("end-to-end tests skipped: GEAR_MODELS does not hold the models\n");
