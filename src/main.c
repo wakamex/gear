@@ -33,9 +33,11 @@ static const char usage[] =
     "       gear say TEXT OUT.wav              speak TEXT through the player, recorded to OUT.wav\n"
     "       gear interrupt TEXT MIC.wav OUT.wav  speak TEXT while MIC.wav plays as the microphone\n"
     "options: --countdown SECONDS (3)  --hear-threads N (1)  --say-threads N (2)  --no-echo\n"
+    "         --no-keep  keep nothing heard (by default listen and window keep each piece of speech and\n"
+    "                    its transcript in a heard folder in gear's data folder, for training later)\n"
     "models:  GEAR_MODELS, or a models folder in the user's data folder for gear\n";
 
-static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo; } opt = { 3.0, 1, 2, false, false, NULL, NULL, false };
+static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo, no_keep; } opt = { 3.0, 1, 2, false, false, NULL, NULL, false, false };
 
 static void progress(void *user, long long received, long long total, double eta) {
     if (eta >= 0) fprintf(stderr, "\r%5.1f%% of %.0f MB, %.0f s left   ", 100.0 * (double)received / (double)total, (double)total / 1e6, eta);
@@ -162,6 +164,12 @@ static int listen_live(void) {
     fprintf(stderr, "gear: listening%s; Ctrl+C quits\n", gs_voice_has_echo() && !opt.no_echo ? " with echo cancellation" : "");
     gear_listen_params lp = gear_listen_defaults();
     gear_pipeline *p = gear_pipeline_new(voice, hear, say, &lp, opt.countdown);
+    if (!opt.no_keep) {
+        char heard[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
+        SDL_snprintf(heard, sizeof heard, "%sheard", pref ? pref : "");
+        SDL_free(pref);
+        gear_pipeline_keep(p, heard, gear_model_info(GEAR_MODEL_HEAR)->name);
+    }
     float frame[GEAR_FRAME];
     char shown[4096] = "";
     for (bool quit = false; !quit;) {
@@ -339,13 +347,14 @@ int main(int argc, char **argv) {
         else if (!SDL_strcmp(argv[i], "--to") && i + 1 < argc) opt.to = argv[++i];
         else if (!SDL_strcmp(argv[i], "--shot") && i + 1 < argc) opt.shot = argv[++i];
         else if (!SDL_strcmp(argv[i], "--demo")) opt.demo = true;
+        else if (!SDL_strcmp(argv[i], "--no-keep")) opt.no_keep = true;
         else if (nargs < 4 && (argv[i][0] != '-' || !argv[i][1])) args[nargs++] = argv[i];
         else { fputs(usage, stderr); return 2; }
     }
     if (!nargs || !SDL_strcmp(args[0], "window")) {
         if (nargs > 1) { fputs(usage, stderr); return 2; }
         const char *dir = opt.demo ? "" : gear_models_dir();
-        gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.shot, opt.demo };
+        gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.no_keep, opt.shot, opt.demo };
         return gear_window(&o);
     }
     if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }

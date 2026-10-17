@@ -148,6 +148,10 @@ static void test_end_to_end(const char *dir, const char *data) {
     gs_voice *voice = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH);
     gear_listen_params lp = gear_listen_defaults();
     gear_pipeline *p = gear_pipeline_new(voice, hear, NULL, &lp, 1.0);
+    char keep[1200], *tmp = SDL_GetPrefPath("wakamex", "gear-tests");
+    SDL_snprintf(keep, sizeof keep, "%sheard-%llu", tmp, (unsigned long long)SDL_GetTicksNS());
+    SDL_free(tmp);
+    gear_pipeline_keep(p, keep, "test-model");
     char *message = NULL;
     float frame[GEAR_FRAME];
     for (int i = 0; !message && i < n + GEAR_RATE * 10; i += GEAR_FRAME) {
@@ -165,6 +169,23 @@ static void test_end_to_end(const char *dir, const char *data) {
     }
     SDL_free(message);
     gear_pipeline_free(p);
+    // What was heard is kept: the piece's file, its text, and the message's outcome.
+    char log[1300];
+    SDL_snprintf(log, sizeof log, "%s/heard.jsonl", keep);
+    char *lines = SDL_LoadFile(log, NULL);
+    CHECK(lines && SDL_strstr(lines, "\"model\":\"test-model\"") && SDL_strstr(lines, "\"outcome\":\"sent\""));
+    char *file = lines ? SDL_strstr(lines, "\"file\":\"") : NULL;
+    if (file) {
+        char kept[1400];
+        file += 8;
+        size_t n2 = (size_t)(SDL_strchr(file, '"') - file);
+        SDL_snprintf(kept, sizeof kept, "%s/%.*s", keep, (int)n2, file);
+        int samples;
+        float *back = gear_wav_read(kept, GEAR_RATE, &samples);
+        CHECK(back && samples > GEAR_RATE);
+        SDL_free(back);
+    } else CHECK(file);
+    SDL_free(lines);
 
     // Saying and interrupting, with headphones (the microphone hears only the user), then with
     // loudspeakers (it also hears the reply) and the echo canceller, and as a control loudspeakers

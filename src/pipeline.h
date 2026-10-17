@@ -19,6 +19,11 @@ typedef struct gear_pipeline gear_pipeline;
 // `say` may be NULL (nothing to interrupt). The pipeline does not own its parts.
 gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_hear *hear, gear_say *say, const gear_listen_params *listen, double countdown);
 void gear_pipeline_free(gear_pipeline *p);
+// Keeps what is heard in `dir`, for training a recogniser on the user's own speech later: each piece
+// as a 16 kHz WAV file in a folder for the day, and in dir/heard.jsonl a line per piece (its file,
+// the text `model` heard in it, the seconds that took, its message) and a line per message saying
+// whether it was sent, sent now or dropped. NULL keeps nothing (the default).
+void gear_pipeline_keep(gear_pipeline *p, const char *dir, const char *model);
 // One microphone frame of GEAR_FRAME samples at 16 kHz, cleaned in place.
 void gear_pipeline_frame(gear_pipeline *p, float *frame);
 // Collects finished transcriptions. Returns the message when its countdown has run out (SDL_free it),

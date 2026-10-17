@@ -10,6 +10,7 @@ typedef struct {
     double countdown;
     int hear_threads, say_threads;
     bool no_echo;
+    bool no_keep;         // do not keep what is heard (see gear_pipeline_keep)
     const char *shot;     // write a picture of the window to this PNG once it has drawn, and exit
     bool demo;            // show a made-up exchange instead of running the loop (no models needed)
 } gear_window_options;

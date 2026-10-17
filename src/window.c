@@ -397,6 +397,12 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     // The loop runs only once everything it needs is open: without it the window shows STOPPED.
     gear_listen_params lp = gear_listen_defaults();
     a->pipe = gear_pipeline_new(a->voice, a->hear, a->say, &lp, o->countdown);
+    if (!o->no_keep) {
+        char heard[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
+        SDL_snprintf(heard, sizeof heard, "%sheard", pref ? pref : "");
+        SDL_free(pref);
+        gear_pipeline_keep(a->pipe, heard, gear_model_info(GEAR_MODEL_HEAR)->name);
+    }
     return true;
 }
 
@@ -415,6 +421,9 @@ static void close_loop(app *a) {
 
 int gear_window(const gear_window_options *o) {
     if (o->shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+    // gear sits beside the work it is for: shown, it does not take the keyboard from the app in use.
+    SDL_SetHint(SDL_HINT_WINDOW_ACTIVATE_WHEN_SHOWN, "0");
+    SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_CREATOR_STRING, "wakamex");  // gear's data folder is wakamex/gear
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }
     SDL_PropertiesID p = SDL_CreateProperties();
     SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "gear");
@@ -423,15 +432,9 @@ int gear_window(const gear_window_options *o) {
     SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (o->shot ? 0 : SDL_WINDOW_HIDDEN));
     SDL_SetBooleanProperty(p, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, o->shot != NULL);
     SDL_Window *win = SDL_CreateWindowWithProperties(p);
+    // gesso puts the window back where it was, from window.txt in gear's data folder; a picture keeps the fixed size.
+    if (win && o->shot) SDL_SetStringProperty(SDL_GetWindowProperties(win), GS_UI_PLACE, "");
     SDL_DestroyProperties(p);
-    // The window comes back where it was and as large, from a file in gear's data folder.
-    char placed_path[1100] = "";
-    gs_window_state placed = { 0 };
-    Uint64 placed_changed = 0;  // when it last moved or changed size without being saved; 0 when saved
-    char *pref = o->shot ? NULL : SDL_GetPrefPath("wakamex", "gear");
-    if (pref) SDL_snprintf(placed_path, sizeof placed_path, "%swindow.txt", pref), SDL_free(pref);
-    if (win && placed_path[0] && gs_window_state_load(placed_path, &placed)) gs_window_state_apply(&placed, win);
-    if (win && !o->shot) SDL_ShowWindow(win);
     SDL_Renderer *ren = win ? SDL_CreateRenderer(win, NULL) : NULL;
     if (!ren) { fprintf(stderr, "gear: no window: %s\n", SDL_GetError()); return 1; }
     // One monospace font, shipped beside the program, before the system's for what it lacks.
@@ -440,6 +443,7 @@ int gear_window(const gear_window_options *o) {
     SDL_snprintf(font, sizeof font, "%sClankerMono-Regular.ttf", SDL_GetBasePath());
     gs_fontset_prepend(fonts, font);
     gs_ui *ui = gs_ui_new(win, ren, fonts);
+    if (!o->shot) SDL_ShowWindow(win);  // after gs_ui_new has placed it, so it does not jump
     gs_ui_style *st = gs_ui_style_of(ui);
     st->background = BACKGROUND, st->panel = PANEL, st->raised = RAISED, st->text = TEXT, st->muted = DIM;
     st->accent = ACCENT, st->border = BORDER, st->warning = OVER, st->radius = 0;
@@ -457,7 +461,6 @@ int gear_window(const gear_window_options *o) {
         if (SDL_WaitEventTimeout(&e, 10)) {
             do {
                 if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
-                if (placed_path[0] && gs_window_state_track(&placed, win, &e)) placed_changed = SDL_max(SDL_GetTicks(), 1);
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
@@ -470,8 +473,6 @@ int gear_window(const gear_window_options *o) {
             if (reading && !a.speaking_since) a.speaking_since = SDL_GetTicks();
             if (!reading) a.speaking_since = 0;
         }
-        // Its place is saved once the window has rested half a second after moving.
-        if (placed_changed && SDL_GetTicks() - placed_changed >= 500) gs_window_state_save(placed_path, &placed), placed_changed = 0;
         // Drawn twenty times a second: the meter and countdown move by themselves.
         if (SDL_GetTicks() - drawn < 50 && !o->shot) continue;
         drawn = SDL_GetTicks();
@@ -510,7 +511,6 @@ int gear_window(const gear_window_options *o) {
         }
         SDL_RenderPresent(ren);
     }
-    if (placed_changed) gs_window_state_save(placed_path, &placed);
     close_loop(&a);
     gs_ui_free(ui);
     gs_fontset_free(fonts);
