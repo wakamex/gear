@@ -12,6 +12,7 @@ The spoken loop runs end to end on the CPU, from microphone to message and from 
 - Speaking: a reply is synthesized by Pocket TTS on a thread of its own and played as it is made, through a `gs_stream` in gesso's mix. The first sound plays 0.17 to 0.31 s after the reply is queued.
 - Interrupting: when the user starts talking during a reply, the reply stops. In the tests, talking is detected 60 ms after the speech begins and the player is silent 10 ms later.
 - Echo: with `-Decho=true`, gesso's WebRTC echo canceller is given what gear plays, so a reply through loudspeakers is not taken for the user talking. In the tests, where the microphone hears the reply at half its level 100 ms late as well as the user, the reply plays on until the user talks; without the canceller it cuts itself off 0.4 to 0.5 s in. Without `-Decho`, use headphones.
+- Agents: messages go to a coding agent through [Wakterm](https://github.com/wakamex/wakterm)'s Agent API, and the agent's final reply comes back to be read aloud. `wakterm cli agent catalog` lists the agents, `wakterm cli agent admit --return-final` gives one a message, with its text on standard input so it never shows in the process list, and `wakterm cli agent request get` returns the reply once the agent has finished. Wakterm knows each harness (Claude Code, Codex and the others it supports), so gear has no logic for any one agent. A relay thread sends messages in order and asks for each reply twice a second; a one-sentence answer from a Claude agent came back 3.1 s after sending.
 - Models: `gear fetch` downloads the three model files, 235 MB in all, from Hugging Face at pinned commits, resuming a broken download and keeping a file only when its size and SHA-256 match the published ones.
 
 | File | What it is | Size |
@@ -20,7 +21,7 @@ The spoken loop runs end to end on the CPU, from microphone to message and from 
 | `pocket-tts-english_2026-09-Q8_0.gguf` | Kyutai [Pocket TTS](https://github.com/kyutai-labs/pocket-tts), English speech synthesis (CC-BY-4.0) | 138 MB |
 | `alba.safetensors` | Kyutai's alba voice for Pocket TTS (CC-BY-4.0) | 6 MB |
 
-Not built yet: the window, sending messages to an agent through [Panetone](https://github.com/wakamex/panetone) or a [Wakterm](https://github.com/wakamex/wakterm) pane and reading the reply back, and turning a reply into something worth hearing.
+Not built yet: the window, turning a reply into something worth hearing (until then code blocks and Markdown are read as written), and sending to a terminal pane that runs no agent.
 
 ## Build and run
 
@@ -30,7 +31,10 @@ With [Zig](https://ziglang.org/) 0.17.0, beside a checkout of hearsay in `../hea
 zig build -Doptimize=ReleaseFast             # zig-out/bin/gear, 5.7 MB on Linux, needing only libc
 zig build -Doptimize=ReleaseFast -Decho=true # with echo cancellation, for loudspeakers
 gear fetch                                   # the models, into gear's folder in the user's data folder
-gear listen --speak-back                     # talk; each message is printed, then read back
+gear agents                                  # the agents Wakterm can reach
+gear listen --to AGENT                       # talk to AGENT; its replies are read aloud
+gear send --to AGENT "Some message."         # one message, its reply printed
+gear listen --speak-back                     # no agent: each message is printed and read back
 ```
 
 `GEAR_MODELS` names another folder for the models. Three modes run the same pipeline on recordings, without a microphone or speakers:
@@ -41,7 +45,7 @@ gear say "Some reply." reply.wav             # the reply as the player plays it
 gear interrupt "Some reply." talking.wav out.wav  # a reply while talking.wav plays as the microphone
 ```
 
-`zig build test` runs the tests. The listener and file tests always run; with `GEAR_MODELS` set to a folder holding the models, the end-to-end tests also transcribe `tests/utterance.wav` (LibriSpeech test-clean 1089-134686-0010, CC-BY-4.0) through the pipeline and check that talking two seconds into a reply stops it; built with `-Decho=true`, they also check the echo canceller with a simulated loudspeaker.
+`zig build test` runs the tests. The listener and file tests always run; with `GEAR_MODELS` set to a folder holding the models, the end-to-end tests also transcribe `tests/utterance.wav` (LibriSpeech test-clean 1089-134686-0010, CC-BY-4.0) through the pipeline and check that talking two seconds into a reply stops it; built with `-Decho=true`, they also check the echo canceller with a simulated loudspeaker. With `GEAR_AGENT` naming an agent kept for tests, they send it a message through Wakterm and check its reply; without it they still check, against the real `wakterm` and an agent that does not exist, that a refused message is reported as refused.
 
 ## Decisions
 

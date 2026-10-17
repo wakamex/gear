@@ -8,6 +8,7 @@
 #include "hear.h"
 #include "listen.h"
 #include "models.h"
+#include "relay.h"
 #include "pipeline.h"
 #include "say.h"
 #include "wav.h"
@@ -202,6 +203,25 @@ static void test_agent_refused(void) {
     CHECK(!gear_agent_find("gear-test-no-such-agent", &found, error, sizeof error));
 }
 
+// A real round trip, when GEAR_AGENT names an agent kept for tests: a message out, its reply back.
+static void test_agent_round_trip(const char *name) {
+    char error[512];
+    gear_agent a;
+    CHECK(gear_agent_find(name, &a, error, sizeof error));
+    if (!a.id[0]) { fprintf(stderr, "%s\n", error); return; }
+    gear_relay *r = gear_relay_new(&a);
+    gear_relay_send(r, "Reply with exactly the word ready.");
+    char *reply = NULL;
+    bool failed = false;
+    Uint64 deadline = SDL_GetTicks() + 120000;
+    while (!(reply = gear_relay_take(r, &failed, error, sizeof error)) && !failed && SDL_GetTicks() < deadline) SDL_Delay(100);
+    gear_relay_free(r);
+    if (failed) fprintf(stderr, "%s\n", error);
+    CHECK(reply && SDL_strcasestr(reply, "ready"));
+    printf("%s replied: %s\n", name, reply ? reply : "(nothing)");
+    SDL_free(reply);
+}
+
 int main(int argc, char **argv) {
     const char *data = argc > 1 ? argv[1] : "tests";
     SDL_Init(SDL_INIT_AUDIO);
@@ -209,6 +229,9 @@ int main(int argc, char **argv) {
     test_listen();
     test_wav(tmp);
     test_agent_refused();
+    const char *agent = SDL_getenv("GEAR_AGENT");
+    if (agent && *agent) test_agent_round_trip(agent);
+    else printf("agent round trip skipped: GEAR_AGENT is not set\n");
     const char *dir = SDL_getenv("GEAR_MODELS");
     if (dir && gear_models_present(dir)) test_end_to_end(dir, data);
     else printf("end-to-end tests skipped: GEAR_MODELS does not hold the models\n");

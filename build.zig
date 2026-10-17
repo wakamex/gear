@@ -32,5 +32,7 @@ pub fn build(b: *std.Build) void {
     run.addDirectoryArg(b.path("tests"));
     // The models folder for the end-to-end tests: GEAR_MODELS, or the tests skip them.
     if (b.graph.environ_map.get("GEAR_MODELS")) |dir| run.setEnvironmentVariable("GEAR_MODELS", dir);
+    // An agent kept for tests, for a real round trip through Wakterm: GEAR_AGENT, or the test skips it.
+    if (b.graph.environ_map.get("GEAR_AGENT")) |name| run.setEnvironmentVariable("GEAR_AGENT", name);
     b.step("test", "Run the tests").dependOn(&run.step);
 }
