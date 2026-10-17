@@ -144,6 +144,7 @@ int gear_agents_list(gear_agent *out, int max, char *error, size_t error_size) {
         copy(g->incarnation, sizeof g->incarnation, gs_json_get(a, "incarnation_id"));
         copy(g->harness, sizeof g->harness, gs_json_get(a, "harness"));
         copy(g->status, sizeof g->status, gs_json_get(a, "status"));
+        g->pane = (int)gs_json_num(gs_json_get(a, "pane_id"), -1);
     }
     gs_json_free(doc);
     return n;
@@ -156,7 +157,18 @@ bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t erro
     bool found = false;
     for (int i = 0; i < n && !found; i++)
         if (!SDL_strcasecmp(all[i].name, name)) { *out = all[i]; found = true; }
-    if (n >= 0 && !found) SDL_snprintf(error, error_size, "No live agent called %s", name);
+    // No agent by that name: the agent in the tab of that title, whichever harness it runs.
+    const char *argv[] = { wakterm(), "cli", "--no-auto-start", "list", "--format", "json", NULL };
+    char ignored[256];
+    gs_json *panes = found || n <= 0 ? NULL : run_json(argv, NULL, ignored, sizeof ignored);
+    for (gs_jv p = panes ? gs_json_first(gs_json_root(panes)) : NULL; p && !found; p = gs_json_next(p)) {
+        if (SDL_strcasecmp(gs_json_str(gs_json_get(p, "tab_title"), ""), name)) continue;
+        int pane = (int)gs_json_num(gs_json_get(p, "pane_id"), -2);
+        for (int i = 0; i < n && !found; i++)
+            if (all[i].pane == pane) { *out = all[i]; found = true; }
+    }
+    gs_json_free(panes);
+    if (n >= 0 && !found) SDL_snprintf(error, error_size, "No live agent called %s, and none in a tab of that title", name);
     SDL_free(all);
     return found;
 }

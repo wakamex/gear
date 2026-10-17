@@ -24,7 +24,7 @@ static const char usage[] =
     "usage: gear fetch                         download the models\n"
     "       gear window [--to AGENT]           the window: talk, and hear the replies\n"
     "       gear window --demo --shot F.png    a picture of the window with a made-up exchange\n"
-    "       gear agents                        the agents Wakterm can reach\n"
+    "       gear agents [NAME]                 the agents Wakterm can reach, or the one NAME (an agent or a tab) reaches\n"
     "       gear listen --to AGENT             talk to AGENT; its replies are read aloud\n"
     "       gear listen [--speak-back]         talk; each message is printed, and read back with --speak-back\n"
     "       gear send --to AGENT TEXT          send TEXT to AGENT and print its reply\n"
@@ -84,10 +84,16 @@ static gs_voice *open_voice(void) {
     return gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (echo ? GS_VOICE_ECHO : 0));
 }
 
-static int agents(void) {
+static int agents(const char *name) {
     enum { MAX = 512 };
     static gear_agent all[MAX];
     char error[512];
+    if (name) {
+        gear_agent a;
+        if (!gear_agent_find(name, &a, error, sizeof error)) { fprintf(stderr, "gear: %s\n", error); return 1; }
+        printf("%s reaches %s (%s, pane %d, %s)\n", name, a.name, a.harness, a.pane, a.status);
+        return 0;
+    }
     int n = gear_agents_list(all, MAX, error, sizeof error);
     if (n < 0) { fprintf(stderr, "gear: %s\n", error); return 1; }
     for (int i = 0; i < n; i++) printf("%-40s %-8s %s\n", all[i].name, all[i].harness, all[i].status);
@@ -99,7 +105,7 @@ static int send_text(const char *text) {
     char error[512];
     if (!opt.to) { fputs("gear: send needs --to AGENT\n", stderr); return 2; }
     if (!gear_agent_find(opt.to, &a, error, sizeof error)) { fprintf(stderr, "gear: %s\n", error); return 1; }
-    gear_relay *r = gear_relay_new(&a);
+    gear_relay *r = gear_relay_new(a.name);
     gear_relay_send(r, text);
     char *reply = NULL;
     bool failed = false;
@@ -142,7 +148,7 @@ static int listen_live(void) {
         gear_agent a;
         char error[512];
         if (!gear_agent_find(opt.to, &a, error, sizeof error)) { fprintf(stderr, "gear: %s\n", error); return 1; }
-        relay = gear_relay_new(&a);
+        relay = gear_relay_new(a.name);
         fprintf(stderr, "gear: talking to %s (%s)\n", a.name, a.harness);
     }
     if (opt.speak_back || relay) {
@@ -345,7 +351,7 @@ int main(int argc, char **argv) {
     if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }
     int rc = 2;
     if (!SDL_strcmp(args[0], "fetch") && nargs == 1) rc = fetch();
-    else if (!SDL_strcmp(args[0], "agents") && nargs == 1) rc = agents();
+    else if (!SDL_strcmp(args[0], "agents") && nargs <= 2) rc = agents(nargs == 2 ? args[1] : NULL);
     else if (!SDL_strcmp(args[0], "send") && nargs == 2) rc = send_text(args[1]);
     else if (!SDL_strcmp(args[0], "read") && nargs == 2) rc = read_text(args[1]);
     else if (!SDL_strcmp(args[0], "listen") && nargs == 1) rc = listen_live();

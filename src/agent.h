@@ -9,11 +9,13 @@
 
 typedef struct {
     char name[128], id[128], incarnation[160], harness[32], status[32];
+    int pane;
 } gear_agent;
 
 // The live agents, up to `max`; their count, or -1 with the reason in `error`.
 int gear_agents_list(gear_agent *out, int max, char *error, size_t error_size);
-// The live agent called `name`. False with the reason in `error`.
+// The live agent called `name`, or else the one running in a tab titled `name`. False with the
+// reason in `error`.
 bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t error_size);
 // Sends `text` to the agent as a prompt and asks for its final reply, under a new request id
 // written to `request_id`. False with the reason in `error`.

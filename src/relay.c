@@ -4,7 +4,7 @@
 typedef struct item { struct item *next; char *text; bool failed; } item;  // a message, or a reply
 
 struct gear_relay {
-    gear_agent agent;
+    char name[128];
     SDL_Thread *thread;
     SDL_Mutex *lock;
     SDL_Condition *wake;
@@ -46,7 +46,12 @@ static int run(void *user) {
         r->outbox = m->next;
         SDL_UnlockMutex(r->lock);
         char id[37], error[512];
-        bool sent = gear_agent_send(&r->agent, m->text, id, error, sizeof error);
+        // Whatever runs under the name now; a send refused because it restarted in between is tried
+        // once more with a fresh look.
+        gear_agent agent;
+        bool sent = false;
+        for (int attempt = 0; attempt < 2 && !sent; attempt++)
+            sent = gear_agent_find(r->name, &agent, error, sizeof error) && gear_agent_send(&agent, m->text, id, error, sizeof error);
         SDL_free(m->text);
         SDL_free(m);
         if (!sent) { deliver(r, SDL_strdup(error), true); continue; }
@@ -62,9 +67,9 @@ static int run(void *user) {
     }
 }
 
-gear_relay *gear_relay_new(const gear_agent *agent) {
+gear_relay *gear_relay_new(const char *name) {
     gear_relay *r = SDL_calloc(1, sizeof *r);
-    r->agent = *agent;
+    SDL_strlcpy(r->name, name, sizeof r->name);
     r->lock = SDL_CreateMutex();
     r->wake = SDL_CreateCondition();
     r->thread = SDL_CreateThread(run, "gear-relay", r);

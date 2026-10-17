@@ -353,7 +353,7 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     if (o->to) {
         gear_agent agent;
         if (!gear_agent_find(o->to, &agent, error, error_size)) return false;
-        a->relay = gear_relay_new(&agent);
+        a->relay = gear_relay_new(agent.name);
         SDL_snprintf(a->target, sizeof a->target, "→ %s (%s)", agent.name, agent.harness);
     } else SDL_strlcpy(a->target, "→ nobody: each message is read back", sizeof a->target);
     const SDL_AudioSpec spec = { SDL_AUDIO_F32, 1, GEAR_RATE };

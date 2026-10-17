@@ -210,7 +210,7 @@ static void test_agent_round_trip(const char *name) {
     gear_agent a;
     CHECK(gear_agent_find(name, &a, error, sizeof error));
     if (!a.id[0]) { fprintf(stderr, "%s\n", error); return; }
-    gear_relay *r = gear_relay_new(&a);
+    gear_relay *r = gear_relay_new(a.name);
     gear_relay_send(r, "Reply with exactly the word ready.");
     char *reply = NULL;
     bool failed = false;
