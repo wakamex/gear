@@ -13,6 +13,7 @@ The spoken loop runs end to end on the CPU, from microphone to message and from 
 - Interrupting: when the user starts talking during a reply, the reply stops. In the tests, talking is detected 60 ms after the speech begins and the player is silent 10 ms later.
 - Echo: with `-Decho=true`, gesso's WebRTC echo canceller is given what gear plays, so a reply through loudspeakers is not taken for the user talking. In the tests, where the microphone hears the reply at half its level 100 ms late as well as the user, the reply plays on until the user talks; without the canceller it cuts itself off 0.4 to 0.5 s in. Without `-Decho`, use headphones.
 - Agents: messages go to a coding agent through [Wakterm](https://github.com/wakamex/wakterm)'s Agent API, and the agent's final reply comes back to be read aloud. `wakterm cli agent catalog` lists the agents, `wakterm cli agent admit --return-final` gives one a message, with its text on standard input so it never shows in the process list, and `wakterm cli agent request get` returns the reply once the agent has finished. Wakterm knows each harness (Claude Code, Codex and the others it supports), so gear has no logic for any one agent. A relay thread sends messages in order and asks for each reply twice a second; a one-sentence answer from a Claude agent came back 3.1 s after sending.
+- Reading replies: a reply is turned into what is worth hearing before it is spoken, by fixed rules. Code blocks and tables are named rather than read ("A code block of 6 lines.", "A table of 2 rows."), Markdown's marks are dropped, links are read as their text and bare addresses as their site ("a github.com link"), paths as their file's name, snake_case as words, and headings and list items become sentences. Past 1,200 characters, about a minute and a quarter of speech, the reading stops at a sentence and says the rest is not read. `gear read` prints what would be said of a reply.
 - Models: `gear fetch` downloads the three model files, 235 MB in all, from Hugging Face at pinned commits, resuming a broken download and keeping a file only when its size and SHA-256 match the published ones.
 
 | File | What it is | Size |
@@ -21,7 +22,7 @@ The spoken loop runs end to end on the CPU, from microphone to message and from 
 | `pocket-tts-english_2026-09-Q8_0.gguf` | Kyutai [Pocket TTS](https://github.com/kyutai-labs/pocket-tts), English speech synthesis (CC-BY-4.0) | 138 MB |
 | `alba.safetensors` | Kyutai's alba voice for Pocket TTS (CC-BY-4.0) | 6 MB |
 
-Not built yet: the window, turning a reply into something worth hearing (until then code blocks and Markdown are read as written), and sending to a terminal pane that runs no agent.
+Not built yet: the window, and sending to a terminal pane that runs no agent.
 
 ## Build and run
 
@@ -34,6 +35,7 @@ gear fetch                                   # the models, into gear's folder in
 gear agents                                  # the agents Wakterm can reach
 gear listen --to AGENT                       # talk to AGENT; its replies are read aloud
 gear send --to AGENT "Some message."         # one message, its reply printed
+gear read - < reply.md                       # what would be read aloud of a reply
 gear listen --speak-back                     # no agent: each message is printed and read back
 ```
 

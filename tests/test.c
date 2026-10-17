@@ -11,6 +11,7 @@
 #include "relay.h"
 #include "pipeline.h"
 #include "say.h"
+#include "speakable.h"
 #include "wav.h"
 
 static int failures;
@@ -222,11 +223,43 @@ static void test_agent_round_trip(const char *name) {
     SDL_free(reply);
 }
 
+static void speaks(const char *reply, size_t limit, const char *expected) {
+    char *got = gear_speakable(reply, limit);
+    if (SDL_strcmp(got, expected)) {
+        fprintf(stderr, "speakable:\n  reply:    %s\n  expected: %s\n  got:      %s\n", reply, expected, got);
+        failures++;
+    }
+    SDL_free(got);
+}
+
+static void test_speakable(void) {
+    speaks("I found the bug in `src/listen.c`. See https://github.com/wakamex/gesso/pull/12 for details.", 0,
+           "I found the bug in listen.c. See a github.com link for details.");
+    speaks("Here is the fix:\n\n```c\nint a;\nint b;\n```\n\nWant me to commit it?", 0,
+           "Here is the fix: A code block of 2 lines. Want me to commit it?");
+    speaks("```\nls -la\n```", 0, "A one-line code block.");
+    speaks("Results:\n\n| Model | WER |\n|---|---|\n| a | 1% |\n| b | 2% |\n\nDone.", 0, "Results: A table of 2 rows. Done.");
+    speaks("Next steps:\n- Fix the **countdown**\n- Run `zig build test`\n1. Commit it", 0,
+           "Next steps: Fix the countdown. Run zig build test. Commit it.");
+    speaks("## Summary\nAll tests pass", 0, "Summary. All tests pass.");
+    speaks("Call `gear_listen_new` and then gs_voice_frame.", 0, "Call gear listen new and then gs voice frame.");
+    speaks("Keep it and/or drop half of 1/2.", 0, "Keep it and/or drop half of 1/2.");
+    speaks("[The README](README.md) explains it, and *so* does _the brief_.", 0, "The README explains it, and so does the brief.");
+    speaks("It was in ~/.config/gear/settings.json and C:\\Users\\me\\gear.exe", 0, "It was in settings.json and gear.exe.");
+    speaks("First line\nsecond line of the same paragraph.\n\nNew paragraph", 0,
+           "First line second line of the same paragraph. New paragraph.");
+    speaks("> quoted advice\n\n---\n\n- [x] done item", 0, "quoted advice. done item.");
+    speaks("One. Two. Three. Four.", 10, "One. Two. The rest is not read aloud.");
+    speaks("It prints `Hello, world!`.", 0, "It prints Hello, world!");
+    speaks("", 0, "");
+}
+
 int main(int argc, char **argv) {
     const char *data = argc > 1 ? argv[1] : "tests";
     SDL_Init(SDL_INIT_AUDIO);
     char *tmp = SDL_GetPrefPath("wakamex", "gear-tests");
     test_listen();
+    test_speakable();
     test_wav(tmp);
     test_agent_refused();
     const char *agent = SDL_getenv("GEAR_AGENT");

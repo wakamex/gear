@@ -12,9 +12,12 @@
 #include "pipeline.h"
 #include "relay.h"
 #include "say.h"
+#include "speakable.h"
 #include "wav.h"
 
-enum { MIX_RATE = 48000, MIX_STEP = MIX_RATE / 100 };  // the mix, rendered 10 ms at a time offline
+enum { MIX_RATE = 48000, MIX_STEP = MIX_RATE / 100 };
+// The most of a reply read aloud, in characters of speakable text: about a minute and a quarter.
+enum { READ_LIMIT = 1200 };  // the mix, rendered 10 ms at a time offline
 
 static const char usage[] =
     "usage: gear fetch                         download the models\n"
@@ -22,6 +25,7 @@ static const char usage[] =
     "       gear listen --to AGENT             talk to AGENT; its replies are read aloud\n"
     "       gear listen [--speak-back]         talk; each message is printed, and read back with --speak-back\n"
     "       gear send --to AGENT TEXT          send TEXT to AGENT and print its reply\n"
+    "       gear read TEXT|-                   what would be read aloud of a reply (- reads standard input)\n"
     "       gear hear FILE.wav                 the pipeline on a recording, as if spoken\n"
     "       gear say TEXT OUT.wav              speak TEXT through the player, recorded to OUT.wav\n"
     "       gear interrupt TEXT MIC.wav OUT.wav  speak TEXT while MIC.wav plays as the microphone\n"
@@ -104,6 +108,24 @@ static int send_text(const char *text) {
     return 0;
 }
 
+static int read_text(const char *text) {
+    char *input = NULL;
+    if (!SDL_strcmp(text, "-")) {
+        size_t len = 0, cap = 4096;
+        input = SDL_malloc(cap);
+        for (size_t n; (n = fread(input + len, 1, cap - len - 1, stdin)) > 0;) {
+            len += n;
+            if (len + 1 == cap) input = SDL_realloc(input, cap *= 2);
+        }
+        input[len] = 0;
+    }
+    char *spoken = gear_speakable(input ? input : text, READ_LIMIT);
+    printf("%s\n", spoken);
+    SDL_free(spoken);
+    SDL_free(input);
+    return 0;
+}
+
 // The live loop: the microphone into the pipeline, messages printed and, with --speak-back, read back.
 static int listen_live(void) {
     const char *dir = models();
@@ -157,7 +179,9 @@ static int listen_live(void) {
             if (failed) { fprintf(stderr, "gear: %s\n", error); break; }
             printf("%s\n", reply);
             fflush(stdout);
-            gear_say_speak(say, reply);
+            char *spoken = gear_speakable(reply, READ_LIMIT);
+            gear_say_speak(say, spoken);
+            SDL_free(spoken);
             SDL_free(reply);
         }
         SDL_Delay(10);
@@ -304,7 +328,7 @@ int main(int argc, char **argv) {
         else if (!SDL_strcmp(argv[i], "--speak-back")) opt.speak_back = true;
         else if (!SDL_strcmp(argv[i], "--no-echo")) opt.no_echo = true;
         else if (!SDL_strcmp(argv[i], "--to") && i + 1 < argc) opt.to = argv[++i];
-        else if (nargs < 4 && argv[i][0] != '-') args[nargs++] = argv[i];
+        else if (nargs < 4 && (argv[i][0] != '-' || !argv[i][1])) args[nargs++] = argv[i];
         else { fputs(usage, stderr); return 2; }
     }
     if (!nargs) { fputs(usage, stderr); return 2; }
@@ -313,6 +337,7 @@ int main(int argc, char **argv) {
     if (!SDL_strcmp(args[0], "fetch") && nargs == 1) rc = fetch();
     else if (!SDL_strcmp(args[0], "agents") && nargs == 1) rc = agents();
     else if (!SDL_strcmp(args[0], "send") && nargs == 2) rc = send_text(args[1]);
+    else if (!SDL_strcmp(args[0], "read") && nargs == 2) rc = read_text(args[1]);
     else if (!SDL_strcmp(args[0], "listen") && nargs == 1) rc = listen_live();
     else if (!SDL_strcmp(args[0], "hear") && nargs == 2) rc = hear_file(args[1]);
     else if (!SDL_strcmp(args[0], "say") && nargs == 3) rc = say_file(args[1], args[2]);
