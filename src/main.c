@@ -14,6 +14,7 @@
 #include "say.h"
 #include "speakable.h"
 #include "wav.h"
+#include "window.h"
 
 enum { MIX_RATE = 48000, MIX_STEP = MIX_RATE / 100 };
 // The most of a reply read aloud, in characters of speakable text: about a minute and a quarter.
@@ -21,6 +22,8 @@ enum { READ_LIMIT = 1200 };  // the mix, rendered 10 ms at a time offline
 
 static const char usage[] =
     "usage: gear fetch                         download the models\n"
+    "       gear window [--to AGENT]           the window: talk, and hear the replies\n"
+    "       gear window --demo --shot F.png    a picture of the window with a made-up exchange\n"
     "       gear agents                        the agents Wakterm can reach\n"
     "       gear listen --to AGENT             talk to AGENT; its replies are read aloud\n"
     "       gear listen [--speak-back]         talk; each message is printed, and read back with --speak-back\n"
@@ -32,7 +35,7 @@ static const char usage[] =
     "options: --countdown SECONDS (3)  --hear-threads N (1)  --say-threads N (2)  --no-echo\n"
     "models:  GEAR_MODELS, or a models folder in the user's data folder for gear\n";
 
-static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to; } opt = { 3.0, 1, 2, false, false, NULL };
+static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo; } opt = { 3.0, 1, 2, false, false, NULL, NULL, false };
 
 static void progress(void *user, long long received, long long total, double eta) {
     if (eta >= 0) fprintf(stderr, "\r%5.1f%% of %.0f MB, %.0f s left   ", 100.0 * (double)received / (double)total, (double)total / 1e6, eta);
@@ -328,10 +331,17 @@ int main(int argc, char **argv) {
         else if (!SDL_strcmp(argv[i], "--speak-back")) opt.speak_back = true;
         else if (!SDL_strcmp(argv[i], "--no-echo")) opt.no_echo = true;
         else if (!SDL_strcmp(argv[i], "--to") && i + 1 < argc) opt.to = argv[++i];
+        else if (!SDL_strcmp(argv[i], "--shot") && i + 1 < argc) opt.shot = argv[++i];
+        else if (!SDL_strcmp(argv[i], "--demo")) opt.demo = true;
         else if (nargs < 4 && (argv[i][0] != '-' || !argv[i][1])) args[nargs++] = argv[i];
         else { fputs(usage, stderr); return 2; }
     }
-    if (!nargs) { fputs(usage, stderr); return 2; }
+    if (!nargs || !SDL_strcmp(args[0], "window")) {
+        if (nargs > 1) { fputs(usage, stderr); return 2; }
+        const char *dir = opt.demo ? "" : gear_models_dir();
+        gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.shot, opt.demo };
+        return gear_window(&o);
+    }
     if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }
     int rc = 2;
     if (!SDL_strcmp(args[0], "fetch") && nargs == 1) rc = fetch();

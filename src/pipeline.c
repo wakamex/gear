@@ -88,6 +88,19 @@ char *gear_pipeline_poll(gear_pipeline *p) {
     return message;
 }
 
+char *gear_pipeline_take(gear_pipeline *p) {
+    for (char *t; (t = gear_hear_take(p->hear));) {
+        append(p, t);
+        SDL_free(t);
+    }
+    if (!p->len) return NULL;
+    char *message = SDL_strdup(p->text);
+    gear_pipeline_cancel(p);
+    return message;
+}
+
+bool gear_pipeline_pending(const gear_pipeline *p) { return gear_hear_pending(p->hear) > 0; }
+
 const char *gear_pipeline_text(const gear_pipeline *p) { return p->text; }
 bool gear_pipeline_hearing(const gear_pipeline *p) { return gear_listen_in_piece(p->listen); }
 double gear_pipeline_time(const gear_pipeline *p) { return (double)p->frames / 100.0; }

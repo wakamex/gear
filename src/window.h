@@ -1,0 +1,17 @@
+// gear's window: the spoken loop on the microphone and speakers, drawn with gesso's gs_ui in the
+// toolcore-native style. One column: a state line with the target and a
+// microphone meter, the message being said with its countdown, the reply being read, and a status bar.
+#pragma once
+#include <stdbool.h>
+
+typedef struct {
+    const char *models;   // the models folder
+    const char *to;       // the agent messages go to, or NULL to read each message back
+    double countdown;
+    int hear_threads, say_threads;
+    bool no_echo;
+    const char *shot;     // write a picture of the window to this PNG once it has drawn, and exit
+    bool demo;            // show a made-up exchange instead of running the loop (no models needed)
+} gear_window_options;
+
+int gear_window(const gear_window_options *o);  // runs until the window closes; the exit code

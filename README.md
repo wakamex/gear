@@ -2,7 +2,7 @@
 
 gear is a voice front-end for coding agents. You speak to an agent such as [Claude Code](https://www.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex), gear sends the message when you stop talking, reads the reply aloud and listens again, all on your own machine. [BRIEF.md](BRIEF.md) holds the goals the project started from; this README records the decisions made since.
 
-gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies audio, the voice detector and downloads, and [hearsay](../hearsay), which supplies speech recognition and synthesis. It runs from the command line today; its window and the delivery of messages to agents come next.
+gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies the window, audio, the voice detector and downloads, and [hearsay](../hearsay), which supplies speech recognition and synthesis. It runs on Linux and Windows; the Windows build is 6.2 MB with echo cancellation.
 
 ## What works
 
@@ -22,7 +22,10 @@ The spoken loop runs end to end on the CPU, from microphone to message and from 
 | `pocket-tts-english_2026-09-Q8_0.gguf` | Kyutai [Pocket TTS](https://github.com/kyutai-labs/pocket-tts), English speech synthesis (CC-BY-4.0) | 138 MB |
 | `alba.safetensors` | Kyutai's alba voice for Pocket TTS (CC-BY-4.0) | 6 MB |
 
-Not built yet: the window, and sending to a terminal pane that runs no agent.
+- Window: `gear window` draws the loop in the toolcore-native style: the state (LISTENING, HEARING, SENDING, WAITING, SPEAKING, MUTED or STOPPED), the target agent, a microphone meter, the message with its countdown, the reply as written with code and tables boxed as not read, and a status bar that turns rust with a fault. Space mutes, Esc stops the reading or drops the message, Enter sends now, and `+` and `-` change the text size. `gear window --demo --shot F.png` draws a made-up exchange to a picture without a display.
+- Agents on another machine: with `GEAR_WAKTERM_HOST` naming it, gear runs `wakterm` there through `ssh -T`, the message as a quoted argument, since the Windows ssh client never passes on the end of piped input. Each answer is read until it is a whole JSON object, because a session that admitted a prompt can stay open after the command has exited. From Windows, a message with quotes, `&`, `$` and `;` reached a Claude agent on Linux intact and its reply came back in 2.9 s. gear passes `--no-auto-start` to every `wakterm` call, so a client that cannot find the server fails rather than starting a second one.
+
+Not built yet: the reply's sentence being read shown bright, editing a misheard word in the message, changing the target from the window, the tray, and sending to a terminal pane that runs no agent.
 
 ## Build and run
 
@@ -37,6 +40,7 @@ gear listen --to AGENT                       # talk to AGENT; its replies are re
 gear send --to AGENT "Some message."         # one message, its reply printed
 gear read - < reply.md                       # what would be read aloud of a reply
 gear listen --speak-back                     # no agent: each message is printed and read back
+gear window --to AGENT                       # the window; GEAR_WAKTERM_HOST=host reaches agents on another machine
 ```
 
 `GEAR_MODELS` names another folder for the models. Three modes run the same pipeline on recordings, without a microphone or speakers:

@@ -28,5 +28,9 @@ const char *gear_pipeline_text(const gear_pipeline *p);  // the message so far
 double gear_pipeline_countdown(const gear_pipeline *p);  // seconds left before sending, < 0 when not counting
 bool gear_pipeline_hearing(const gear_pipeline *p);      // in a piece of speech now
 void gear_pipeline_cancel(gear_pipeline *p);             // drops the message
+// The message as it stands, sent now rather than when the countdown ends (the Enter key), or NULL
+// when there is none yet. SDL_free it.
+char *gear_pipeline_take(gear_pipeline *p);
+bool gear_pipeline_pending(const gear_pipeline *p);      // pieces heard but not yet transcribed
 double gear_pipeline_time(const gear_pipeline *p);       // seconds of microphone audio so far
 int gear_pipeline_interruptions(const gear_pipeline *p); // replies stopped by talking

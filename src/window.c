@@ -1,0 +1,469 @@
+#include "window.h"
+#include <SDL3/SDL.h>
+#include <stdio.h>
+#include "agent.h"
+#include "gs_draw.h"
+#include "gs_mix.h"
+#include "gs_text.h"
+#include "gs_ui.h"
+#include "gs_voice.h"
+#include "hear.h"
+#include "listen.h"
+#include "models.h"
+#include "pipeline.h"
+#include "relay.h"
+#include "say.h"
+#include "speakable.h"
+
+enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6 };
+
+// toolcore-native's palette.
+static SDL_FColor hex(Uint32 c) { return (SDL_FColor){ (float)(c >> 16 & 255) / 255, (float)(c >> 8 & 255) / 255, (float)(c & 255) / 255, 1 }; }
+#define BACKGROUND hex(0x040506)
+#define PANEL hex(0x0a0908)
+#define RAISED hex(0x121110)
+#define BORDER hex(0x3d3428)
+#define TEXT hex(0xb6aa99)
+#define BRIGHT hex(0xe0e0e0)
+#define DIM hex(0x7a6e5e)
+#define ACCENT hex(0xc4862c)
+#define OK hex(0x6b8f5e)
+#define OVER hex(0xb84a3a)
+#define INPUT hex(0x060504)
+
+// Everything the window shows in one frame, from the live loop or a made-up exchange.
+typedef struct {
+    const char *state;      // LISTENING, HEARING, SENDING, WAITING, SPEAKING, MUTED
+    SDL_FColor state_color;
+    char target[200];
+    float levels[LEVELS];   // the microphone's recent levels, 0 to 1, oldest first
+    bool speech;            // the voice detector hears speech now
+    const char *message;
+    bool pending;           // speech heard and not yet in the message
+    double left, total;     // the countdown, left < 0 when not counting
+    const char *reply;
+    bool speaking;
+    char status[300];
+    bool fault;
+} view;
+
+// ---- Drawing ----
+
+static float px, small;  // the text size and the small size, in points
+
+// A panel: a frame with its title set into the top rule. Returns the inside.
+static gs_rect panel(gs_ui *ui, gs_rect r, const char *title) {
+    gs_ui_fill(ui, r, PANEL);
+    gs_ui_frame(ui, r, BORDER);
+    if (title) {
+        float w = gs_ui_text_width(ui, title, small);
+        gs_rect t = { r.x + 10, r.y - small * 0.7f, w + 8, small * 1.4f };
+        gs_ui_fill(ui, t, BACKGROUND);
+        gs_ui_text(ui, (gs_rect){ t.x + 4, t.y, w, t.h }, title, small, DIM, -1);
+    }
+    return gs_inset(r, 10);
+}
+
+static void state_line(gs_ui *ui, gs_rect r, const view *v) {
+    gs_rect dot = gs_cut_left(&r, 16);
+    gs_ui_circle(ui, dot.x + 5, dot.y + dot.h / 2, 4.5f, v->state_color);
+    gs_rect word = gs_cut_left(&r, gs_ui_text_width(ui, v->state, small) + 18);
+    gs_ui_text(ui, word, v->state, small, v->state_color, -1);
+    // The microphone's meter, at the right: dim bars that turn to text colour while speech is heard.
+    gs_rect meter = gs_cut_right(&r, LEVELS * 5 + 34);
+    gs_rect label = gs_cut_right(&meter, 30);
+    gs_ui_text(ui, label, "mic", small, DIM, 1);
+    for (int i = 0; i < LEVELS; i++) {
+        float h = 2 + 12 * SDL_clamp(v->levels[i], 0, 1);
+        gs_ui_fill(ui, (gs_rect){ meter.x + (float)i * 5, meter.y + meter.h / 2 + 7 - h, 3, h }, v->speech ? TEXT : DIM);
+    }
+    gs_ui_text(ui, r, v->target, small, TEXT, -1);
+}
+
+static float countdown_height(void) { return small * 1.6f; }
+
+static void countdown(gs_ui *ui, gs_rect r, const view *v) {
+    int cells = 10, filled = (int)SDL_ceil(v->left / v->total * cells);
+    for (int i = 0; i < cells; i++) {
+        gs_rect c = { r.x + (float)i * 11, r.y + r.h / 2 - 4, 9, 8 };
+        gs_ui_fill(ui, c, i < filled ? ACCENT : INPUT);
+        if (i >= filled) gs_ui_frame(ui, c, BORDER);
+    }
+    char hint[128];
+    SDL_snprintf(hint, sizeof hint, "sending in %.0f s   enter sends · esc cancels", SDL_ceil(v->left));
+    gs_ui_text(ui, (gs_rect){ r.x + cells * 11 + 10, r.y, r.w - cells * 11 - 10, r.h }, hint, small, DIM, -1);
+}
+
+static float message_height(gs_ui *ui, const view *v, float w) {
+    const char *t = *v->message ? v->message : "say something";
+    return SDL_max(gs_ui_text_height(ui, t, px, w), gs_ui_line_height(ui, px) * 2) + countdown_height() + 4;
+}
+
+static void message(gs_ui *ui, gs_rect r, const view *v) {
+    char text[4200];
+    SDL_snprintf(text, sizeof text, "%s%s", v->message, v->pending ? (*v->message ? " …" : "…") : "");
+    if (*text) gs_ui_text_wrapped(ui, r, text, px, TEXT);
+    else gs_ui_text_wrapped(ui, r, "say something", px, DIM);
+    if (v->left >= 0) countdown(ui, (gs_rect){ r.x, r.y + r.h - countdown_height(), r.w, countdown_height() }, v);
+}
+
+// A box for what the reading skipped: code and tables stay visible, titled as not read.
+static float skipped(gs_ui *ui, gs_rect r, const char *title, const char *lines, int count, bool draw) {
+    int shown = SDL_min(count, 6);
+    float lh = gs_ui_line_height(ui, small), top = lh / 2 + 4, h = 6 + top + 6 + lh * (float)(shown + (count > shown));
+    if (!draw) return h;
+    gs_rect box = { r.x, r.y + 6, r.w, h - 6 };
+    gs_ui_fill(ui, box, RAISED);
+    gs_ui_frame(ui, box, BORDER);
+    float w = gs_ui_text_width(ui, title, small);
+    gs_ui_fill(ui, (gs_rect){ box.x + 8, box.y - lh / 2, w + 8, lh }, RAISED);
+    gs_ui_text(ui, (gs_rect){ box.x + 12, box.y - lh / 2, w, lh }, title, small, DIM, -1);
+    const char *l = lines;
+    for (int i = 0; i < shown; i++) {
+        const char *end = SDL_strchr(l, '\n');
+        size_t n = end ? (size_t)(end - l) : SDL_strlen(l);
+        char line[300];
+        SDL_strlcpy(line, l, SDL_min(n + 1, sizeof line));
+        gs_ui_text(ui, (gs_rect){ box.x + 10, box.y + top + lh * (float)i, box.w - 20, lh }, line, small, DIM, -1);
+        l = end ? end + 1 : l + n;
+    }
+    if (count > shown) gs_ui_text(ui, (gs_rect){ box.x + 10, box.y + top + lh * (float)shown, box.w - 20, lh }, "…", small, DIM, -1);
+    return h;
+}
+
+// The reply as written: paragraphs wrapped, fenced code and tables in boxes. Returns its height.
+typedef struct { gs_ui *ui; gs_rect r; float y; SDL_FColor color; bool draw; } flow;
+
+static void paragraph(flow *f, char *text, size_t *len) {
+    if (!*len) return;
+    text[*len - 1] = 0;  // the last line's break
+    gs_rect at = { f->r.x, f->y, f->r.w, 100000 };
+    f->y += (f->draw ? gs_ui_text_wrapped(f->ui, at, text, px, f->color) : gs_ui_text_height(f->ui, text, px, f->r.w)) + 6;
+    *len = 0;
+}
+
+static void add_line(char *buf, size_t *len, const char *line) {
+    size_t n = SDL_strlen(line);
+    SDL_memcpy(buf + *len, line, n);
+    *len += n;
+    buf[(*len)++] = '\n';
+    buf[*len] = 0;
+}
+
+static float reply(gs_ui *ui, gs_rect r, const char *text, SDL_FColor color, bool draw) {
+    flow f = { ui, r, r.y, color, draw };
+    char *copy = SDL_strdup(text ? text : "");
+    size_t size = SDL_strlen(copy) + 2, plen = 0, blen = 0;
+    char *para = SDL_calloc(1, size), *block = SDL_calloc(1, size);
+    int lines = 0;
+    bool in_code = false;
+    for (char *l = copy, *next; l; l = next) {
+        next = SDL_strchr(l, '\n');
+        if (next) *next++ = 0;
+        const char *t = l;
+        while (*t == ' ') t++;
+        bool fence = !SDL_strncmp(t, "```", 3) || !SDL_strncmp(t, "~~~", 3);
+        if (in_code) {
+            if (fence) {
+                f.y += skipped(ui, (gs_rect){ r.x, f.y, r.w, 0 }, "code, not read", block, lines, draw) + 4;
+                in_code = false, blen = 0, lines = 0;
+            } else add_line(block, &blen, l), lines++;
+            continue;
+        }
+        if (fence) { paragraph(&f, para, &plen); in_code = true; continue; }
+        if (*t == '|') {
+            paragraph(&f, para, &plen);
+            add_line(block, &blen, l), lines++;
+            // The table ends at the first line that is not a row of it.
+            const char *n = next ? next : "";
+            while (*n == ' ') n++;
+            if (*n != '|') {
+                f.y += skipped(ui, (gs_rect){ r.x, f.y, r.w, 0 }, "table, not read", block, lines, draw) + 4;
+                blen = 0, lines = 0;
+            }
+            continue;
+        }
+        if (!*t) { paragraph(&f, para, &plen); continue; }
+        add_line(para, &plen, l);
+    }
+    if (in_code && lines) f.y += skipped(ui, (gs_rect){ r.x, f.y, r.w, 0 }, "code, not read", block, lines, draw);
+    paragraph(&f, para, &plen);
+    SDL_free(copy);
+    SDL_free(para);
+    SDL_free(block);
+    return f.y - r.y;
+}
+
+static void draw(gs_ui *ui, const view *v) {
+    gs_rect all = gs_ui_begin(ui);
+    gs_ui_fill(ui, all, BACKGROUND);
+    gs_rect r = gs_inset(all, 10);
+    state_line(ui, gs_cut_top(&r, 22), v);
+    gs_cut_top(&r, 14);
+    // The status bar at the bottom: facts, or a fault in rust.
+    gs_rect bar = gs_cut_bottom(&r, small * 1.8f);
+    gs_ui_fill(ui, (gs_rect){ bar.x, bar.y, bar.w, 1 }, BORDER);
+    gs_ui_text(ui, (gs_rect){ bar.x, bar.y + 3, bar.w, bar.h - 3 }, v->status, small, v->fault ? OVER : DIM, -1);
+    gs_cut_bottom(&r, 8);
+    float mh = message_height(ui, v, r.w - 20) + 20;
+    gs_rect m = gs_cut_top(&r, mh);
+    message(ui, panel(ui, m, "MESSAGE"), v);
+    gs_cut_top(&r, 16);
+    gs_rect inside = panel(ui, r, "REPLY");
+    gs_ui_clip(ui, &inside);
+    if (v->reply && *v->reply) {
+        // A long reply shows its end, where the reading is going.
+        float h = reply(ui, inside, v->reply, v->speaking ? BRIGHT : TEXT, false);
+        gs_rect at = inside;
+        if (h > inside.h) at.y -= h - inside.h;
+        reply(ui, at, v->reply, v->speaking ? BRIGHT : TEXT, true);
+    } else {
+        gs_ui_text_wrapped(ui, inside, "the agent's reply is read here", px, DIM);
+    }
+    gs_ui_clip(ui, NULL);
+    gs_ui_end(ui);
+}
+
+// ---- The live loop ----
+
+typedef struct {
+    const gear_window_options *o;
+    gs_voice *voice;
+    gear_hear *hear;
+    gear_say *say;
+    gear_relay *relay;
+    gear_pipeline *pipe;
+    SDL_AudioStream *mic;
+    bool muted;
+    char *reply;
+    float levels[LEVELS];
+    float level_sum;
+    int level_frames;
+    char fault[256];
+    char target[200];
+} app;
+
+static void fill(app *a, view *v) {
+    SDL_zerop(v);
+    bool speaking = a->say && gear_say_busy(a->say);
+    double left = gear_pipeline_countdown(a->pipe);
+    bool hearing = gear_pipeline_hearing(a->pipe), pending = gear_pipeline_pending(a->pipe);
+    bool waiting = a->relay && gear_relay_waiting(a->relay);
+    if (a->muted) v->state = "MUTED", v->state_color = OVER;
+    else if (speaking) v->state = "SPEAKING", v->state_color = ACCENT;
+    else if (left >= 0) v->state = "SENDING", v->state_color = ACCENT;
+    else if (hearing || pending) v->state = "HEARING", v->state_color = ACCENT;
+    else if (waiting) v->state = "WAITING", v->state_color = ACCENT;
+    else v->state = "LISTENING", v->state_color = OK;
+    SDL_strlcpy(v->target, a->target, sizeof v->target);
+    SDL_memcpy(v->levels, a->levels, sizeof v->levels);
+    v->speech = hearing;
+    v->message = gear_pipeline_text(a->pipe);
+    v->pending = hearing || pending;
+    v->left = left;
+    v->total = a->o->countdown;
+    v->reply = a->reply;
+    v->speaking = speaking;
+    if (a->fault[0]) {
+        SDL_strlcpy(v->status, a->fault, sizeof v->status);
+        v->fault = true;
+    } else {
+        bool echo = !a->o->no_echo && gs_voice_has_echo();
+        double first = 0;
+        if (a->say) gear_say_last(a->say, &first, NULL);
+        SDL_snprintf(v->status, sizeof v->status, "%s · Parakeet %.2f s a piece · Pocket %.2f s to speech", echo ? "echo cancel on" : "headphones", gear_hear_last_seconds(a->hear), first);
+    }
+}
+
+static void demo(view *v) {
+    SDL_zerop(v);
+    v->state = "SENDING";
+    v->state_color = ACCENT;
+    SDL_strlcpy(v->target, "→ pockettts (claude)", sizeof v->target);
+    float levels[LEVELS] = { 0.2f, 0.5f, 0.8f, 0.4f, 0.1f, 0.05f };
+    SDL_memcpy(v->levels, levels, sizeof levels);
+    v->message = "Fix the countdown so a long pause doesn't send the message, and then run the tests.";
+    v->left = 1.6;
+    v->total = 3;
+    v->reply = "I found the bug. The countdown timer resets whenever the voice detector reports silence, so a long pause never sends the message. I moved the reset into the speech start handler in `src/listen.c`:\n\n```c\nif (l->below < l->p.pause_frames && l->piece_frames < l->p.max_frames)\n    return GEAR_LISTEN_NONE;\n```\n\nAll 14 tests pass. Want me to commit it?";
+    SDL_strlcpy(v->status, "echo cancel on · Parakeet 0.06 s a piece · Pocket 0.14 s to speech", sizeof v->status);
+}
+
+// The microphone's frames into the pipeline, and its level for the meter.
+static void listen_frames(app *a) {
+    float frame[GEAR_FRAME];
+    while (SDL_GetAudioStreamAvailable(a->mic) >= (int)sizeof frame) {
+        SDL_GetAudioStreamData(a->mic, frame, sizeof frame);
+        if (a->muted) continue;
+        float sum = 0;
+        for (int i = 0; i < GEAR_FRAME; i++) sum += frame[i] * frame[i];
+        a->level_sum += sum / GEAR_FRAME;
+        // A bar of the meter every 50 ms, on a scale where -50 dB is empty and -10 dB full.
+        if (++a->level_frames == 5) {
+            float db = 10 * SDL_log10f(a->level_sum / 5 + 1e-10f);
+            SDL_memmove(a->levels, a->levels + 1, sizeof(float) * (LEVELS - 1));
+            a->levels[LEVELS - 1] = SDL_clamp((db + 50) / 40, 0, 1);
+            a->level_sum = 0;
+            a->level_frames = 0;
+        }
+        gear_pipeline_frame(a->pipe, frame);
+    }
+}
+
+static void deliver(app *a, char *message) {
+    printf("> %s\n", message);
+    fflush(stdout);
+    if (a->relay) gear_relay_send(a->relay, message);
+    else {  // no agent: the message is the reply, read back
+        SDL_free(a->reply);
+        a->reply = SDL_strdup(message);
+        gear_say_speak(a->say, message);
+    }
+    SDL_free(message);
+}
+
+static void take_replies(app *a) {
+    char error[512];
+    bool failed;
+    for (char *r; a->relay && ((r = gear_relay_take(a->relay, &failed, error, sizeof error)) || failed);) {
+        if (failed) { SDL_strlcpy(a->fault, error, sizeof a->fault); break; }
+        a->fault[0] = 0;
+        printf("%s\n", r);
+        fflush(stdout);
+        SDL_free(a->reply);
+        a->reply = r;
+        char *spoken = gear_speakable(r, READ_LIMIT);
+        gear_say_speak(a->say, spoken);
+        SDL_free(spoken);
+    }
+}
+
+static bool open_loop(app *a, char *error, size_t error_size) {
+    const gear_window_options *o = a->o;
+    char path[1200], voice[1200];
+    if (!gear_models_present(o->models)) { SDL_snprintf(error, error_size, "The models are not in %s; run gear fetch", o->models); return false; }
+    bool echo = !o->no_echo && gs_voice_has_echo();
+    a->voice = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (echo ? GS_VOICE_ECHO : 0));
+    gear_model_path(o->models, GEAR_MODEL_HEAR, path, sizeof path);
+    if (!(a->hear = gear_hear_open(path, o->hear_threads, error, error_size))) return false;
+    if (!gs_mix_open(MIX_RATE)) { SDL_snprintf(error, error_size, "No playback device: %s", SDL_GetError()); return false; }
+    gear_model_path(o->models, GEAR_MODEL_SAY, path, sizeof path);
+    gear_model_path(o->models, GEAR_MODEL_VOICE, voice, sizeof voice);
+    if (!(a->say = gear_say_open(path, voice, o->say_threads, echo ? a->voice : NULL, error, error_size))) return false;
+    if (o->to) {
+        gear_agent agent;
+        if (!gear_agent_find(o->to, &agent, error, error_size)) return false;
+        a->relay = gear_relay_new(&agent);
+        SDL_snprintf(a->target, sizeof a->target, "→ %s (%s)", agent.name, agent.harness);
+    } else SDL_strlcpy(a->target, "→ nobody: each message is read back", sizeof a->target);
+    const SDL_AudioSpec spec = { SDL_AUDIO_F32, 1, GEAR_RATE };
+    if (!(a->mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, NULL, NULL))) { SDL_snprintf(error, error_size, "No microphone: %s", SDL_GetError()); return false; }
+    SDL_ResumeAudioStreamDevice(a->mic);
+    // The loop runs only once everything it needs is open: without it the window shows STOPPED.
+    gear_listen_params lp = gear_listen_defaults();
+    a->pipe = gear_pipeline_new(a->voice, a->hear, a->say, &lp, o->countdown);
+    return true;
+}
+
+static void close_loop(app *a) {
+    if (a->mic) SDL_DestroyAudioStream(a->mic);
+    gear_pipeline_free(a->pipe);
+    gear_relay_free(a->relay);
+    gear_say_close(a->say);
+    if (a->say) gs_mix_close();
+    gear_hear_close(a->hear);
+    if (a->voice) gs_voice_free(a->voice);
+    SDL_free(a->reply);
+}
+
+int gear_window(const gear_window_options *o) {
+    if (o->shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }
+    SDL_PropertiesID p = SDL_CreateProperties();
+    SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "gear");
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, 560);
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, 480);
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    SDL_SetBooleanProperty(p, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, o->shot != NULL);
+    SDL_Window *win = SDL_CreateWindowWithProperties(p);
+    SDL_DestroyProperties(p);
+    SDL_Renderer *ren = win ? SDL_CreateRenderer(win, NULL) : NULL;
+    if (!ren) { fprintf(stderr, "gear: no window: %s\n", SDL_GetError()); return 1; }
+    // One monospace font, shipped beside the program, before the system's for what it lacks.
+    gs_fontset *fonts = gs_fontset_system();
+    char font[1100];
+    SDL_snprintf(font, sizeof font, "%sClankerMono-Regular.ttf", SDL_GetBasePath());
+    gs_fontset_prepend(fonts, font);
+    gs_ui *ui = gs_ui_new(win, ren, fonts);
+    gs_ui_style *st = gs_ui_style_of(ui);
+    st->background = BACKGROUND, st->panel = PANEL, st->raised = RAISED, st->text = TEXT, st->muted = DIM;
+    st->accent = ACCENT, st->border = BORDER, st->warning = OVER, st->radius = 0;
+    px = 15;
+    app a = { .o = o };
+    view v;
+    if (!o->demo) {
+        char error[512] = "";
+        if (!open_loop(&a, error, sizeof error)) SDL_strlcpy(a.fault, error, sizeof a.fault);
+    }
+    int code = 0, frames = 0;
+    Uint64 drawn = 0;
+    for (bool running = true; running;) {
+        SDL_Event e;
+        if (SDL_WaitEventTimeout(&e, 10)) {
+            do {
+                if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
+                gs_ui_event(ui, &e);
+            } while (SDL_PollEvent(&e));
+        }
+        if (a.pipe) {
+            listen_frames(&a);
+            char *message = gear_pipeline_poll(a.pipe);
+            if (message) deliver(&a, message);
+            take_replies(&a);
+        }
+        // Drawn twenty times a second: the meter and countdown move by themselves.
+        if (SDL_GetTicks() - drawn < 50 && !o->shot) continue;
+        drawn = SDL_GetTicks();
+        small = SDL_roundf(px * 0.8f);
+        st->text_px = px, st->small_px = small;
+        if (o->demo || !a.pipe) {
+            if (o->demo) demo(&v);
+            else {
+                SDL_zero(v);
+                v.state = "STOPPED", v.state_color = OVER, v.message = "", v.left = -1, v.fault = true;
+                SDL_strlcpy(v.status, a.fault, sizeof v.status);
+            }
+        } else fill(&a, &v);
+        SDL_SetRenderDrawColorFloat(ren, BACKGROUND.r, BACKGROUND.g, BACKGROUND.b, 1);
+        SDL_RenderClear(ren);
+        draw(ui, &v);
+        if (a.pipe) {  // the keys, after the frame has seen them
+            if (gs_ui_key(ui, SDLK_SPACE, 0)) {
+                a.muted = !a.muted;
+                a.muted ? SDL_PauseAudioStreamDevice(a.mic) : SDL_ResumeAudioStreamDevice(a.mic);
+            }
+            if (gs_ui_key(ui, SDLK_ESCAPE, 0)) {
+                if (gear_say_busy(a.say)) gear_say_stop(a.say);
+                else gear_pipeline_cancel(a.pipe);
+            }
+            if (gs_ui_key(ui, SDLK_RETURN, 0)) {
+                char *message = gear_pipeline_take(a.pipe);
+                if (message) deliver(&a, message);
+            }
+        }
+        if (gs_ui_key(ui, SDLK_EQUALS, 0) || gs_ui_key(ui, SDLK_PLUS, 0) || gs_ui_key(ui, SDLK_KP_PLUS, 0)) px = SDL_min(px + 1, 28);
+        if (gs_ui_key(ui, SDLK_MINUS, 0) || gs_ui_key(ui, SDLK_KP_MINUS, 0)) px = SDL_max(px - 1, 10);
+        if (o->shot && ++frames >= 3 && gs_ui_wait_ms(ui) != 0) {
+            code = gs_draw_save_png(ren, o->shot) ? 0 : 1;
+            running = false;
+        }
+        SDL_RenderPresent(ren);
+    }
+    close_loop(&a);
+    gs_ui_free(ui);
+    gs_fontset_free(fonts);
+    SDL_DestroyRenderer(ren);
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    return code;
+}

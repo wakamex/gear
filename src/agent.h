@@ -1,5 +1,5 @@
 // Coding agents reached through Wakterm's Agent API, by running the wakterm command (GEAR_WAKTERM
-// names another): its catalog for the agents there are, `agent admit --return-final` to send a
+// names another; GEAR_WAKTERM_HOST runs it on another machine through ssh): its catalog for the agents there are, `agent admit --return-final` to send a
 // message as a prompt, and `agent request get` for the agent's final reply to it. Wakterm knows each
 // harness (Claude Code, Codex, ...), so gear has no logic for any one agent. Each call starts a
 // process and waits for it: call these from a worker thread or a command-line mode.

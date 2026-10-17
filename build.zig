@@ -5,7 +5,7 @@
 const std = @import("std");
 
 const flags: []const []const u8 = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-missing-field-initializers" };
-const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "speakable.c" };
+const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "speakable.c", "window.c" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -21,6 +21,9 @@ pub fn build(b: *std.Build) void {
     mod.linkLibrary(hearsay);
     const exe = b.addExecutable(.{ .name = "gear", .root_module = mod });
     b.installArtifact(exe);
+    // The window's font, Clanker Mono (D2Coding's glyphs, under the SIL Open Font License), beside the program.
+    b.installBinFile("assets/ClankerMono-Regular.ttf", "ClankerMono-Regular.ttf");
+    b.installBinFile("assets/ClankerMono-LICENSE.txt", "ClankerMono-LICENSE.txt");
 
     const tests = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true });
     tests.addCSourceFiles(.{ .root = b.path("src"), .files = sources, .flags = flags });
