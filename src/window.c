@@ -201,10 +201,15 @@ static void draw(gs_ui *ui, const view *v) {
     gs_rect r = gs_inset(all, 10);
     state_line(ui, gs_cut_top(&r, 22), v);
     gs_cut_top(&r, 14);
-    // The status bar at the bottom: facts, or a fault in rust.
-    gs_rect bar = gs_cut_bottom(&r, small * 1.8f);
+    // The status bar at the bottom: facts a line each (the models, then the rest), or a fault in rust.
+    const char *second = SDL_strchr(v->status, '\n');
+    float line = small * 1.5f;
+    gs_rect bar = gs_cut_bottom(&r, line * (second ? 2 : 1) + 4);
     gs_ui_fill(ui, (gs_rect){ bar.x, bar.y, bar.w, 1 }, BORDER);
-    gs_ui_text(ui, (gs_rect){ bar.x, bar.y + 3, bar.w, bar.h - 3 }, v->status, small, v->fault ? OVER : DIM, -1);
+    char first[300];
+    SDL_strlcpy(first, v->status, second ? SDL_min((size_t)(second - v->status) + 1, sizeof first) : sizeof first);
+    gs_ui_text(ui, (gs_rect){ bar.x, bar.y + 4, bar.w, line }, first, small, v->fault ? OVER : DIM, -1);
+    if (second) gs_ui_text(ui, (gs_rect){ bar.x, bar.y + 4 + line, bar.w, line }, second + 1, small, DIM, -1);
     gs_cut_bottom(&r, 8);
     float mh = message_height(ui, v, r.w - 20) + 20;
     gs_rect m = gs_cut_top(&r, mh);
@@ -246,6 +251,7 @@ typedef struct {
     float *raw, *clean;
     int kept_at;
     Uint64 speaking_since;  // when the current reading started to play, or 0
+    char hear_slug[96], say_slug[96], voice_slug[64];  // the model files in use, without their extensions
 } app;
 
 static void fill(app *a, view *v) {
@@ -276,7 +282,7 @@ static void fill(app *a, view *v) {
         bool echo = !a->o->no_echo && gs_voice_has_echo();
         double first = 0;
         if (a->say) gear_say_last(a->say, &first, NULL);
-        SDL_snprintf(v->status, sizeof v->status, "%s · Parakeet %.2f s a piece · Pocket %.2f s to speech", echo ? "echo cancel on" : "headphones", gear_hear_last_seconds(a->hear), first);
+        SDL_snprintf(v->status, sizeof v->status, "hear %s · say %s, %s\n%s · %.2f s a piece", a->hear_slug, a->say_slug, a->voice_slug, echo ? "echo cancel on" : "headphones", gear_hear_last_seconds(a->hear));
     }
 }
 
@@ -291,7 +297,7 @@ static void demo(view *v) {
     v->left = 1.6;
     v->total = 3;
     v->reply = "I found the bug. The countdown timer resets whenever the voice detector reports silence, so a long pause never sends the message. I moved the reset into the speech start handler in `src/listen.c`:\n\n```c\nif (l->below < l->p.pause_frames && l->piece_frames < l->p.max_frames)\n    return GEAR_LISTEN_NONE;\n```\n\nAll 14 tests pass. Want me to commit it?";
-    SDL_strlcpy(v->status, "echo cancel on · Parakeet 0.06 s a piece · Pocket 0.14 s to speech", sizeof v->status);
+    SDL_strlcpy(v->status, "hear parakeet-tdt_ctc-110m-Q4_K_M · say pocket-tts-english_2026-09-Q8_0, alba\necho cancel on · 0.06 s a piece", sizeof v->status);
 }
 
 // A reading stopped by talking: logged, and with GEAR_DEBUG the last seconds the microphone heard are
@@ -371,6 +377,13 @@ static void take_replies(app *a) {
     }
 }
 
+// A model file's name without its extension: parakeet-tdt_ctc-110m-Q4_K_M.gguf reads parakeet-tdt_ctc-110m-Q4_K_M.
+static void slug(char *out, size_t size, const char *file) {
+    SDL_strlcpy(out, file, size);
+    char *dot = SDL_strrchr(out, '.');
+    if (dot) *dot = 0;
+}
+
 static bool open_loop(app *a, char *error, size_t error_size) {
     const gear_window_options *o = a->o;
     char path[1200], voice[1200];
@@ -395,6 +408,9 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     a->raw = SDL_calloc(KEPT, sizeof(float));
     a->clean = SDL_calloc(KEPT, sizeof(float));
     // The loop runs only once everything it needs is open: without it the window shows STOPPED.
+    slug(a->hear_slug, sizeof a->hear_slug, gear_model_info(GEAR_MODEL_HEAR)->name);
+    slug(a->say_slug, sizeof a->say_slug, gear_model_info(GEAR_MODEL_SAY)->name);
+    slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(GEAR_MODEL_VOICE)->name);
     gear_listen_params lp = gear_listen_defaults();
     a->pipe = gear_pipeline_new(a->voice, a->hear, a->say, &lp, o->countdown);
     if (!o->no_keep) {
