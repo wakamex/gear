@@ -14,8 +14,9 @@
 #include "relay.h"
 #include "say.h"
 #include "speakable.h"
+#include "wav.h"
 
-enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6 };
+enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6, KEPT = 4 * GEAR_RATE };  // KEPT: microphone audio kept for a report
 
 // toolcore-native's palette.
 static SDL_FColor hex(Uint32 c) { return (SDL_FColor){ (float)(c >> 16 & 255) / 255, (float)(c >> 8 & 255) / 255, (float)(c & 255) / 255, 1 }; }
@@ -241,6 +242,10 @@ typedef struct {
     int level_frames;
     char fault[256];
     char target[200];
+    // The last KEPT samples heard, as recorded and as cleaned, for a report of an interruption.
+    float *raw, *clean;
+    int kept_at;
+    Uint64 speaking_since;  // when the current reading started to play, or 0
 } app;
 
 static void fill(app *a, view *v) {
@@ -289,6 +294,29 @@ static void demo(view *v) {
     SDL_strlcpy(v->status, "echo cancel on · Parakeet 0.06 s a piece · Pocket 0.14 s to speech", sizeof v->status);
 }
 
+// A reading stopped by talking: logged, and with GEAR_DEBUG the last seconds the microphone heard are
+// written beside the log, as recorded and as cleaned, to tell the user's voice from the reply's echo.
+static void write_kept(const float *ring, int at, const char *path) {
+    float *line = SDL_malloc(KEPT * sizeof(float));
+    SDL_memcpy(line, ring + at, (size_t)(KEPT - at) * sizeof(float));
+    SDL_memcpy(line + (KEPT - at), ring, (size_t)at * sizeof(float));
+    gear_wav_write(path, line, KEPT, 1, GEAR_RATE);
+    SDL_free(line);
+}
+
+static void report_interruption(app *a) {
+    double into = a->speaking_since ? (double)(SDL_GetTicks() - a->speaking_since) / 1000 : -1;
+    printf("[the reading stopped %.1f s in: talking heard, speech %.2f, echo cancel %s]\n", into, gs_voice_speech(a->voice), !a->o->no_echo && gs_voice_has_echo() ? "on" : "off");
+    fflush(stdout);
+    if (!SDL_getenv("GEAR_DEBUG")) return;
+    char path[1200];
+    Uint64 t = SDL_GetTicks();
+    SDL_snprintf(path, sizeof path, "%sinterrupted-%llu-raw.wav", SDL_GetBasePath(), (unsigned long long)t);
+    write_kept(a->raw, a->kept_at, path);
+    SDL_snprintf(path, sizeof path, "%sinterrupted-%llu-clean.wav", SDL_GetBasePath(), (unsigned long long)t);
+    write_kept(a->clean, a->kept_at, path);
+}
+
 // The microphone's frames into the pipeline, and its level for the meter.
 static void listen_frames(app *a) {
     float frame[GEAR_FRAME];
@@ -306,7 +334,12 @@ static void listen_frames(app *a) {
             a->level_sum = 0;
             a->level_frames = 0;
         }
+        SDL_memcpy(a->raw + a->kept_at, frame, sizeof frame);
+        int before = gear_pipeline_interruptions(a->pipe);
         gear_pipeline_frame(a->pipe, frame);
+        SDL_memcpy(a->clean + a->kept_at, frame, sizeof frame);
+        a->kept_at = (a->kept_at + GEAR_FRAME) % KEPT;
+        if (gear_pipeline_interruptions(a->pipe) > before) report_interruption(a);
     }
 }
 
@@ -359,6 +392,8 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     const SDL_AudioSpec spec = { SDL_AUDIO_F32, 1, GEAR_RATE };
     if (!(a->mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, NULL, NULL))) { SDL_snprintf(error, error_size, "No microphone: %s", SDL_GetError()); return false; }
     SDL_ResumeAudioStreamDevice(a->mic);
+    a->raw = SDL_calloc(KEPT, sizeof(float));
+    a->clean = SDL_calloc(KEPT, sizeof(float));
     // The loop runs only once everything it needs is open: without it the window shows STOPPED.
     gear_listen_params lp = gear_listen_defaults();
     a->pipe = gear_pipeline_new(a->voice, a->hear, a->say, &lp, o->countdown);
@@ -374,6 +409,8 @@ static void close_loop(app *a) {
     gear_hear_close(a->hear);
     if (a->voice) gs_voice_free(a->voice);
     SDL_free(a->reply);
+    SDL_free(a->raw);
+    SDL_free(a->clean);
 }
 
 int gear_window(const gear_window_options *o) {
@@ -383,10 +420,18 @@ int gear_window(const gear_window_options *o) {
     SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "gear");
     SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, 560);
     SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, 480);
-    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
+    SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (o->shot ? 0 : SDL_WINDOW_HIDDEN));
     SDL_SetBooleanProperty(p, SDL_PROP_WINDOW_CREATE_EXTERNAL_GRAPHICS_CONTEXT_BOOLEAN, o->shot != NULL);
     SDL_Window *win = SDL_CreateWindowWithProperties(p);
     SDL_DestroyProperties(p);
+    // The window comes back where it was and as large, from a file in gear's data folder.
+    char placed_path[1100] = "";
+    gs_window_state placed = { 0 };
+    Uint64 placed_changed = 0;  // when it last moved or changed size without being saved; 0 when saved
+    char *pref = o->shot ? NULL : SDL_GetPrefPath("wakamex", "gear");
+    if (pref) SDL_snprintf(placed_path, sizeof placed_path, "%swindow.txt", pref), SDL_free(pref);
+    if (win && placed_path[0] && gs_window_state_load(placed_path, &placed)) gs_window_state_apply(&placed, win);
+    if (win && !o->shot) SDL_ShowWindow(win);
     SDL_Renderer *ren = win ? SDL_CreateRenderer(win, NULL) : NULL;
     if (!ren) { fprintf(stderr, "gear: no window: %s\n", SDL_GetError()); return 1; }
     // One monospace font, shipped beside the program, before the system's for what it lacks.
@@ -412,6 +457,7 @@ int gear_window(const gear_window_options *o) {
         if (SDL_WaitEventTimeout(&e, 10)) {
             do {
                 if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
+                if (placed_path[0] && gs_window_state_track(&placed, win, &e)) placed_changed = SDL_max(SDL_GetTicks(), 1);
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
@@ -420,7 +466,12 @@ int gear_window(const gear_window_options *o) {
             char *message = gear_pipeline_poll(a.pipe);
             if (message) deliver(&a, message);
             take_replies(&a);
+            bool reading = gear_say_busy(a.say);
+            if (reading && !a.speaking_since) a.speaking_since = SDL_GetTicks();
+            if (!reading) a.speaking_since = 0;
         }
+        // Its place is saved once the window has rested half a second after moving.
+        if (placed_changed && SDL_GetTicks() - placed_changed >= 500) gs_window_state_save(placed_path, &placed), placed_changed = 0;
         // Drawn twenty times a second: the meter and countdown move by themselves.
         if (SDL_GetTicks() - drawn < 50 && !o->shot) continue;
         drawn = SDL_GetTicks();
@@ -459,6 +510,7 @@ int gear_window(const gear_window_options *o) {
         }
         SDL_RenderPresent(ren);
     }
+    if (placed_changed) gs_window_state_save(placed_path, &placed);
     close_loop(&a);
     gs_ui_free(ui);
     gs_fontset_free(fonts);
