@@ -94,10 +94,13 @@ The aim was the smallest CPU, memory and download cost that still recognizes spe
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Parakeet TDT-CTC 110M, Q4_K_M, transcribe.cpp (chosen) | 90 MB | 0.65 s | 0.066 | 0.31 GB | 0.24 s | 2.70% | 5.23% |
 | Parakeet TDT-CTC 110M, int8, [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) | 108 MB | 0.42 s | 0.043 | 0.51 GB | 1.2 s | 2.39% | 5.23% |
+| [parakeet-ft-v1](https://huggingface.co/freetranscribe/parakeet-ft-v1) (a long-form fine-tune of v3), Q4_K_M, transcribe.cpp | 485 MB | 3.14 s | 0.306 | 1.08 GB | 1.2 s | 2.10% | 3.61% |
 | Parakeet TDT 0.6B v3 (25 languages), int8, sherpa-onnx | 640 MB | 1.83 s | 0.185 | 1.38 GB | 3.1 s | 2.68% | 4.69% |
 | [Parakeet Redux](https://huggingface.co/moondream/parakeet-redux) (v3 with ternary weights), transcribe.cpp | 159 MB | 2.76 s | 0.279 | 0.63 GB | 0.4 s | 2.43% | 4.52% |
 
 The same 110M model runs on both transcribe.cpp and sherpa-onnx. sherpa-onnx transcribes it faster, at 0.04 CPU-seconds per second of speech instead of 0.07, and finishes 10 seconds of speech 0.23 s sooner. transcribe.cpp uses 0.2 GB less memory, loads five times faster, which matters when gear unloads models while idle, and ships as about 5 MB of code where sherpa-onnx needs 30 MB with [ONNX Runtime](https://onnxruntime.ai/). The extra time falls inside the 3-second countdown before a message is sent.
+
+parakeet-ft-v1 is the most accurate option measured, 0.6 to 1.1 points better than v3 with 95% intervals that exclude zero, at four to five times the 110M model's CPU time and memory. gear runs any Parakeet GGUF in its models folder: `--hear-model FILE` picks one, a click on the model's name in the window's status bar switches to the next, and the choice is remembered. ft-v1 has no published GGUF; transcribe.cpp's `scripts/convert-parakeet.py` converts its NeMo checkpoint (with a variant entry like v3's) and `transcribe-quantize` makes the Q4_K_M file, which transcribes identically to Q8_0 on the sets above.
 
 Recognition for other languages is not decided. Parakeet TDT 0.6B v3 is the measured candidate; transcribe.cpp runs it as well, but only its sherpa-onnx build was timed.
 

@@ -29,3 +29,11 @@ typedef void gear_fetch_progress(void *user, long long received, long long total
 // Downloads what is missing. Waits for the network: call it from a worker or a command-line mode.
 // Setting *stop gives it up. False with the reason in `error` ("stopped" after a stop).
 bool gear_models_fetch(const char *dir, SDL_AtomicInt *stop, gear_fetch_progress *progress, void *user, char *error, size_t error_size);
+
+// Recognition models: any Parakeet GGUF file in the models folder. Their file names, the default
+// first and the rest in order; how many.
+int gear_hear_models(const char *dir, char names[][128], int max);
+// The recognition model to load: `choice` (a file name in the folder, or a path to any GGUF), else
+// the one last chosen there, else the default. Its path goes in `out`, its file name in `name`.
+void gear_hear_model_pick(const char *dir, const char *choice, char *out, size_t size, char *name, size_t name_size);
+void gear_hear_model_remember(const char *dir, const char *name);  // kept in dir/hear-model.txt

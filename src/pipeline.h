@@ -24,6 +24,8 @@ void gear_pipeline_free(gear_pipeline *p);
 // the text `model` heard in it, the seconds that took, its message) and a line per message saying
 // whether it was sent, sent now or dropped. NULL keeps nothing (the default).
 void gear_pipeline_keep(gear_pipeline *p, const char *dir, const char *model);
+// Another recogniser from here on, called `model` in what is kept. The old one is the caller's to close.
+void gear_pipeline_set_hear(gear_pipeline *p, gear_hear *hear, const char *model);
 // One microphone frame of GEAR_FRAME samples at 16 kHz, cleaned in place.
 void gear_pipeline_frame(gear_pipeline *p, float *frame);
 // Collects finished transcriptions. Returns the message when its countdown has run out (SDL_free it),

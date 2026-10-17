@@ -161,3 +161,47 @@ bool gear_models_fetch(const char *dir, SDL_AtomicInt *stop, gear_fetch_progress
     gs_eta_free(s.eta);
     return ok;
 }
+
+int gear_hear_models(const char *dir, char names[][128], int max) {
+    int count = 0, n = 0;
+    char **found = SDL_GlobDirectory(dir, "parakeet*.gguf", 0, &count);
+    if (max > 0) SDL_strlcpy(names[n++], files[GEAR_MODEL_HEAR].name, 128);
+    for (int i = 0; found && i < count && n < max; i++)
+        if (SDL_strcmp(found[i], files[GEAR_MODEL_HEAR].name)) SDL_strlcpy(names[n++], found[i], 128);
+    SDL_free(found);
+    // The rest in name order, so switching goes round them the same way each time.
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 1 && SDL_strcmp(names[j - 1], names[j]) > 0; j--) {
+            char t[128];
+            SDL_memcpy(t, names[j], 128), SDL_memcpy(names[j], names[j - 1], 128), SDL_memcpy(names[j - 1], t, 128);
+        }
+    return n;
+}
+
+void gear_hear_model_remember(const char *dir, const char *name) {
+    char path[1200];
+    SDL_snprintf(path, sizeof path, "%s/hear-model.txt", dir);
+    SDL_SaveFile(path, name, SDL_strlen(name));
+}
+
+void gear_hear_model_pick(const char *dir, const char *choice, char *out, size_t size, char *name, size_t name_size) {
+    char remembered[256] = "", path[1200];
+    if (!choice || !*choice) {
+        SDL_snprintf(path, sizeof path, "%s/hear-model.txt", dir);
+        size_t n = 0;
+        char *text = SDL_LoadFile(path, &n);
+        if (text) SDL_strlcpy(remembered, text, SDL_min(n + 1, sizeof remembered)), SDL_free(text);
+        // One that has since been deleted gives way to the default.
+        SDL_snprintf(path, sizeof path, "%s/%s", dir, remembered);
+        if (remembered[0] && file_size(path) > 0) choice = remembered;
+    }
+    if (choice && *choice && (SDL_strchr(choice, '/') || SDL_strchr(choice, '\\'))) {
+        SDL_strlcpy(out, choice, size);
+        const char *a = SDL_strrchr(choice, '/'), *b = SDL_strrchr(choice, '\\');
+        SDL_strlcpy(name, (a > b ? a : b) + 1, name_size);
+        return;
+    }
+    const char *file = choice && *choice ? choice : files[GEAR_MODEL_HEAR].name;
+    SDL_snprintf(out, size, "%s/%s", dir, file);
+    SDL_strlcpy(name, file, name_size);
+}

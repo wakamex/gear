@@ -51,6 +51,7 @@ typedef struct {
 // ---- Drawing ----
 
 static float px, small;  // the text size and the small size, in points
+static gs_rect status_line;  // where the status bar's first line was drawn, for a click on it
 
 // A panel: a frame with its title set into the top rule. Returns the inside.
 static gs_rect panel(gs_ui *ui, gs_rect r, const char *title) {
@@ -208,7 +209,8 @@ static void draw(gs_ui *ui, const view *v) {
     gs_ui_fill(ui, (gs_rect){ bar.x, bar.y, bar.w, 1 }, BORDER);
     char first[300];
     SDL_strlcpy(first, v->status, second ? SDL_min((size_t)(second - v->status) + 1, sizeof first) : sizeof first);
-    gs_ui_text(ui, (gs_rect){ bar.x, bar.y + 4, bar.w, line }, first, small, v->fault ? OVER : DIM, -1);
+    status_line = (gs_rect){ bar.x, bar.y + 4, bar.w, line };
+    gs_ui_text(ui, status_line, first, small, v->fault ? OVER : DIM, -1);
     if (second) gs_ui_text(ui, (gs_rect){ bar.x, bar.y + 4 + line, bar.w, line }, second + 1, small, DIM, -1);
     gs_cut_bottom(&r, 8);
     float mh = message_height(ui, v, r.w - 20) + 20;
@@ -252,6 +254,8 @@ typedef struct {
     int kept_at;
     Uint64 speaking_since;  // when the current reading started to play, or 0
     char hear_slug[96], say_slug[96], voice_slug[64];  // the model files in use, without their extensions
+    char hear_file[128];
+    int hear_at, hear_count;  // its place among the recognition models in the folder, from 1
 } app;
 
 static void fill(app *a, view *v) {
@@ -280,7 +284,9 @@ static void fill(app *a, view *v) {
         v->fault = true;
     } else {
         bool echo = !a->o->no_echo && gs_voice_has_echo();
-        SDL_snprintf(v->status, sizeof v->status, "hear %s · say %s, %s\n%s", a->hear_slug, a->say_slug, a->voice_slug, echo ? "echo cancel on" : "headphones");
+        char which[48] = "";
+        if (a->hear_count > 1) SDL_snprintf(which, sizeof which, " (%d of %d, click to switch)", a->hear_at, a->hear_count);
+        SDL_snprintf(v->status, sizeof v->status, "hear %s%s · say %s, %s\n%s", a->hear_slug, which, a->say_slug, a->voice_slug, echo ? "echo cancel on" : "headphones");
     }
 }
 
@@ -382,14 +388,20 @@ static void slug(char *out, size_t size, const char *file) {
     if (dot) *dot = 0;
 }
 
+static void count_hear(app *a);
+
 static bool open_loop(app *a, char *error, size_t error_size) {
     const gear_window_options *o = a->o;
     char path[1200], voice[1200];
     if (!gear_models_present(o->models)) { SDL_snprintf(error, error_size, "The models are not in %s; run gear fetch", o->models); return false; }
     bool echo = !o->no_echo && gs_voice_has_echo();
     a->voice = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (echo ? GS_VOICE_ECHO : 0));
-    gear_model_path(o->models, GEAR_MODEL_HEAR, path, sizeof path);
+    char hear_name[128];
+    gear_hear_model_pick(o->models, o->hear_model, path, sizeof path, hear_name, sizeof hear_name);
     if (!(a->hear = gear_hear_open(path, o->hear_threads, error, error_size))) return false;
+    slug(a->hear_slug, sizeof a->hear_slug, hear_name);
+    SDL_strlcpy(a->hear_file, hear_name, sizeof a->hear_file);
+    count_hear(a);
     if (!gs_mix_open(MIX_RATE)) { SDL_snprintf(error, error_size, "No playback device: %s", SDL_GetError()); return false; }
     gear_model_path(o->models, GEAR_MODEL_SAY, path, sizeof path);
     gear_model_path(o->models, GEAR_MODEL_VOICE, voice, sizeof voice);
@@ -406,7 +418,6 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     a->raw = SDL_calloc(KEPT, sizeof(float));
     a->clean = SDL_calloc(KEPT, sizeof(float));
     // The loop runs only once everything it needs is open: without it the window shows STOPPED.
-    slug(a->hear_slug, sizeof a->hear_slug, gear_model_info(GEAR_MODEL_HEAR)->name);
     slug(a->say_slug, sizeof a->say_slug, gear_model_info(GEAR_MODEL_SAY)->name);
     slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(GEAR_MODEL_VOICE)->name);
     gear_listen_params lp = gear_listen_defaults();
@@ -415,9 +426,37 @@ static bool open_loop(app *a, char *error, size_t error_size) {
         char heard[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
         SDL_snprintf(heard, sizeof heard, "%sheard", pref ? pref : "");
         SDL_free(pref);
-        gear_pipeline_keep(a->pipe, heard, gear_model_info(GEAR_MODEL_HEAR)->name);
+        gear_pipeline_keep(a->pipe, heard, a->hear_file);
     }
     return true;
+}
+
+static void count_hear(app *a) {
+    char names[16][128];
+    a->hear_count = gear_hear_models(a->o->models, names, 16);
+    a->hear_at = 0;
+    for (int i = 0; i < a->hear_count; i++) if (!SDL_strcmp(names[i], a->hear_file)) a->hear_at = i + 1;
+}
+
+// The next recognition model in the models folder, loaded in place of the one in use and remembered.
+static void switch_hear(app *a) {
+    char names[16][128], path[1200], error[512];
+    int n = gear_hear_models(a->o->models, names, 16), at = 0;
+    if (n < 2) return;
+    for (int i = 0; i < n; i++) if (!SDL_strcmp(names[i], a->hear_file)) at = i;
+    const char *next = names[(at + 1) % n];
+    SDL_snprintf(path, sizeof path, "%s/%s", a->o->models, next);
+    gear_hear *h = gear_hear_open(path, a->o->hear_threads, error, sizeof error);
+    if (!h) { SDL_strlcpy(a->fault, error, sizeof a->fault); return; }
+    gear_hear *old = a->hear;
+    a->hear = h;
+    gear_pipeline_set_hear(a->pipe, h, next);
+    gear_hear_close(old);
+    SDL_strlcpy(a->hear_file, next, sizeof a->hear_file);
+    slug(a->hear_slug, sizeof a->hear_slug, next);
+    gear_hear_model_remember(a->o->models, next);
+    count_hear(a);
+    a->fault[0] = 0;
 }
 
 static void close_loop(app *a) {
@@ -512,6 +551,7 @@ int gear_window(const gear_window_options *o) {
                 if (gear_say_busy(a.say)) gear_say_stop(a.say);
                 else gear_pipeline_cancel(a.pipe);
             }
+            if (gs_ui_clicked(ui, status_line)) switch_hear(&a);
             if (gs_ui_key(ui, SDLK_RETURN, 0)) {
                 char *message = gear_pipeline_take(a.pipe);
                 if (message) deliver(&a, message);

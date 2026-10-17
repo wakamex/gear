@@ -13,6 +13,7 @@ typedef struct {
     bool no_keep;         // do not keep what is heard (see gear_pipeline_keep)
     const char *shot;     // write a picture of the window to this PNG once it has drawn, and exit
     bool demo;            // show a made-up exchange instead of running the loop (no models needed)
+    const char *hear_model;  // a recognition model file or path; NULL for the last chosen
 } gear_window_options;
 
 int gear_window(const gear_window_options *o);  // runs until the window closes; the exit code

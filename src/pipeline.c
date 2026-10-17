@@ -48,6 +48,12 @@ void gear_pipeline_keep(gear_pipeline *p, const char *dir, const char *model) {
     p->message = 1;
 }
 
+void gear_pipeline_set_hear(gear_pipeline *p, gear_hear *hear, const char *model) {
+    p->hear = hear;
+    SDL_strlcpy(p->model, model ? model : "", sizeof p->model);
+    p->pend_count = 0;  // pieces the old recogniser had not finished are not transcribed
+}
+
 static void keep_line(gear_pipeline *p, gs_jval *o) {
     char path[1100];
     SDL_snprintf(path, sizeof path, "%s/heard.jsonl", p->keep);
