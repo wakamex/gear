@@ -1,6 +1,8 @@
 // gear on gesso and hearsay.
 //   zig build                  build zig-out/bin/gear
 //   zig build -Decho=true      with WebRTC's echo canceller in gs_voice, for loudspeakers
+//   zig build -Dgpu=none       CPU only; the default runs the models on the GPU where one is usable,
+//                              and needs the glslc shader compiler to build (-Dglslc=PATH)
 //   zig build test             run the tests (the end-to-end ones need the models; see README)
 const std = @import("std");
 
@@ -12,7 +14,9 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const echo = b.option(bool, "echo", "Give gs_voice WebRTC's echo canceller, for playing replies through loudspeakers") orelse false;
     const gesso = b.dependency("gesso", .{ .target = target, .optimize = optimize, .echo = echo }).artifact("gesso");
-    const hearsay = b.dependency("hearsay", .{ .target = target, .optimize = optimize, .parakeet = true, .pockettts = true }).artifact("hearsay");
+    const gpu = b.option(enum { none, vulkan }, "gpu", "Run the models on a GPU where one is usable, else on the CPU (default vulkan)") orelse .vulkan;
+    const glslc = b.option([]const u8, "glslc", "The glslc shader compiler, for -Dgpu=vulkan (default: glslc on the PATH)") orelse "glslc";
+    const hearsay = b.dependency("hearsay", .{ .target = target, .optimize = optimize, .parakeet = true, .pockettts = true, .gpu = gpu, .glslc = glslc }).artifact("hearsay");
 
     const mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true, .strip = optimize != .debug });
     mod.addCSourceFiles(.{ .root = b.path("src"), .files = sources, .flags = flags });

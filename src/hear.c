@@ -136,3 +136,5 @@ double gear_hear_last_seconds(gear_hear *h) {
     SDL_UnlockMutex(h->lock);
     return s;
 }
+
+const char *gear_hear_device(gear_hear *h) { return transcribe_model_backend(transcribe_get_model(h->session)); }

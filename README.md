@@ -2,11 +2,11 @@
 
 gear is a voice front-end for coding agents. You speak to an agent such as [Claude Code](https://www.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex), gear sends the message when you stop talking, reads the reply aloud and listens again, all on your own machine. [BRIEF.md](BRIEF.md) holds the goals the project started from; this README records the decisions made since.
 
-gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies the window, audio, the voice detector and downloads, and [hearsay](../hearsay), which supplies speech recognition and synthesis. It runs on Linux and Windows; the Windows build is 6.2 MB with echo cancellation.
+gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies the window, audio, the voice detector and downloads, and [hearsay](../hearsay), which supplies speech recognition and synthesis. It runs on Linux and Windows, on the GPU where one is usable and on the CPU otherwise; the Windows build is 50 MB with echo cancellation, most of it the GPU's compiled shaders, and 6.2 MB built for the CPU only.
 
 ## What works
 
-The spoken loop runs end to end on the CPU, from microphone to message and from reply text to the speakers:
+The spoken loop runs end to end, from microphone to message and from reply text to the speakers:
 
 - Listening: each 10 ms of microphone audio goes through gesso's `gs_voice`, whose voice detector decides when speech starts and stops. Speech is cut into pieces at pauses of half a second, each piece keeping the 0.3 s before its start, and a recognizer thread transcribes each piece with Parakeet as it ends. Pieces add up to one message; once the user has stopped and every piece has its text, a countdown (3 s by default) runs, and talking again stops it.
 - Speaking: a reply is synthesized by Pocket TTS on a thread of its own and played as it is made, through a `gs_stream` in gesso's mix. The first sound plays 0.17 to 0.31 s after the reply is queued.
@@ -29,11 +29,12 @@ Not built yet: the reply's sentence being read shown bright, editing a misheard 
 
 ## Build and run
 
-With [Zig](https://ziglang.org/) 0.17.0, beside a checkout of hearsay in `../hearsay`:
+With [Zig](https://ziglang.org/) 0.17.0, beside a checkout of hearsay in `../hearsay`, and the [glslc](https://github.com/google/shaderc) shader compiler for the GPU build (Fedora's `glslc` package, or `-Dglslc=PATH`):
 
 ```sh
-zig build -Doptimize=ReleaseFast             # zig-out/bin/gear, 5.7 MB on Linux, needing only libc
+zig build -Doptimize=ReleaseFast             # zig-out/bin/gear, 51 MB on Linux, needing only libc
 zig build -Doptimize=ReleaseFast -Decho=true # with echo cancellation, for loudspeakers
+zig build -Doptimize=ReleaseFast -Dgpu=none  # CPU only, 6.7 MB, no glslc needed
 gear fetch                                   # the models, into gear's folder in the user's data folder
 gear agents [NAME]                           # the agents Wakterm can reach, or the one NAME reaches
 gear listen --to AGENT                       # talk to AGENT; its replies are read aloud
@@ -43,7 +44,7 @@ gear listen --speak-back                     # no agent: each message is printed
 gear window --to AGENT                       # the window; GEAR_WAKTERM_HOST=host reaches agents on another machine
 ```
 
-`GEAR_MODELS` names another folder for the models. Three modes run the same pipeline on recordings, without a microphone or speakers:
+`--cpu` keeps the models on the CPU in a GPU build. `GEAR_MODELS` names another folder for the models. Three modes run the same pipeline on recordings, without a microphone or speakers:
 
 ```sh
 gear hear speech.wav                         # messages as they would be sent, with their times
@@ -113,6 +114,27 @@ Accuracy used every tenth utterance of test-clean (262 utterances, 5,521 words) 
 Versions: transcribe.cpp at commit `90cd63d`, a CPU build whose command-line program, with every model family it supports, is 5.2 MB; sherpa-onnx 1.13.8. The Redux row ran on [NairoDorian/transcribe.cpp](https://github.com/NairoDorian/transcribe.cpp) at `692350d`, a fork that adds the ternary weight type Redux needs.
 
 LibriSpeech is read audiobook speech. How these models handle coding vocabulary, background noise, and a reply playing through the loudspeakers has not been measured yet.
+
+### Models run on the GPU where one is usable
+
+gear is built with ggml's [Vulkan](https://www.vulkan.org/) backend, so both models run on the GPU of any vendor whose driver supports Vulkan, and on the CPU where there is no GPU, no Vulkan driver, or `--cpu` was given. The GPU makes the larger, more accurate recognition models cheap: on an RTX 3080, parakeet-ft-v1 transcribes 10 s of speech in 0.20 s, three times faster than the 110M model on one CPU thread, and Pocket starts speaking 10 to 50 ms after a reply is queued instead of about 100 ms.
+
+Times on a Windows 11 PC with a Ryzen 7 3800XT and an RTX 3080, recognition on one CPU thread and synthesis on two, the models loaded once:
+
+| Work | GPU (RTX 3080) | CPU |
+| --- | ---: | ---: |
+| parakeet-ft-v1 Q4_K_M, time for 10 s of speech | 0.20 s | 2.97 s |
+| parakeet-ft-v1 Q4_K_M, slowest of 57 utterances | 0.49 s | |
+| Parakeet TDT-CTC 110M Q4_K_M, time for 10 s of speech | 0.10 s | 0.69 s |
+| Pocket TTS, time to first audio | 0.01 to 0.05 s | 0.07 to 0.13 s |
+| Pocket TTS, time for 6 s of speech | 0.14 s | 1.64 s |
+| Load, parakeet-ft-v1 | 0.50 s | 0.34 s |
+
+The GPU gives the same accuracy: on the 556 LibriSpeech utterances used for accuracy above, parakeet-ft-v1 scores 2.10% and 3.54% on the GPU against 2.10% and 3.61% on the CPU, and the 110M model 2.70% and 5.27% against 2.64% and 5.16%; the transcripts differ only where rounding tips a word.
+
+The first run after a GPU driver is installed or updated compiles the shaders for that GPU: the first piece of speech then took 15 s and the first reply 2.9 s to start. The driver keeps what it compiled, and later runs start at the speeds above.
+
+The cost is size: the compiled shaders add 44 MB to the program, which compresses to 8 MB with zstd. The Vulkan library is opened when gear starts rather than linked, so the same program starts on a machine without it. On Linux, gear on a machine without a GPU, and in a container without the Vulkan library, ran on the CPU with the same transcripts.
 
 ## Credits
 

@@ -15,3 +15,5 @@ void gear_hear_submit(gear_hear *h, const float *samples, int n);
 char *gear_hear_take(gear_hear *h);
 int gear_hear_pending(gear_hear *h);  // pieces queued or being transcribed
 double gear_hear_last_seconds(gear_hear *h);  // how long the last piece took to transcribe
+// The device the model runs on, as transcribe.cpp names it: "vulkan", "cpu", ...
+const char *gear_hear_device(gear_hear *h);

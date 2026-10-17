@@ -6,6 +6,7 @@
 #include "gs_mix.h"
 #include "gs_voice.h"
 #include "agent.h"
+#include "env.h"
 #include "hear.h"
 #include "listen.h"
 #include "models.h"
@@ -33,6 +34,7 @@ static const char usage[] =
     "       gear say TEXT OUT.wav              speak TEXT through the player, recorded to OUT.wav\n"
     "       gear interrupt TEXT MIC.wav OUT.wav  speak TEXT while MIC.wav plays as the microphone\n"
     "options: --countdown SECONDS (3)  --hear-threads N (1)  --say-threads N (2)  --no-echo\n"
+    "         --cpu  run the models on the CPU (by default on the GPU where one is usable)\n"
     "         --hear-model FILE  a Parakeet GGUF in the models folder, or a path (default: the last chosen)\n"
     "         --no-keep  keep nothing heard (by default listen and window keep each piece of speech and\n"
     "                    its transcript in a heard folder in gear's data folder, for training later)\n"
@@ -347,6 +349,8 @@ int main(int argc, char **argv) {
         else if (!SDL_strcmp(argv[i], "--say-threads") && i + 1 < argc) opt.say_threads = SDL_atoi(argv[++i]);
         else if (!SDL_strcmp(argv[i], "--speak-back")) opt.speak_back = true;
         else if (!SDL_strcmp(argv[i], "--no-echo")) opt.no_echo = true;
+        // ggml reads it when it first lists its devices, before either model loads.
+        else if (!SDL_strcmp(argv[i], "--cpu")) gear_setenv("GGML_DISABLE_VULKAN", "1");
         else if (!SDL_strcmp(argv[i], "--to") && i + 1 < argc) opt.to = argv[++i];
         else if (!SDL_strcmp(argv[i], "--shot") && i + 1 < argc) opt.shot = argv[++i];
         else if (!SDL_strcmp(argv[i], "--demo")) opt.demo = true;

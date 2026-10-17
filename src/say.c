@@ -2,6 +2,7 @@
 #include <SDL3/SDL.h>
 #include "gs_mix.h"
 #include "gs_stream.h"
+#include "env.h"
 #include "pocket.h"
 
 enum { POCKET_RATE = 24000, SCRATCH = 1024 };
@@ -128,11 +129,10 @@ gear_say *gear_say_open(const char *model, const char *voice, int threads, gs_vo
     // hearsay's pockettts.cpp reads its CPU thread count from POCKET_THREADS.
     char n[16];
     SDL_snprintf(n, sizeof n, "%d", threads);
-    SDL_setenv_unsafe("POCKET_THREADS", n, 1);
+    gear_setenv("POCKET_THREADS", n);
     struct pt_init_params ip;
     pt_init_default_params(&ip);
     ip.model_path = model;
-    ip.device = "CPU";
     struct pt_context *ctx = pt_init(&ip);
     if (!ctx) {
         SDL_snprintf(error, error_size, "Could not load %s: %s", model, pt_last_error());
