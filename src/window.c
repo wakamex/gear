@@ -280,9 +280,7 @@ static void fill(app *a, view *v) {
         v->fault = true;
     } else {
         bool echo = !a->o->no_echo && gs_voice_has_echo();
-        double first = 0;
-        if (a->say) gear_say_last(a->say, &first, NULL);
-        SDL_snprintf(v->status, sizeof v->status, "hear %s · say %s, %s\n%s · %.2f s a piece", a->hear_slug, a->say_slug, a->voice_slug, echo ? "echo cancel on" : "headphones", gear_hear_last_seconds(a->hear));
+        SDL_snprintf(v->status, sizeof v->status, "hear %s · say %s, %s\n%s", a->hear_slug, a->say_slug, a->voice_slug, echo ? "echo cancel on" : "headphones");
     }
 }
 
@@ -297,7 +295,7 @@ static void demo(view *v) {
     v->left = 1.6;
     v->total = 3;
     v->reply = "I found the bug. The countdown timer resets whenever the voice detector reports silence, so a long pause never sends the message. I moved the reset into the speech start handler in `src/listen.c`:\n\n```c\nif (l->below < l->p.pause_frames && l->piece_frames < l->p.max_frames)\n    return GEAR_LISTEN_NONE;\n```\n\nAll 14 tests pass. Want me to commit it?";
-    SDL_strlcpy(v->status, "hear parakeet-tdt_ctc-110m-Q4_K_M · say pocket-tts-english_2026-09-Q8_0, alba\necho cancel on · 0.06 s a piece", sizeof v->status);
+    SDL_strlcpy(v->status, "hear parakeet-tdt_ctc-110m-Q4_K_M · say pocket-tts-english_2026-09-Q8_0, alba\necho cancel on", sizeof v->status);
 }
 
 // A reading stopped by talking: logged, and with GEAR_DEBUG the last seconds the microphone heard are
