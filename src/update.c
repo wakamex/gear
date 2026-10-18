@@ -253,8 +253,13 @@ bool gear_update_restart(const char *folder, int argc, char **argv) {
     args[n++] = program;
     for (int i = 1; i < argc && n < 71; i++) args[n++] = argv[i];
     args[n] = NULL;
-    // (SDL's own process, not gs_http_spawn's, whose Windows job would end it with this one)
-    SDL_Process *next = SDL_CreateProcess(args, false);
+    // (SDL's own process, not gs_http_spawn's, whose Windows job would end it with this one; in the
+    // background, which on Windows starts the console program without a console window of its own)
+    SDL_PropertiesID p = SDL_CreateProperties();
+    SDL_SetPointerProperty(p, SDL_PROP_PROCESS_CREATE_ARGS_POINTER, (void *)args);
+    SDL_SetBooleanProperty(p, SDL_PROP_PROCESS_CREATE_BACKGROUND_BOOLEAN, true);
+    SDL_Process *next = SDL_CreateProcessWithProperties(p);
+    SDL_DestroyProperties(p);
     if (!next) {
         SDL_Log("gear: the new build could not be started: %s", SDL_GetError());
         return false;
