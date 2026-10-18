@@ -20,3 +20,8 @@ typedef struct {
 // and the window ended, idle, for it to be started.
 int gear_window(const gear_window_options *o);
 enum { GEAR_UPDATED = 75 };
+#ifdef _WIN32
+#define GEAR_PROGRAM "gear.exe"
+#else
+#define GEAR_PROGRAM "gear"
+#endif

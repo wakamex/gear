@@ -8,7 +8,8 @@
 PLACE is HOST:FOLDER (by default HOST:/srv/gear-updates, served at the address in src/update.c)
 or a local folder. It gets files/SHA256 for each file of the build, a manifest naming the build and
 each file's name, hash and size, the manifest's signature with the key in
-~/.config/gear/update-signing.key, and gear-windows.zip of the same files for a first install. The
+~/.config/gear/update-signing.key (as manifest.txt.sig, where gesso's gs_update reads it, and as
+manifest.sig for copies built before gear used gs_update, which read it there), and gear-windows.zip of the same files for a first install. The
 files go up before the manifest, which goes up whole, so a copy never reads one that names a file
 not yet there. The build is the commit's short hash, so the tree must be clean; a copy runs it only
 when it was built with that name (-Dbuild), which this does.
@@ -66,21 +67,23 @@ def main():
         manifest = "\n".join(lines) + "\n"
         with open(os.path.join(out, "manifest.txt"), "w") as f:
             f.write(manifest)
-        with open(os.path.join(out, "manifest.sig"), "w") as f:
-            f.write(key.sign(manifest.encode()).hex() + "\n")
+        signature = key.sign(manifest.encode()).hex() + "\n"
+        for name in ("manifest.txt.sig", "manifest.sig"):
+            with open(os.path.join(out, name), "w") as f:
+                f.write(signature)
         if ":" in args.to:
             host, place = args.to.split(":", 1)
             run("ssh", "-o", "BatchMode=yes", host, f"mkdir -p {place}/files {place}/next")
             run("scp", "-q", *[os.path.join(out, "files", d) for d in os.listdir(os.path.join(out, "files"))], f"{host}:{place}/files/")
-            run("scp", "-q", os.path.join(out, "manifest.txt"), os.path.join(out, "manifest.sig"), os.path.join(out, "gear-windows.zip"), f"{host}:{place}/next/")
+            run("scp", "-q", *[os.path.join(out, n) for n in ("manifest.txt", "manifest.txt.sig", "manifest.sig", "gear-windows.zip")], f"{host}:{place}/next/")
             # (the signature first, then the manifest it signs: one read between the two sees a
             # mismatch and is tried again a minute later)
-            run("ssh", "-o", "BatchMode=yes", host, f"cd {place} && mv next/gear-windows.zip . && mv next/manifest.sig . && mv next/manifest.txt . && chmod -R a+rX {place}")
+            run("ssh", "-o", "BatchMode=yes", host, f"cd {place} && mv next/gear-windows.zip . && mv next/manifest.txt.sig . && mv next/manifest.sig . && mv next/manifest.txt . && chmod -R a+rX {place}")
         else:
             os.makedirs(os.path.join(args.to, "files"), exist_ok=True)
             for d in os.listdir(os.path.join(out, "files")):
                 shutil.copyfile(os.path.join(out, "files", d), os.path.join(args.to, "files", d))
-            for name in ("gear-windows.zip", "manifest.sig", "manifest.txt"):
+            for name in ("gear-windows.zip", "manifest.txt.sig", "manifest.sig", "manifest.txt"):
                 shutil.copyfile(os.path.join(out, name), os.path.join(args.to, name + ".part"))
                 os.replace(os.path.join(args.to, name + ".part"), os.path.join(args.to, name))
     print(f"published build {build} to {args.to}")

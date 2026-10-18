@@ -7,7 +7,7 @@
 const std = @import("std");
 
 const flags: []const []const u8 = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-missing-field-initializers" };
-const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "speakable.c", "update.c", "window.c" };
+const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "speakable.c", "window.c" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

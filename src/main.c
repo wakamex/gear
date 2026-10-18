@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "gs_mix.h"
+#include "gs_update.h"
 #include "gs_voice.h"
 #include "agent.h"
 #include "env.h"
@@ -14,7 +15,6 @@
 #include "relay.h"
 #include "say.h"
 #include "speakable.h"
-#include "update.h"
 #include "wav.h"
 #include "window.h"
 
@@ -366,7 +366,11 @@ int main(int argc, char **argv) {
         gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.no_keep, opt.shot, opt.demo, opt.hear_model };
         int code = gear_window(&o);
         // A newer build is in place: it takes over, and this one ends.
-        if (code == GEAR_UPDATED) return gear_update_restart(SDL_GetBasePath(), argc, argv) ? 0 : 1;
+        if (code == GEAR_UPDATED) {
+            if (gs_update_restart(NULL, GEAR_PROGRAM, argc, argv)) return 0;
+            fprintf(stderr, "gear: the new build could not be started: %s\n", SDL_GetError());
+            return 1;
+        }
         return code;
     }
     if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }

@@ -6,6 +6,7 @@
 #include "gs_mix.h"
 #include "gs_text.h"
 #include "gs_ui.h"
+#include "gs_update.h"
 #include "gs_voice.h"
 #include "hear.h"
 #include "listen.h"
@@ -14,7 +15,6 @@
 #include "relay.h"
 #include "say.h"
 #include "speakable.h"
-#include "update.h"
 #include "wav.h"
 
 enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6, KEPT = 4 * GEAR_RATE };  // KEPT: microphone audio kept for a report
@@ -231,6 +231,28 @@ static void draw(gs_ui *ui, const view *v) {
     }
     gs_ui_clip(ui, NULL);
     gs_ui_end(ui);
+}
+
+// ---- Updates ----
+
+// Where published builds are, unless GEAR_UPDATE_FROM names another manifest (for trying it out).
+#define UPDATES "http://136.243.110.49:8071/manifest.txt"
+// The publisher's key; tools/publish-update signs with its private half.
+static const Uint8 publisher[32] = {
+    0x45, 0xbb, 0xa1, 0x28, 0xcb, 0x43, 0x4d, 0xe9, 0xe0, 0x8d, 0x0a, 0xc5, 0x99, 0x0a, 0x27, 0x6b,
+    0x9d, 0x6c, 0xf0, 0x33, 0x08, 0xde, 0x1c, 0xad, 0x1b, 0x07, 0x9a, 0xa5, 0xcf, 0xde, 0x20, 0x7a,
+};
+
+// A published build (named by -Dbuild) keeps itself up to date with gesso's gs_update; a build of
+// one's own never looks.
+static gs_update *start_updates(void) {
+#ifdef GEAR_BUILD
+    const char *from = SDL_getenv("GEAR_UPDATE_FROM");
+    gs_update_config c = { .build = GEAR_BUILD, .manifest = from && *from ? from : UPDATES, .key = publisher, .program = GEAR_PROGRAM, .agent = "gear" };
+    return gs_update_start(&c);
+#else
+    return NULL;
+#endif
 }
 
 // ---- The live loop ----
@@ -517,7 +539,7 @@ int gear_window(const gear_window_options *o) {
     Uint64 drawn = 0, busy = 0;
     // A published build keeps itself up to date, and starts the new one after 10 s of nothing to
     // hear, send, wait for or read, so that no conversation is cut off.
-    gear_update *update = o->shot || o->demo ? NULL : gear_update_start(SDL_GetBasePath());
+    gs_update *update = o->shot || o->demo ? NULL : start_updates();
     for (bool running = true; running;) {
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, 10)) {
@@ -539,7 +561,7 @@ int gear_window(const gear_window_options *o) {
                 busy = SDL_GetTicks();
         }
         // (not while muted: the new build would start listening)
-        if (gear_update_ready(update) && !a.muted && SDL_GetTicks() - busy > 10000) {
+        if (gs_update_ready(update) && !a.muted && SDL_GetTicks() - busy > 10000) {
             code = GEAR_UPDATED;
             running = false;
         }
@@ -582,7 +604,7 @@ int gear_window(const gear_window_options *o) {
         }
         SDL_RenderPresent(ren);
     }
-    gear_update_free(update);
+    gs_update_free(update);
     close_loop(&a);
     gs_ui_free(ui);
     gs_fontset_free(fonts);
