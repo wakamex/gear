@@ -5,10 +5,10 @@
 
 static const gear_model_file files[GEAR_MODEL_COUNT] = {
     [GEAR_MODEL_HEAR] = {
-        "parakeet-tdt_ctc-110m-Q4_K_M.gguf",
-        "https://huggingface.co/handy-computer/parakeet-tdt_ctc-110m-gguf/resolve/1c3f0d5378fdd358905cc410a93ed9e64f52d170/parakeet-tdt_ctc-110m-Q4_K_M.gguf",
-        89989600, "486414fd90185a8c8a4ced7c123cfb133ff4f7958426c6b8bd9049946b56b448",
-        "NVIDIA Parakeet TDT-CTC 110M, English speech recognition (CC-BY-4.0)",
+        "parakeet-ft-v1-Q4_K_M.gguf",
+        "https://huggingface.co/freetranscribe/parakeet-ft-v1-gguf/resolve/453fd0047e1cfc03d9f7f2005dff0310d2a93a5a/parakeet-ft-v1-Q4_K_M.gguf",
+        485425664, "a67258bc494108e1e0b4cc1989490c85f95afa43e233e1e241656f41fa80bfdc",
+        "parakeet-ft-v1, a fine-tune of NVIDIA Parakeet TDT 0.6B v3, speech recognition (CC-BY-4.0)",
     },
     [GEAR_MODEL_SAY] = {
         "pocket-tts-english_2026-09-Q8_0.gguf",
