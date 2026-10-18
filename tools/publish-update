@@ -5,7 +5,7 @@
     tools/publish-update --bin DIR --build ID  publish the files in DIR, built already as build ID
     tools/publish-update --to PLACE            publish to PLACE instead
 
-PLACE is HOST:FOLDER (by default HOST:/srv/gear-updates, served at the address in src/update.c)
+PLACE is HOST:FOLDER (by default HOST:/srv/gear-updates, served at the address in src/window.c)
 or a local folder. It gets files/SHA256 for each file of the build, a manifest naming the build and
 each file's name, hash and size, the manifest's signature with the key in
 ~/.config/gear/update-signing.key (as manifest.txt.sig, where gesso's gs_update reads it, and as

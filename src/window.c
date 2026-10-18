@@ -236,7 +236,7 @@ static void draw(gs_ui *ui, const view *v) {
 // ---- Updates ----
 
 // Where published builds are, unless GEAR_UPDATE_FROM names another manifest (for trying it out).
-#define UPDATES "http://136.243.110.49:8071/manifest.txt"
+#define UPDATES "http://updates.waka.mx/gear/manifest.txt"
 // The publisher's key; tools/publish-update signs with its private half.
 static const Uint8 publisher[32] = {
     0x45, 0xbb, 0xa1, 0x28, 0xcb, 0x43, 0x4d, 0xe9, 0xe0, 0x8d, 0x0a, 0xc5, 0x99, 0x0a, 0x27, 0x6b,
