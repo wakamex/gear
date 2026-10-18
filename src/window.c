@@ -538,7 +538,8 @@ int gear_window(const gear_window_options *o) {
                 *gear_pipeline_text(a.pipe) || (a.relay && gear_relay_waiting(a.relay)))
                 busy = SDL_GetTicks();
         }
-        if (gear_update_ready(update) && SDL_GetTicks() - busy > 10000) {
+        // (not while muted: the new build would start listening)
+        if (gear_update_ready(update) && !a.muted && SDL_GetTicks() - busy > 10000) {
             code = GEAR_UPDATED;
             running = false;
         }
