@@ -6,8 +6,8 @@
     .dependencies = .{
         .hearsay = .{ .path = "../hearsay" },
         .gesso = .{
-            .url = "git+https://github.com/wakamex/gesso.git#9712a1c1e0d9e29468282d85cc9061b81bba4f86",
-            .hash = "gesso-0.0.0-LFvUrzjoRgAo_sRJkqJ0E2SqLvoOqPxrZwVBmrsLG0ad",
+            .url = "git+https://github.com/wakamex/gesso.git#02db913d00b36c0766ff0ba0070fee726fe2e50a",
+            .hash = "gesso-0.0.0-LFvUr7yaRwBE01IO96zs2wnRBwzQQAFGKN4hqLS8mVxn",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "README.md", "BRIEF.md" },

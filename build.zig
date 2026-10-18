@@ -7,7 +7,7 @@
 const std = @import("std");
 
 const flags: []const []const u8 = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-missing-field-initializers" };
-const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "speakable.c", "window.c" };
+const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "speakable.c", "update.c", "window.c" };
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -18,9 +18,13 @@ pub fn build(b: *std.Build) void {
     const glslc = b.option([]const u8, "glslc", "The glslc shader compiler, for -Dgpu=vulkan (default: glslc on the PATH)") orelse "glslc";
     const hearsay = b.dependency("hearsay", .{ .target = target, .optimize = optimize, .parakeet = true, .pockettts = true, .gpu = gpu, .glslc = glslc }).artifact("hearsay");
 
+    // The build's name, given by tools/publish-update; a build without one never updates itself.
+    const build_name = b.option([]const u8, "build", "Name this a published build, which keeps itself up to date (tools/publish-update)");
+    const app_flags = if (build_name) |name| std.mem.concat(b.allocator, []const u8, &.{ flags, &.{b.fmt("-DGEAR_BUILD=\"{s}\"", .{name})} }) catch @panic("OOM") else flags;
+
     const mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true, .strip = optimize != .debug });
-    mod.addCSourceFiles(.{ .root = b.path("src"), .files = sources, .flags = flags });
-    mod.addCSourceFiles(.{ .root = b.path("src"), .files = &.{"main.c"}, .flags = flags });
+    mod.addCSourceFiles(.{ .root = b.path("src"), .files = sources, .flags = app_flags });
+    mod.addCSourceFiles(.{ .root = b.path("src"), .files = &.{"main.c"}, .flags = app_flags });
     mod.linkLibrary(gesso);
     mod.linkLibrary(hearsay);
     const exe = b.addExecutable(.{ .name = "gear", .root_module = mod });

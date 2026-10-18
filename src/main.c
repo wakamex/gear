@@ -14,6 +14,7 @@
 #include "relay.h"
 #include "say.h"
 #include "speakable.h"
+#include "update.h"
 #include "wav.h"
 #include "window.h"
 
@@ -363,7 +364,10 @@ int main(int argc, char **argv) {
         if (nargs > 1) { fputs(usage, stderr); return 2; }
         const char *dir = opt.demo ? "" : gear_models_dir();
         gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.no_keep, opt.shot, opt.demo, opt.hear_model };
-        return gear_window(&o);
+        int code = gear_window(&o);
+        // A newer build is in place: it takes over, and this one ends.
+        if (code == GEAR_UPDATED) return gear_update_restart(SDL_GetBasePath(), argc, argv) ? 0 : 1;
+        return code;
     }
     if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }
     int rc = 2;

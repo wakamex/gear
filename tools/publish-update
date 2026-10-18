@@ -1,0 +1,90 @@
+#!/usr/bin/env -S uv run --no-project --with cryptography python3
+"""Publishes a Windows build for installed copies of gear to fetch, which they do within a minute.
+
+    tools/publish-update                       build the current commit for Windows and publish it
+    tools/publish-update --bin DIR --build ID  publish the files in DIR, built already as build ID
+    tools/publish-update --to PLACE            publish to PLACE instead
+
+PLACE is HOST:FOLDER (by default HOST:/srv/gear-updates, served at the address in src/update.c)
+or a local folder. It gets files/SHA256 for each file of the build, a manifest naming the build and
+each file's name, hash and size, the manifest's signature with the key in
+~/.config/gear/update-signing.key, and gear-windows.zip of the same files for a first install. The
+files go up before the manifest, which goes up whole, so a copy never reads one that names a file
+not yet there. The build is the commit's short hash, so the tree must be clean; a copy runs it only
+when it was built with that name (-Dbuild), which this does.
+"""
+
+import argparse
+import hashlib
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import zipfile
+
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FILES = ["gear.exe", "ClankerMono-Regular.ttf", "ClankerMono-LICENSE.txt"]
+KEY = os.path.expanduser("~/.config/gear/update-signing.key")
+
+
+def run(*command, **kw):
+    subprocess.run(command, check=True, **kw)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--bin", help="publish the files in this folder, built already")
+    parser.add_argument("--build", help="the build they are (with --bin; by default the commit's short hash)")
+    parser.add_argument("--to", default="HOST:/srv/gear-updates")
+    args = parser.parse_args()
+    build = args.build
+    if not args.bin:
+        if subprocess.run(["git", "-C", ROOT, "diff", "--quiet", "HEAD"]).returncode:
+            sys.exit("the tree has changes that are not committed: a build is published from a commit")
+        build = subprocess.run(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+        run("zig", "build", "-Doptimize=ReleaseFast", "-Dtarget=x86_64-windows-gnu", "-Decho=true", f"-Dbuild={build}", "-p", "zig-out/windows", cwd=ROOT)
+    folder = args.bin or os.path.join(ROOT, "zig-out", "windows", "bin")
+    if not build:
+        sys.exit("--build is needed with --bin")
+    with open(KEY, "rb") as f:
+        key = Ed25519PrivateKey.from_private_bytes(f.read())
+    with tempfile.TemporaryDirectory() as out:
+        os.makedirs(os.path.join(out, "files"))
+        lines = [f"build {build}"]
+        with zipfile.ZipFile(os.path.join(out, "gear-windows.zip"), "w", zipfile.ZIP_DEFLATED) as z:
+            for name in FILES:
+                path = os.path.join(folder, name)
+                with open(path, "rb") as f:
+                    data = f.read()
+                digest = hashlib.sha256(data).hexdigest()
+                shutil.copyfile(path, os.path.join(out, "files", digest))
+                lines.append(f"file {name} {digest} {len(data)}")
+                z.write(path, name)
+        manifest = "\n".join(lines) + "\n"
+        with open(os.path.join(out, "manifest.txt"), "w") as f:
+            f.write(manifest)
+        with open(os.path.join(out, "manifest.sig"), "w") as f:
+            f.write(key.sign(manifest.encode()).hex() + "\n")
+        if ":" in args.to:
+            host, place = args.to.split(":", 1)
+            run("ssh", "-o", "BatchMode=yes", host, f"mkdir -p {place}/files {place}/next")
+            run("scp", "-q", *[os.path.join(out, "files", d) for d in os.listdir(os.path.join(out, "files"))], f"{host}:{place}/files/")
+            run("scp", "-q", os.path.join(out, "manifest.txt"), os.path.join(out, "manifest.sig"), os.path.join(out, "gear-windows.zip"), f"{host}:{place}/next/")
+            # (the signature first, then the manifest it signs: one read between the two sees a
+            # mismatch and is tried again a minute later)
+            run("ssh", "-o", "BatchMode=yes", host, f"cd {place} && mv next/gear-windows.zip . && mv next/manifest.sig . && mv next/manifest.txt . && chmod -R a+rX {place}")
+        else:
+            os.makedirs(os.path.join(args.to, "files"), exist_ok=True)
+            for d in os.listdir(os.path.join(out, "files")):
+                shutil.copyfile(os.path.join(out, "files", d), os.path.join(args.to, "files", d))
+            for name in ("gear-windows.zip", "manifest.sig", "manifest.txt"):
+                shutil.copyfile(os.path.join(out, name), os.path.join(args.to, name + ".part"))
+                os.replace(os.path.join(args.to, name + ".part"), os.path.join(args.to, name))
+    print(f"published build {build} to {args.to}")
+
+
+if __name__ == "__main__":
+    main()

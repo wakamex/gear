@@ -14,6 +14,7 @@
 #include "relay.h"
 #include "say.h"
 #include "speakable.h"
+#include "update.h"
 #include "wav.h"
 
 enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6, KEPT = 4 * GEAR_RATE };  // KEPT: microphone audio kept for a report
@@ -510,7 +511,10 @@ int gear_window(const gear_window_options *o) {
         if (!open_loop(&a, error, sizeof error)) SDL_strlcpy(a.fault, error, sizeof a.fault);
     }
     int code = 0, frames = 0;
-    Uint64 drawn = 0;
+    Uint64 drawn = 0, busy = 0;
+    // A published build keeps itself up to date, and starts the new one after 10 s of nothing to
+    // hear, send, wait for or read, so that no conversation is cut off.
+    gear_update *update = o->shot || o->demo ? NULL : gear_update_start(SDL_GetBasePath());
     for (bool running = true; running;) {
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, 10)) {
@@ -527,6 +531,13 @@ int gear_window(const gear_window_options *o) {
             bool reading = gear_say_busy(a.say);
             if (reading && !a.speaking_since) a.speaking_since = SDL_GetTicks();
             if (!reading) a.speaking_since = 0;
+            if (reading || gear_pipeline_countdown(a.pipe) >= 0 || gear_pipeline_hearing(a.pipe) || gear_pipeline_pending(a.pipe) ||
+                *gear_pipeline_text(a.pipe) || (a.relay && gear_relay_waiting(a.relay)))
+                busy = SDL_GetTicks();
+        }
+        if (gear_update_ready(update) && SDL_GetTicks() - busy > 10000) {
+            code = GEAR_UPDATED;
+            running = false;
         }
         // Drawn twenty times a second: the meter and countdown move by themselves.
         if (SDL_GetTicks() - drawn < 50 && !o->shot) continue;
@@ -567,6 +578,7 @@ int gear_window(const gear_window_options *o) {
         }
         SDL_RenderPresent(ren);
     }
+    gear_update_free(update);
     close_loop(&a);
     gs_ui_free(ui);
     gs_fontset_free(fonts);

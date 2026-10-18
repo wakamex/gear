@@ -16,4 +16,7 @@ typedef struct {
     const char *hear_model;  // a recognition model file or path; NULL for the last chosen
 } gear_window_options;
 
-int gear_window(const gear_window_options *o);  // runs until the window closes; the exit code
+// Runs until the window closes; the exit code. GEAR_UPDATED when a newer build was put in place
+// and the window ended, idle, for it to be started.
+int gear_window(const gear_window_options *o);
+enum { GEAR_UPDATED = 75 };
