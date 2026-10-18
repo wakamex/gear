@@ -28,6 +28,8 @@ pub fn build(b: *std.Build) void {
     mod.linkLibrary(gesso);
     mod.linkLibrary(hearsay);
     const exe = b.addExecutable(.{ .name = "gear", .root_module = mod });
+    // The icon Explorer, the taskbar and the window show (assets/icon/update.sh makes it).
+    if (target.result.os.tag == .windows) mod.addWin32ResourceFile(.{ .file = b.path("assets/icon/gear.rc") });
     b.installArtifact(exe);
     // The window's font, Clanker Mono (D2Coding's glyphs, under the SIL Open Font License), beside the program.
     b.installBinFile("assets/ClankerMono-Regular.ttf", "ClankerMono-Regular.ttf");

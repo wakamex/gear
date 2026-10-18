@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="gear app icon">
+  <!-- The window's amber accent, on a rounded square -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#C4862C"/>
+  <!-- A cog with eight teeth, in the window's near-black -->
+  <path d="M98.2 55.9 L114.6 51.2 L116.2 28.7 L139.8 28.7 L141.4 51.2 L157.8 55.9 L172.9 64.2 L189.9 49.5 L206.5 66.1 L191.8 83.1 L200.1 98.2 L204.8 114.6 L227.3 116.2 L227.3 139.8 L204.8 141.4 L200.1 157.8 L191.8 172.9 L206.5 189.9 L189.9 206.5 L172.9 191.8 L157.8 200.1 L141.4 204.8 L139.8 227.3 L116.2 227.3 L114.6 204.8 L98.2 200.1 L83.1 191.8 L66.1 206.5 L49.5 189.9 L64.2 172.9 L55.9 157.8 L51.2 141.4 L28.7 139.8 L28.7 116.2 L51.2 114.6 L55.9 98.2 L64.2 83.1 L49.5 66.1 L66.1 49.5 L83.1 64.2Z" fill="#0A0908"/>
+  <!-- Its hub, open to the amber -->
+  <circle cx="128" cy="128" r="48" fill="#C4862C"/>
+  <!-- Three bars of a voice meter in the hub, as the window's microphone meter -->
+  <rect x="96" y="114" width="16" height="28" rx="8" fill="#0A0908"/>
+  <rect x="120" y="100" width="16" height="56" rx="8" fill="#0A0908"/>
+  <rect x="144" y="114" width="16" height="28" rx="8" fill="#0A0908"/>
+</svg>
