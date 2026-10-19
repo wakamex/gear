@@ -28,9 +28,9 @@ static void test_listen(void) {
     gear_listen *l = gear_listen_new(&p);
     int i = 0;
     for (; i < 100; i++) CHECK(feed(l, i, 0.1f) == GEAR_LISTEN_NONE);
-    // A piece starts on the third frame of speech and opens with the preroll before it.
-    CHECK(feed(l, i++, 0.9f) == GEAR_LISTEN_NONE);
-    CHECK(feed(l, i++, 0.9f) == GEAR_LISTEN_NONE);
+    // A piece starts on the start_frames-th frame of speech in a row and opens with the preroll before it.
+    for (int k = 1; k < p.start_frames; k++) CHECK(feed(l, i++, 0.9f) == GEAR_LISTEN_NONE);
+    int start = i;
     CHECK(feed(l, i++, 0.9f) == GEAR_LISTEN_START);
     CHECK(gear_listen_in_piece(l));
     // A pause shorter than pause_frames does not end it; one as long does.
@@ -41,13 +41,13 @@ static void test_listen(void) {
     CHECK(e == GEAR_LISTEN_END);
     int n;
     const float *piece = gear_listen_piece(l, &n);
-    // Preroll (30 frames ending with the start frame, 102) through the last frame fed.
+    // Preroll (the frames ending with the start frame) through the last frame fed.
     CHECK(n % GEAR_FRAME == 0);
-    CHECK(piece[0] == (float)(102 - p.preroll_frames));
+    CHECK(piece[0] == (float)(start - p.preroll_frames));
     CHECK(piece[n - GEAR_FRAME] == (float)(i - 1));
     CHECK(!gear_listen_in_piece(l));
     // A piece that never pauses is cut at max_frames.
-    for (int k = 0; k < 3; k++) feed(l, i++, 0.9f);
+    for (int k = 0; k < p.start_frames; k++) feed(l, i++, 0.9f);
     e = GEAR_LISTEN_NONE;
     int frames = 0;
     while (e != GEAR_LISTEN_END && frames < p.max_frames + 10) { e = feed(l, i++, 0.9f); frames++; }
@@ -87,14 +87,17 @@ enum room { HEADPHONES, LOUDSPEAKERS, LOUDSPEAKERS_NO_CANCELLER };
 // microphone two seconds in. With loudspeakers the microphone also hears the reply, at half its level
 // and 100 ms late. Reports when the reply was first heard, when talking stopped it and when the player
 // went quiet, in seconds, -1 for what did not happen.
-static bool duplex(const char *model, const char *voice_path, gear_hear *hear, const float *speech, int n, enum room room, double *heard, double *interrupted, double *quiet) {
+static bool duplex(const char *model, const char *voice_path, const char *vad_path, gear_hear *hear, const float *speech, int n, enum room room, double *heard, double *interrupted, double *quiet) {
     char error[512];
     gs_voice *voice = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (room == LOUDSPEAKERS ? GS_VOICE_ECHO : 0));
     gear_say *say = gear_say_open(model, voice_path, 2, room == LOUDSPEAKERS ? voice : NULL, error, sizeof error);
     CHECK(say);
     if (!say) { fprintf(stderr, "%s\n", error); gs_voice_free(voice); return false; }
+    gear_vad *vad = gear_vad_open(vad_path, error, sizeof error);
+    CHECK(vad);
+    if (!vad) { fprintf(stderr, "%s\n", error); gear_say_close(say); gs_voice_free(voice); return false; }
     gear_listen_params lp = gear_listen_defaults();
-    gear_pipeline *p = gear_pipeline_new(voice, hear, say, &lp, 1.0);
+    gear_pipeline *p = gear_pipeline_new(voice, vad, hear, say, &lp, 1.0);
     gear_say_speak(say, "Here is the plan. First, I will split the reply into sentences. Then each sentence goes to the speech engine while the previous one is playing.");
     enum { STEP = 480, DELAY = 10 };
     float lr[STEP * 2], frame[GEAR_FRAME], echo[DELAY][GEAR_FRAME] = { { 0 } };
@@ -126,6 +129,7 @@ static bool duplex(const char *model, const char *voice_path, gear_hear *hear, c
     static const char *names[] = { "headphones", "loudspeakers with the canceller", "loudspeakers without it" };
     printf("%s: first sound %.2f s, talking heard %.2f s, quiet %.2f s\n", names[room], *heard, *interrupted, *quiet);
     gear_pipeline_free(p);
+    gear_vad_free(vad);
     gear_say_close(say);
     gs_voice_free(voice);
     return true;
@@ -146,8 +150,13 @@ static void test_end_to_end(const char *dir, const char *data) {
 
     // Hearing: the utterance through the pipeline makes one message, sent after the countdown.
     gs_voice *voice = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH);
+    char vad_path[1200];
+    gear_model_path(dir, GEAR_MODEL_VAD, vad_path, sizeof vad_path);
+    gear_vad *vad = gear_vad_open(vad_path, error, sizeof error);
+    CHECK(vad);
+    if (!vad) { fprintf(stderr, "%s\n", error); gs_voice_free(voice); gear_hear_close(hear); return; }
     gear_listen_params lp = gear_listen_defaults();
-    gear_pipeline *p = gear_pipeline_new(voice, hear, NULL, &lp, 1.0);
+    gear_pipeline *p = gear_pipeline_new(voice, vad, hear, NULL, &lp, 1.0);
     char keep[1200], *tmp = SDL_GetPrefPath("wakamex", "gear-tests");
     SDL_snprintf(keep, sizeof keep, "%sheard-%llu", tmp, (unsigned long long)SDL_GetTicksNS());
     SDL_free(tmp);
@@ -169,6 +178,7 @@ static void test_end_to_end(const char *dir, const char *data) {
     }
     SDL_free(message);
     gear_pipeline_free(p);
+    gear_vad_free(vad);
     // What was heard is kept: the piece's file, its text, and the message's outcome.
     char log[1300];
     SDL_snprintf(log, sizeof log, "%s/heard.jsonl", keep);
@@ -195,17 +205,17 @@ static void test_end_to_end(const char *dir, const char *data) {
     gear_model_path(dir, GEAR_MODEL_VOICE, voice_path, sizeof voice_path);
     gs_voice_free(voice);
     double heard, interrupted, quiet;
-    if (duplex(model, voice_path, hear, speech, n, HEADPHONES, &heard, &interrupted, &quiet)) {
+    if (duplex(model, voice_path, vad_path, hear, speech, n, HEADPHONES, &heard, &interrupted, &quiet)) {
         CHECK(heard > 0 && heard < 1.0);  // the reply starts within a second
         // The utterance's speech begins 0.56 s into the file, so 2.56 s into the test; it is heard
-        // within 0.15 s of that, and the reading stops at once.
-        CHECK(interrupted >= 2.56 && interrupted < 2.71);
+        // within 0.2 s of that (Silero needs two 32 ms windows of speech), and the reading stops at once.
+        CHECK(interrupted >= 2.56 && interrupted < 2.76);
         CHECK(quiet >= interrupted && quiet - interrupted < 0.05);
     }
     if (gs_voice_has_echo()) {
-        if (duplex(model, voice_path, hear, speech, n, LOUDSPEAKERS, &heard, &interrupted, &quiet))
-            CHECK(interrupted >= 2.56 && interrupted < 2.71);  // the reply's echo is not taken for talking
-        if (duplex(model, voice_path, hear, speech, n, LOUDSPEAKERS_NO_CANCELLER, &heard, &interrupted, &quiet))
+        if (duplex(model, voice_path, vad_path, hear, speech, n, LOUDSPEAKERS, &heard, &interrupted, &quiet))
+            CHECK(interrupted >= 2.56 && interrupted < 2.76);  // the reply's echo is not taken for talking
+        if (duplex(model, voice_path, vad_path, hear, speech, n, LOUDSPEAKERS_NO_CANCELLER, &heard, &interrupted, &quiet))
             CHECK(interrupted > 0 && interrupted < 2.56);  // without the canceller the reply stops itself
     } else printf("echo tests skipped: build with -Decho=true\n");
     gear_hear_close(hear);

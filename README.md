@@ -2,25 +2,26 @@
 
 gear is a voice front-end for coding agents. You speak to an agent such as [Claude Code](https://www.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex), gear sends the message when you stop talking, reads the reply aloud and listens again, all on your own machine. [BRIEF.md](BRIEF.md) holds the goals the project started from; this README records the decisions made since.
 
-gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies the window, audio, the voice detector and downloads, and [hearsay](../hearsay), which supplies speech recognition and synthesis. It runs on Linux and Windows, on the GPU where one is usable and on the CPU otherwise; the Windows build is 50 MB with echo cancellation, most of it the GPU's compiled shaders, and 6.2 MB built for the CPU only.
+gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies the window, audio, echo cancellation and downloads, and [hearsay](../hearsay), which supplies speech detection, recognition and synthesis. It runs on Linux and Windows, on the GPU where one is usable and on the CPU otherwise; the Windows build is 50 MB with echo cancellation, most of it the GPU's compiled shaders, and 6.2 MB built for the CPU only.
 
 ## What works
 
 The spoken loop runs end to end, from microphone to message and from reply text to the speakers:
 
-- Listening: each 10 ms of microphone audio goes through gesso's `gs_voice`, whose voice detector decides when speech starts and stops. Speech is cut into pieces at pauses of half a second, each piece keeping the 0.3 s before its start, and a recognizer thread transcribes each piece with Parakeet as it ends. Pieces add up to one message; once the user has stopped and every piece has its text, a countdown (3 s by default) runs, and talking again stops it.
+- Listening: each 10 ms of microphone audio goes through gesso's `gs_voice` for echo cancellation, and [Silero VAD](https://github.com/snakers4/silero-vad) decides when speech starts and stops. Speech is cut into pieces at pauses of half a second, each piece keeping the 0.3 s before its start, and a recognizer thread transcribes each piece with Parakeet as it ends. Pieces add up to one message; once the user has stopped and every piece has its text, a countdown (3 s by default) runs, and talking again stops it.
 - Speaking: a reply is synthesized by Pocket TTS on a thread of its own and played as it is made, through a `gs_stream` in gesso's mix. The first sound plays 0.17 to 0.31 s after the reply is queued.
-- Interrupting: when the user starts talking during a reply, the reply stops. In the tests, talking is detected 60 ms after the speech begins and the player is silent 10 ms later.
-- Echo: with `-Decho=true`, gesso's WebRTC echo canceller is given what gear plays, so a reply through loudspeakers is not taken for the user talking. In the tests, where the microphone hears the reply at half its level 100 ms late as well as the user, the reply plays on until the user talks; without the canceller it cuts itself off 0.4 to 0.5 s in. Without `-Decho`, use headphones.
+- Interrupting: when the user starts talking during a reply, the reply stops. In the tests, talking is detected 80 ms after the speech begins with headphones and 0.11 to 0.17 s after it over loudspeakers with the echo canceller, and the player is silent 10 ms later.
+- Echo: with `-Decho=true`, gesso's WebRTC echo canceller is given what gear plays, so a reply through loudspeakers is not taken for the user talking. In the tests, where the microphone hears the reply at half its level 100 ms late as well as the user, the reply plays on until the user talks; without the canceller it cuts itself off 0.5 to 0.65 s in. Without `-Decho`, use headphones.
 - Agents: messages go to a coding agent through [Wakterm](https://github.com/wakamex/wakterm)'s Agent API, and the agent's final reply comes back to be read aloud. `wakterm cli agent catalog` lists the agents, `wakterm cli agent admit --return-final` gives one a message, with its text on standard input so it never shows in the process list, and `wakterm cli agent request get` returns the reply once the agent has finished. Wakterm knows each harness (Claude Code, Codex and the others it supports), so gear has no logic for any one agent. `--to` names an agent or, when no agent has that name, a tab, and gear looks it up again for each message, so a message reaches whatever harness is running there now, even after a restart. A relay thread sends messages in order and asks for each reply twice a second; a one-sentence answer from a Claude agent came back 3.1 s after sending.
 - Reading replies: a reply is turned into what is worth hearing before it is spoken, by fixed rules. Code blocks and tables are named rather than read ("A code block of 6 lines.", "A table of 2 rows."), Markdown's marks are dropped, links are read as their text and bare addresses as their site ("a github.com link"), paths as their file's name, snake_case as words, and headings and list items become sentences. Past 1,200 characters, about a minute and a quarter of speech, the reading stops at a sentence and says the rest is not read. `gear read` prints what would be said of a reply.
-- Models: `gear fetch` downloads the three model files, 629 MB in all, from Hugging Face at pinned commits, resuming a broken download and keeping a file only when its size and SHA-256 match the published ones.
+- Models: the window downloads any that are missing, showing its progress, and `gear fetch` does the same from the command line: four files, 631 MB in all, from Hugging Face at pinned commits, resuming a broken download and keeping a file only when its size and SHA-256 match the published ones.
 
 | File | What it is | Size |
 | --- | --- | ---: |
 | `parakeet-ft-v1-Q4_K_M.gguf` | [parakeet-ft-v1](https://huggingface.co/freetranscribe/parakeet-ft-v1), a fine-tune of NVIDIA's Parakeet TDT 0.6B v3, speech recognition (CC-BY-4.0) | 485 MB |
 | `pocket-tts-english_2026-09-Q8_0.gguf` | Kyutai [Pocket TTS](https://github.com/kyutai-labs/pocket-tts), English speech synthesis (CC-BY-4.0) | 138 MB |
 | `alba.safetensors` | Kyutai's alba voice for Pocket TTS (CC-BY-4.0) | 6 MB |
+| `silero-vad-v6.2-F32.gguf` | Silero VAD v6.2, telling speech from other sound (MIT) | 1.2 MB |
 
 - Window: `gear window` draws the loop in the toolcore-native style: the state (LISTENING, HEARING, SENDING, WAITING, SPEAKING, MUTED or STOPPED), the target agent, a microphone meter, the message with its countdown, the reply as written with code and tables boxed as not read, and a status bar that turns rust with a fault. Space mutes, Esc stops the reading or drops the message, Enter sends now, and `+` and `-` change the text size. `gear window --demo --shot F.png` draws a made-up exchange to a picture without a display.
 - Agents on another machine: with `GEAR_WAKTERM_HOST` naming it, gear runs `wakterm` there through `ssh -T`, the message as a quoted argument, since the Windows ssh client never passes on the end of piped input. Each answer is read until it is a whole JSON object, because a session that admitted a prompt can stay open after the command has exited. From Windows, a message with quotes, `&`, `$` and `;` reached a Claude agent on Linux intact and its reply came back in 2.9 s. gear passes `--no-auto-start` to every `wakterm` call, so a client that cannot find the server fails rather than starting a second one.
@@ -136,6 +137,23 @@ The GPU gives the same accuracy: on the 556 LibriSpeech utterances used for accu
 The first run after a GPU driver is installed or updated compiles the shaders for that GPU: the first piece of speech then took 15 s and the first reply 2.9 s to start. The driver keeps what it compiled, and later runs start at the speeds above.
 
 The cost is size: the compiled shaders add 44 MB to the program, which compresses to 8 MB with zstd. The Vulkan library is opened when gear starts rather than linked, so the same program starts on a machine without it. On Linux, gear on a machine without a GPU, and in a container without the Vulkan library, ran on the CPU with the same transcripts.
+
+### Speech detection: Silero VAD at 0.5
+
+The detector decides when the user has started talking. Its mistakes cost twice: a false start stops a reply being read, and the piece it cuts may be transcribed into words that were never said. gs_voice's detector, the small network WebRTC's gain control uses, took breathing and room noise for speech: of 247 pieces gear kept in daily use, 239 had no words in them. Silero VAD, run through hearsay on transcribe.cpp, rejects almost all of that and catches as many short words.
+
+Each detector's scores for the same recordings were replayed through gear's listener, counting the recordings in which a piece of speech starts (lower is better for the first two columns, higher for the last two):
+
+| Detector and rule to start a piece | Kept pieces with no words (240) | Background noise (408) | One-word recordings (4,074) | LibriSpeech sentences (556) |
+| --- | ---: | ---: | ---: | ---: |
+| gs_voice, 0.8 held for 30 ms (before) | 65.0% | 39.0% | 98.9% | 100% |
+| gs_voice, 0.8 held for 100 ms | 7.9% | 32.6% | 95.4% | 100% |
+| Silero, 0.5 held for two 32 ms windows (chosen) | 5.0% | 0.5% | 99.2% | 100% |
+| Silero, 0.7 held for two 32 ms windows | 1.2% | 0.0% | 98.8% | 100% |
+
+Holding gs_voice's start longer drops the breaths but also misses short words such as "up" and "stop", and takes a third of the background noise for speech whatever the rule. Silero at 0.7 rejects a little more, but it was slower to notice the user talking over a reply played through loudspeakers: 0.11 to 0.24 s against 0.11 to 0.17 s at 0.5. Silero costs about 0.06 ms of CPU for each 32 ms (transcribe.cpp's measurement on an Apple M4) and adds a 1.2 MB model; gs_voice still cancels the echo.
+
+How it was measured: each recording was played with 0.5 s of silence before and 1 s after through a fresh detector, one score per 10 ms frame for gs_voice and per 32 ms window for Silero (the Python [silero-vad](https://pypi.org/project/silero-vad/) package, 6.2), and gear's listener was replayed over the scores. The kept pieces are the ones gs_voice had started on and Parakeet found no words in, so that column favours any other detector; the background noise is the 408 one-second clips of noise in the test set of Google's [Speech Commands](https://arxiv.org/abs/1804.03209) v0.02, whose one-word recordings of its ten command words (yes, no, up, down, left, right, on, off, stop, go) make the word column; the sentences are the LibriSpeech utterances used for accuracy above.
 
 ## Credits
 

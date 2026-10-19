@@ -1,5 +1,5 @@
-// The spoken loop's logic, apart from any device: microphone frames in, a message out. Each frame is
-// cleaned by gs_voice and judged by its voice detector; the listener cuts the frames into pieces of
+// The spoken loop's logic, apart from any device: microphone frames in, a message out. Each frame has
+// the echo taken out by gs_voice and is judged by Silero (gear_vad); the listener cuts the frames into pieces of
 // speech, the recogniser turns each piece into text on its own thread, and the pieces add up to the
 // message. Once the user has stopped talking and every piece is transcribed, a countdown runs, and
 // talking again stops it. When it runs out the message is ready to send. Starting to talk while a
@@ -13,11 +13,12 @@
 #include "hear.h"
 #include "listen.h"
 #include "say.h"
+#include "vad.h"
 
 typedef struct gear_pipeline gear_pipeline;
 
 // `say` may be NULL (nothing to interrupt). The pipeline does not own its parts.
-gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_hear *hear, gear_say *say, const gear_listen_params *listen, double countdown);
+gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_vad *vad, gear_hear *hear, gear_say *say, const gear_listen_params *listen, double countdown);
 void gear_pipeline_free(gear_pipeline *p);
 // Keeps what is heard in `dir`, for training a recogniser on the user's own speech later: each piece
 // as a 16 kHz WAV file in a folder for the day, and in dir/heard.jsonl a line per piece (its file,

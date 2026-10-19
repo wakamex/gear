@@ -5,6 +5,7 @@
 
 struct gear_pipeline {
     gs_voice *voice;
+    gear_vad *vad;
     gear_hear *hear;
     gear_say *say;
     gear_listen *listen;
@@ -21,9 +22,10 @@ struct gear_pipeline {
     int pend_head, pend_count;
 };
 
-gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_hear *hear, gear_say *say, const gear_listen_params *listen, double countdown) {
+gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_vad *vad, gear_hear *hear, gear_say *say, const gear_listen_params *listen, double countdown) {
     gear_pipeline *p = SDL_calloc(1, sizeof *p);
     p->voice = voice;
+    p->vad = vad;
     p->hear = hear;
     p->say = say;
     p->listen = gear_listen_new(listen);
@@ -118,7 +120,7 @@ static void drain(gear_pipeline *p);
 void gear_pipeline_frame(gear_pipeline *p, float *frame) {
     gs_voice_frame(p->voice, frame);
     p->frames++;
-    switch (gear_listen_frame(p->listen, frame, gs_voice_speech(p->voice))) {
+    switch (gear_listen_frame(p->listen, frame, gear_vad_frame(p->vad, frame))) {
     case GEAR_LISTEN_START:
         if (p->say && gear_say_busy(p->say)) {
             gear_say_stop(p->say);

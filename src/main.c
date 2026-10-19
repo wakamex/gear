@@ -87,6 +87,14 @@ static gear_say *open_say(const char *dir, gs_voice *echo) {
     return s;
 }
 
+static gear_vad *open_vad(const char *dir) {
+    char path[1200], error[512];
+    gear_model_path(dir, GEAR_MODEL_VAD, path, sizeof path);
+    gear_vad *v = gear_vad_open(path, error, sizeof error);
+    if (!v) fprintf(stderr, "gear: %s\n", error);
+    return v;
+}
+
 static gs_voice *open_voice(void) {
     bool echo = !opt.no_echo && gs_voice_has_echo();
     return gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (echo ? GS_VOICE_ECHO : 0));
@@ -168,8 +176,10 @@ static int listen_live(void) {
     if (!mic) { fprintf(stderr, "gear: no microphone: %s\n", SDL_GetError()); return 1; }
     SDL_ResumeAudioStreamDevice(mic);
     fprintf(stderr, "gear: listening%s; Ctrl+C quits\n", gs_voice_has_echo() && !opt.no_echo ? " with echo cancellation" : "");
+    gear_vad *vad = open_vad(dir);
+    if (!vad) return 1;
     gear_listen_params lp = gear_listen_defaults();
-    gear_pipeline *p = gear_pipeline_new(voice, hear, say, &lp, opt.countdown);
+    gear_pipeline *p = gear_pipeline_new(voice, vad, hear, say, &lp, opt.countdown);
     if (!opt.no_keep) {
         char heard[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
         SDL_snprintf(heard, sizeof heard, "%sheard", pref ? pref : "");
@@ -210,6 +220,7 @@ static int listen_live(void) {
         SDL_Delay(10);
     }
     gear_pipeline_free(p);
+    gear_vad_free(vad);
     gear_relay_free(relay);
     SDL_DestroyAudioStream(mic);
     gear_say_close(say);
@@ -229,8 +240,10 @@ static int hear_file(const char *path) {
     gear_hear *hear = open_hear(dir);
     if (!hear) return 1;
     gs_voice *voice = open_voice();
+    gear_vad *vad = open_vad(dir);
+    if (!vad) return 1;
     gear_listen_params lp = gear_listen_defaults();
-    gear_pipeline *p = gear_pipeline_new(voice, hear, NULL, &lp, opt.countdown);
+    gear_pipeline *p = gear_pipeline_new(voice, vad, hear, NULL, &lp, opt.countdown);
     float frame[GEAR_FRAME];
     int sent = 0;
     for (int i = 0;; i += GEAR_FRAME) {
@@ -250,6 +263,7 @@ static int hear_file(const char *path) {
         if (i >= n && !gear_pipeline_hearing(p) && !gear_hear_pending(hear) && !*gear_pipeline_text(p) && gear_pipeline_time(p) > (double)n / GEAR_RATE + 1) break;
     }
     gear_pipeline_free(p);
+    gear_vad_free(vad);
     gs_voice_free(voice);
     gear_hear_close(hear);
     SDL_free(audio);
@@ -309,9 +323,10 @@ static int interrupt_file(const char *text, const char *mic_path, const char *ou
     gs_voice *voice = open_voice();
     gear_hear *hear = open_hear(dir);
     gear_say *say = hear ? open_say(dir, voice) : NULL;
-    if (!say) return 1;
+    gear_vad *vad = say ? open_vad(dir) : NULL;
+    if (!vad) return 1;
     gear_listen_params lp = gear_listen_defaults();
-    gear_pipeline *p = gear_pipeline_new(voice, hear, say, &lp, opt.countdown);
+    gear_pipeline *p = gear_pipeline_new(voice, vad, hear, say, &lp, opt.countdown);
     recording r = { 0 };
     float frame[GEAR_FRAME];
     double stopped_at = -1, quiet_at = -1;
@@ -333,6 +348,7 @@ static int interrupt_file(const char *text, const char *mic_path, const char *ou
     else printf("talking heard at %.2f s, the reading stopped there and the player was quiet at %.2f s\n", stopped_at, quiet_at);
     gear_wav_write(out, r.lr, r.frames, 2, MIX_RATE);
     gear_pipeline_free(p);
+    gear_vad_free(vad);
     gear_say_close(say);
     gear_hear_close(hear);
     gs_voice_free(voice);

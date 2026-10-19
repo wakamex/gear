@@ -255,11 +255,54 @@ static gs_update *start_updates(void) {
 #endif
 }
 
+// ---- Fetching models ----
+
+// Missing model files download on a thread of their own while the window shows how far it has got,
+// and the loop opens once all are in place: a first install, or a newer build that uses a new model.
+typedef struct {
+    const char *dir;
+    SDL_Thread *thread;
+    SDL_Mutex *lock;
+    SDL_AtomicInt stop, done;
+    long long received, total;
+    double eta;
+    bool ok;
+    char error[256];
+} fetcher;
+
+static void fetch_progress(void *user, long long received, long long total, double eta) {
+    fetcher *f = user;
+    SDL_LockMutex(f->lock);
+    f->received = received, f->total = total, f->eta = eta;
+    SDL_UnlockMutex(f->lock);
+}
+
+static int fetch_run(void *user) {
+    fetcher *f = user;
+    char error[256] = "";
+    bool ok = gear_models_fetch(f->dir, &f->stop, fetch_progress, f, error, sizeof error);
+    SDL_LockMutex(f->lock);
+    f->ok = ok;
+    SDL_strlcpy(f->error, error, sizeof f->error);
+    SDL_UnlockMutex(f->lock);
+    SDL_SetAtomicInt(&f->done, 1);
+    return 0;
+}
+
+static void fetch_status(fetcher *f, char *out, size_t size) {
+    SDL_LockMutex(f->lock);
+    if (f->total <= 0) SDL_strlcpy(out, "Downloading the models", size);
+    else if (f->eta >= 0) SDL_snprintf(out, size, "Downloading the models: %.0f%% of %.0f MB, %.0f s left", 100.0 * (double)f->received / (double)f->total, (double)f->total / 1e6, f->eta);
+    else SDL_snprintf(out, size, "Downloading the models: %.0f%% of %.0f MB", 100.0 * (double)f->received / (double)f->total, (double)f->total / 1e6);
+    SDL_UnlockMutex(f->lock);
+}
+
 // ---- The live loop ----
 
 typedef struct {
     const gear_window_options *o;
     gs_voice *voice;
+    gear_vad *vad;
     gear_hear *hear;
     gear_say *say;
     gear_relay *relay;
@@ -421,6 +464,8 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     if (!gear_models_present(o->models)) { SDL_snprintf(error, error_size, "The models are not in %s; run gear fetch", o->models); return false; }
     bool echo = !o->no_echo && gs_voice_has_echo();
     a->voice = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (echo ? GS_VOICE_ECHO : 0));
+    gear_model_path(o->models, GEAR_MODEL_VAD, path, sizeof path);
+    if (!(a->vad = gear_vad_open(path, error, error_size))) return false;
     char hear_name[128];
     gear_hear_model_pick(o->models, o->hear_model, path, sizeof path, hear_name, sizeof hear_name);
     if (!(a->hear = gear_hear_open(path, o->hear_threads, error, error_size))) return false;
@@ -446,7 +491,7 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     slug(a->say_slug, sizeof a->say_slug, gear_model_info(GEAR_MODEL_SAY)->name);
     slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(GEAR_MODEL_VOICE)->name);
     gear_listen_params lp = gear_listen_defaults();
-    a->pipe = gear_pipeline_new(a->voice, a->hear, a->say, &lp, o->countdown);
+    a->pipe = gear_pipeline_new(a->voice, a->vad, a->hear, a->say, &lp, o->countdown);
     if (!o->no_keep) {
         char heard[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
         SDL_snprintf(heard, sizeof heard, "%sheard", pref ? pref : "");
@@ -487,6 +532,7 @@ static void switch_hear(app *a) {
 static void close_loop(app *a) {
     if (a->mic) SDL_DestroyAudioStream(a->mic);
     gear_pipeline_free(a->pipe);
+    gear_vad_free(a->vad);
     gear_relay_free(a->relay);
     gear_say_close(a->say);
     if (a->say) gs_mix_close();
@@ -531,10 +577,13 @@ int gear_window(const gear_window_options *o) {
     px = 15;
     app a = { .o = o };
     view v;
-    if (!o->demo) {
-        char error[512] = "";
-        if (!open_loop(&a, error, sizeof error)) SDL_strlcpy(a.fault, error, sizeof a.fault);
-    }
+    char error[512] = "";
+    fetcher fetch = { .dir = o->models };
+    bool fetching = !o->demo && !o->shot && o->models[0] && !gear_models_present(o->models);
+    if (fetching) {
+        fetch.lock = SDL_CreateMutex();
+        fetch.thread = SDL_CreateThread(fetch_run, "gear-fetch", &fetch);
+    } else if (!o->demo && !open_loop(&a, error, sizeof error)) SDL_strlcpy(a.fault, error, sizeof a.fault);
     int code = 0, frames = 0;
     Uint64 drawn = 0, busy = 0;
     // A published build keeps itself up to date, and starts the new one after 10 s of nothing to
@@ -570,9 +619,19 @@ int gear_window(const gear_window_options *o) {
         drawn = SDL_GetTicks();
         small = SDL_roundf(px * 0.8f);
         st->text_px = px, st->small_px = small;
+        if (fetching && SDL_GetAtomicInt(&fetch.done)) {
+            SDL_WaitThread(fetch.thread, NULL);
+            fetching = false;
+            if (!fetch.ok) SDL_snprintf(a.fault, sizeof a.fault, "Could not download the models: %s", fetch.error);
+            else if (!open_loop(&a, error, sizeof error)) SDL_strlcpy(a.fault, error, sizeof a.fault);
+        }
         if (o->demo || !a.pipe) {
             if (o->demo) demo(&v);
-            else {
+            else if (fetching) {
+                SDL_zero(v);
+                v.state = "FETCHING", v.state_color = ACCENT, v.message = "", v.left = -1;
+                fetch_status(&fetch, v.status, sizeof v.status);
+            } else {
                 SDL_zero(v);
                 v.state = "STOPPED", v.state_color = OVER, v.message = "", v.left = -1, v.fault = true;
                 SDL_strlcpy(v.status, a.fault, sizeof v.status);
@@ -605,6 +664,11 @@ int gear_window(const gear_window_options *o) {
         SDL_RenderPresent(ren);
     }
     gs_update_free(update);
+    if (fetching) {
+        SDL_SetAtomicInt(&fetch.stop, 1);
+        SDL_WaitThread(fetch.thread, NULL);
+    }
+    SDL_DestroyMutex(fetch.lock);
     close_loop(&a);
     gs_ui_free(ui);
     gs_fontset_free(fonts);

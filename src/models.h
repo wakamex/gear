@@ -6,7 +6,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-typedef enum { GEAR_MODEL_HEAR, GEAR_MODEL_SAY, GEAR_MODEL_VOICE, GEAR_MODEL_COUNT } gear_model;
+typedef enum { GEAR_MODEL_HEAR, GEAR_MODEL_SAY, GEAR_MODEL_VOICE, GEAR_MODEL_VAD, GEAR_MODEL_COUNT } gear_model;
 
 typedef struct {
     const char *name;    // the file's name in the models folder

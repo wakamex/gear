@@ -22,6 +22,12 @@ static const gear_model_file files[GEAR_MODEL_COUNT] = {
         6195000, "d291428b416d6c36a1de7835e51dbe1e334b75e5af512bb18dd23a1047fe8f3b",
         "Kyutai's alba voice for Pocket TTS (CC-BY-4.0)",
     },
+    [GEAR_MODEL_VAD] = {
+        "silero-vad-v6.2-F32.gguf",
+        "https://huggingface.co/handy-computer/silero-vad-v6.2-gguf/resolve/a9b2d61c20ae4ddf3644edb34969e8185a485448/silero-vad-v6.2-F32.gguf",
+        1241056, "0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6",
+        "Silero VAD v6.2, telling speech from other sound (MIT)",
+    },
 };
 
 const gear_model_file *gear_model_info(gear_model m) { return &files[m]; }
