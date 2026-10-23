@@ -4,7 +4,10 @@
     .fingerprint = 0xb44539bd8c82bb3,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
-        .hearsay = .{ .path = "../hearsay" },
+        .hearsay = .{
+            .url = "git+https://github.com/wakamex/hearsay#03709d865d553ca9a52bbc772dd385fac343759a",
+            .hash = "hearsay-0.0.0-qFXHiG9SAQAXo1qt4ABuSUO5YgZRrKmQNB0DJ48kkex1",
+        },
         .gesso = .{
             .url = "git+https://github.com/wakamex/gesso.git#579271decc72946e112d925e2addf548d63a31a7",
             .hash = "gesso-0.0.0-LFvUr63XRwAs9p3vM2nePvaV83owLj2OmOgkXOyI9TPo",

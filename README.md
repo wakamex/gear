@@ -2,7 +2,7 @@
 
 gear is a voice front-end for coding agents. You speak to an agent such as [Claude Code](https://www.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex), gear sends the message when you stop talking, reads the reply aloud and listens again, all on your own machine. [BRIEF.md](BRIEF.md) holds the goals the project started from; this README records the decisions made since.
 
-gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies the window, audio, echo cancellation and downloads, and [hearsay](../hearsay), which supplies speech detection, recognition and synthesis. It runs on Linux and Windows, on the GPU where one is usable and on the CPU otherwise; the Windows build is 50 MB with echo cancellation, most of it the GPU's compiled shaders, and 6.2 MB built for the CPU only.
+gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies the window, audio, echo cancellation and downloads, and [hearsay](https://github.com/wakamex/hearsay), which supplies speech detection, recognition and synthesis. It runs on Linux and Windows, on the GPU where one is usable and on the CPU otherwise; the Windows build is 50 MB with echo cancellation, most of it the GPU's compiled shaders, and 6.2 MB built for the CPU only.
 
 ## What works
 
@@ -31,7 +31,7 @@ Not built yet: the reply's sentence being read shown bright, editing a misheard 
 
 ## Build and run
 
-With [Zig](https://ziglang.org/) 0.17.0, beside a checkout of hearsay in `../hearsay`, and the [glslc](https://github.com/google/shaderc) shader compiler for the GPU build (Fedora's `glslc` package, or `-Dglslc=PATH`):
+With [Zig](https://ziglang.org/) 0.17.0, which fetches gesso and hearsay at the commits pinned in `build.zig.zon`, and the [glslc](https://github.com/google/shaderc) shader compiler for the GPU build (Fedora's `glslc` package, or `-Dglslc=PATH`):
 
 ```sh
 zig build -Doptimize=ReleaseFast             # zig-out/bin/gear, 51 MB on Linux, needing only libc
