@@ -36,12 +36,13 @@ static const char usage[] =
     "       gear interrupt TEXT MIC.wav OUT.wav  speak TEXT while MIC.wav plays as the microphone\n"
     "options: --countdown SECONDS (3, or as last set in the window)  --hear-threads N (1)  --say-threads N (2)  --no-echo\n"
     "         --cpu  run the models on the CPU (by default on the GPU where one is usable)\n"
+    "         --muted  start the window muted\n"
     "         --hear-model FILE  a Parakeet GGUF in the models folder, or a path (default: the last chosen)\n"
     "         --no-keep  keep nothing heard (by default listen and window keep each piece of speech and\n"
     "                    its transcript in a heard folder in gear's data folder, for training later)\n"
     "models:  GEAR_MODELS, or a models folder in the user's data folder for gear\n";
 
-static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo, no_keep; const char *hear_model; } opt = { -1, 1, 2, false, false, NULL, NULL, false, false, NULL };
+static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo, no_keep; const char *hear_model; bool muted; } opt = { -1, 1, 2, false, false, NULL, NULL, false, false, NULL, false };
 
 static void progress(void *user, long long received, long long total, double eta) {
     if (eta >= 0) fprintf(stderr, "\r%5.1f%% of %.0f MB, %.0f s left   ", 100.0 * (double)received / (double)total, (double)total / 1e6, eta);
@@ -372,6 +373,7 @@ int main(int argc, char **argv) {
         else if (!SDL_strcmp(argv[i], "--shot") && i + 1 < argc) opt.shot = argv[++i];
         else if (!SDL_strcmp(argv[i], "--demo")) opt.demo = true;
         else if (!SDL_strcmp(argv[i], "--no-keep")) opt.no_keep = true;
+        else if (!SDL_strcmp(argv[i], "--muted")) opt.muted = true;
         else if (!SDL_strcmp(argv[i], "--hear-model") && i + 1 < argc) opt.hear_model = argv[++i];
         else if (nargs < 4 && (argv[i][0] != '-' || !argv[i][1])) args[nargs++] = argv[i];
         else { fputs(usage, stderr); return 2; }
@@ -379,11 +381,18 @@ int main(int argc, char **argv) {
     if (!nargs || !SDL_strcmp(args[0], "window")) {
         if (nargs > 1) { fputs(usage, stderr); return 2; }
         const char *dir = opt.demo ? "" : gear_models_dir();
-        gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.no_keep, opt.shot, opt.demo, opt.hear_model };
+        gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.no_keep, opt.shot, opt.demo, opt.hear_model, opt.muted };
         int code = gear_window(&o);
         // A newer build is in place: it takes over, and this one ends.
-        if (code == GEAR_UPDATED) {
-            if (gs_update_restart(NULL, GEAR_PROGRAM, argc, argv)) return 0;
+        // (muted, it starts muted; --muted is dropped otherwise, so unmuting is kept too)
+        if (code == GEAR_UPDATED || code == GEAR_UPDATED_MUTED) {
+            const char *again[72];
+            int n = 0;
+            for (int i = 0; i < argc && n < 70; i++)
+                if (SDL_strcmp(argv[i], "--muted")) again[n++] = argv[i];
+            if (code == GEAR_UPDATED_MUTED) again[n++] = "--muted";
+            again[n] = NULL;
+            if (gs_update_restart(NULL, GEAR_PROGRAM, n, (char **)again)) return 0;
             fprintf(stderr, "gear: the new build could not be started: %s\n", SDL_GetError());
             return 1;
         }

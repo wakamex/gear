@@ -14,12 +14,14 @@ typedef struct {
     const char *shot;     // write a picture of the window to this PNG once it has drawn, and exit
     bool demo;            // show a made-up exchange instead of running the loop (no models needed)
     const char *hear_model;  // a recognition model file or path; NULL for the last chosen
+    bool muted;           // start muted
 } gear_window_options;
 
 // Runs until the window closes; the exit code. GEAR_UPDATED when a newer build was put in place
-// and the window ended, idle, for it to be started.
+// and the window ended, idle, for it to be started; GEAR_UPDATED_MUTED the same while muted, for
+// it to start muted.
 int gear_window(const gear_window_options *o);
-enum { GEAR_UPDATED = 75 };
+enum { GEAR_UPDATED = 75, GEAR_UPDATED_MUTED = 76 };
 #ifdef _WIN32
 #define GEAR_PROGRAM "gear.exe"
 #else

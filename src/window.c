@@ -513,7 +513,8 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     } else SDL_strlcpy(a->target, "→ nobody: each message is read back", sizeof a->target);
     const SDL_AudioSpec spec = { SDL_AUDIO_F32, 1, GEAR_RATE };
     if (!(a->mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, NULL, NULL))) { SDL_snprintf(error, error_size, "No microphone: %s", SDL_GetError()); return false; }
-    SDL_ResumeAudioStreamDevice(a->mic);
+    a->muted = o->muted, a->muted_at = SDL_GetTicks();
+    if (!a->muted) SDL_ResumeAudioStreamDevice(a->mic);
     a->raw = SDL_calloc(KEPT, sizeof(float));
     a->clean = SDL_calloc(KEPT, sizeof(float));
     // The loop runs only once everything it needs is open: without it the window shows STOPPED.
@@ -639,9 +640,8 @@ int gear_window(const gear_window_options *o) {
                 *gear_pipeline_text(a.pipe) || (a.relay && gear_relay_waiting(a.relay)))
                 busy = SDL_GetTicks();
         }
-        // (not while muted: the new build would start listening)
-        if (gs_update_ready(update) && !a.muted && SDL_GetTicks() - busy > 10000) {
-            code = GEAR_UPDATED;
+        if (gs_update_ready(update) && SDL_GetTicks() - busy > 10000) {
+            code = a.muted ? GEAR_UPDATED_MUTED : GEAR_UPDATED;
             running = false;
         }
         // Drawn twenty times a second: the meter and countdown move by themselves.
