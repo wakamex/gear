@@ -37,3 +37,7 @@ int gear_hear_models(const char *dir, char names[][128], int max);
 // the one last chosen there, else the default. Its path goes in `out`, its file name in `name`.
 void gear_hear_model_pick(const char *dir, const char *choice, char *out, size_t size, char *name, size_t name_size);
 void gear_hear_model_remember(const char *dir, const char *name);  // kept in dir/hear-model.txt
+// The countdown before a message is sent, in seconds, as last set in the window (dir/countdown.txt),
+// else `fallback`.
+double gear_countdown_remembered(const char *dir, double fallback);
+void gear_countdown_remember(const char *dir, double seconds);

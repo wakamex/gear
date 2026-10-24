@@ -7,7 +7,7 @@
 typedef struct {
     const char *models;   // the models folder
     const char *to;       // the agent messages go to, or NULL to read each message back
-    double countdown;
+    double countdown;     // < 0 for the one last set in the window, else 3 s
     int hear_threads, say_threads;
     bool no_echo;
     bool no_keep;         // do not keep what is heard (see gear_pipeline_keep)

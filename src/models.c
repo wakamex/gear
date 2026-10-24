@@ -211,3 +211,19 @@ void gear_hear_model_pick(const char *dir, const char *choice, char *out, size_t
     SDL_snprintf(out, size, "%s/%s", dir, file);
     SDL_strlcpy(name, file, name_size);
 }
+
+double gear_countdown_remembered(const char *dir, double fallback) {
+    char path[1200];
+    SDL_snprintf(path, sizeof path, "%s/countdown.txt", dir);
+    char *text = SDL_LoadFile(path, NULL);
+    double s = text ? SDL_atof(text) : 0;
+    SDL_free(text);
+    return s > 0 ? s : fallback;
+}
+
+void gear_countdown_remember(const char *dir, double seconds) {
+    char path[1200], text[32];
+    SDL_snprintf(path, sizeof path, "%s/countdown.txt", dir);
+    SDL_snprintf(text, sizeof text, "%g", seconds);
+    SDL_SaveFile(path, text, SDL_strlen(text));
+}

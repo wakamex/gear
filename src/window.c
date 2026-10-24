@@ -43,6 +43,7 @@ typedef struct {
     const char *message;
     bool pending;           // speech heard and not yet in the message
     double left, total;     // the countdown, left < 0 when not counting
+    int countdown_setting;  // the countdown's length, shown with - and + to change it; 0 hides it
     const char *reply;
     bool speaking;
     char status[300];
@@ -53,6 +54,7 @@ typedef struct {
 
 static float px, small;  // the text size and the small size, in points
 static gs_rect status_line;  // where the status bar's first line was drawn, for a click on it
+static gs_rect countdown_less, countdown_more;  // the countdown control's - and +, for clicks on them
 
 // A panel: a frame with its title set into the top rule. Returns the inside.
 static gs_rect panel(gs_ui *ui, gs_rect r, const char *title) {
@@ -79,6 +81,20 @@ static void state_line(gs_ui *ui, gs_rect r, const view *v) {
     for (int i = 0; i < LEVELS; i++) {
         float h = 2 + 12 * SDL_clamp(v->levels[i], 0, 1);
         gs_ui_fill(ui, (gs_rect){ meter.x + (float)i * 5, meter.y + meter.h / 2 + 7 - h, 3, h }, v->speech ? TEXT : DIM);
+    }
+    // The countdown's length before the meter: - and + change it a second at a time.
+    countdown_less = countdown_more = (gs_rect){ 0 };
+    if (v->countdown_setting > 0) {
+        char secs[16];
+        SDL_snprintf(secs, sizeof secs, "%d s", v->countdown_setting);
+        float sign = small * 1.4f, w = gs_ui_text_width(ui, "10 s", small) + 8;
+        gs_cut_right(&r, 14);
+        countdown_more = gs_cut_right(&r, sign);
+        gs_rect value = gs_cut_right(&r, w);
+        countdown_less = gs_cut_right(&r, sign);
+        gs_ui_text(ui, countdown_more, "+", small, gs_ui_hovered(ui, countdown_more) ? ACCENT : DIM, 0);
+        gs_ui_text(ui, value, secs, small, TEXT, 0);
+        gs_ui_text(ui, countdown_less, "-", small, gs_ui_hovered(ui, countdown_less) ? ACCENT : DIM, 0);
     }
     gs_ui_text(ui, r, v->target, small, TEXT, -1);
 }
@@ -309,6 +325,8 @@ typedef struct {
     gear_pipeline *pipe;
     SDL_AudioStream *mic;
     bool muted;
+    Uint64 muted_at, muted_frames;  // when muting began, and the frames of silence fed since
+    double countdown;
     char *reply;
     float levels[LEVELS];
     float level_sum;
@@ -342,7 +360,8 @@ static void fill(app *a, view *v) {
     v->message = gear_pipeline_text(a->pipe);
     v->pending = hearing || pending;
     v->left = left;
-    v->total = a->o->countdown;
+    v->total = a->countdown;
+    v->countdown_setting = (int)a->countdown;
     v->reply = a->reply;
     v->speaking = speaking;
     if (a->fault[0]) {
@@ -363,6 +382,7 @@ static void demo(view *v) {
     v->state = "SENDING";
     v->state_color = ACCENT;
     SDL_strlcpy(v->target, "→ pockettts (claude)", sizeof v->target);
+    v->countdown_setting = 3;
     float levels[LEVELS] = { 0.2f, 0.5f, 0.8f, 0.4f, 0.1f, 0.05f };
     SDL_memcpy(v->levels, levels, sizeof levels);
     v->message = "Fix the countdown so a long pause doesn't send the message, and then run the tests.";
@@ -396,11 +416,20 @@ static void report_interruption(app *a) {
 }
 
 // The microphone's frames into the pipeline, and its level for the meter.
+// Muted, the microphone is paused and the pipeline gets silence in its place, a frame for every 10 ms,
+// so its clock runs on: a piece being said ends, and the countdown runs out and sends the message.
+static bool next_frame(app *a, float *frame) {
+    if (!a->muted) return SDL_GetAudioStreamAvailable(a->mic) >= GEAR_FRAME * (int)sizeof(float) &&
+                          SDL_GetAudioStreamData(a->mic, frame, GEAR_FRAME * sizeof(float)) > 0;
+    if ((SDL_GetTicks() - a->muted_at) / 10 <= a->muted_frames) return false;
+    a->muted_frames++;
+    SDL_memset(frame, 0, GEAR_FRAME * sizeof(float));
+    return true;
+}
+
 static void listen_frames(app *a) {
     float frame[GEAR_FRAME];
-    while (SDL_GetAudioStreamAvailable(a->mic) >= (int)sizeof frame) {
-        SDL_GetAudioStreamData(a->mic, frame, sizeof frame);
-        if (a->muted) continue;
+    while (next_frame(a, frame)) {
         float sum = 0;
         for (int i = 0; i < GEAR_FRAME; i++) sum += frame[i] * frame[i];
         a->level_sum += sum / GEAR_FRAME;
@@ -491,7 +520,8 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     slug(a->say_slug, sizeof a->say_slug, gear_model_info(GEAR_MODEL_SAY)->name);
     slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(GEAR_MODEL_VOICE)->name);
     gear_listen_params lp = gear_listen_defaults();
-    a->pipe = gear_pipeline_new(a->voice, a->vad, a->hear, a->say, &lp, o->countdown);
+    a->countdown = o->countdown > 0 ? o->countdown : gear_countdown_remembered(o->models, 3);
+    a->pipe = gear_pipeline_new(a->voice, a->vad, a->hear, a->say, &lp, a->countdown);
     if (!o->no_keep) {
         char heard[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
         SDL_snprintf(heard, sizeof heard, "%sheard", pref ? pref : "");
@@ -643,13 +673,21 @@ int gear_window(const gear_window_options *o) {
         if (a.pipe) {  // the keys, after the frame has seen them
             if (gs_ui_key(ui, SDLK_SPACE, 0)) {
                 a.muted = !a.muted;
-                a.muted ? SDL_PauseAudioStreamDevice(a.mic) : SDL_ResumeAudioStreamDevice(a.mic);
+                a.muted_at = SDL_GetTicks(), a.muted_frames = 0;
+                if (a.muted) SDL_PauseAudioStreamDevice(a.mic);
+                else SDL_ClearAudioStream(a.mic), SDL_ResumeAudioStreamDevice(a.mic);
             }
             if (gs_ui_key(ui, SDLK_ESCAPE, 0)) {
                 if (gear_say_busy(a.say)) gear_say_stop(a.say);
                 else gear_pipeline_cancel(a.pipe);
             }
             if (gs_ui_clicked(ui, status_line)) switch_hear(&a);
+            int step = gs_ui_clicked(ui, countdown_more) ? 1 : gs_ui_clicked(ui, countdown_less) ? -1 : 0;
+            if (step && a.countdown + step >= 1 && a.countdown + step <= 10) {
+                a.countdown += step;
+                gear_pipeline_set_countdown(a.pipe, a.countdown);
+                gear_countdown_remember(o->models, a.countdown);
+            }
             if (gs_ui_key(ui, SDLK_RETURN, 0)) {
                 char *message = gear_pipeline_take(a.pipe);
                 if (message) deliver(&a, message);

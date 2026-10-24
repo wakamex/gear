@@ -159,6 +159,8 @@ static bool counting(const gear_pipeline *p) {
 
 static double left(const gear_pipeline *p) { return p->countdown - (double)(p->frames - p->last_end) / 100.0; }
 
+void gear_pipeline_set_countdown(gear_pipeline *p, double seconds) { p->countdown = seconds; }
+
 double gear_pipeline_countdown(const gear_pipeline *p) { return counting(p) ? SDL_max(left(p), 0) : -1; }
 
 static void drain(gear_pipeline *p) {

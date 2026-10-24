@@ -34,14 +34,14 @@ static const char usage[] =
     "       gear hear FILE.wav                 the pipeline on a recording, as if spoken\n"
     "       gear say TEXT OUT.wav              speak TEXT through the player, recorded to OUT.wav\n"
     "       gear interrupt TEXT MIC.wav OUT.wav  speak TEXT while MIC.wav plays as the microphone\n"
-    "options: --countdown SECONDS (3)  --hear-threads N (1)  --say-threads N (2)  --no-echo\n"
+    "options: --countdown SECONDS (3, or as last set in the window)  --hear-threads N (1)  --say-threads N (2)  --no-echo\n"
     "         --cpu  run the models on the CPU (by default on the GPU where one is usable)\n"
     "         --hear-model FILE  a Parakeet GGUF in the models folder, or a path (default: the last chosen)\n"
     "         --no-keep  keep nothing heard (by default listen and window keep each piece of speech and\n"
     "                    its transcript in a heard folder in gear's data folder, for training later)\n"
     "models:  GEAR_MODELS, or a models folder in the user's data folder for gear\n";
 
-static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo, no_keep; const char *hear_model; } opt = { 3.0, 1, 2, false, false, NULL, NULL, false, false, NULL };
+static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo, no_keep; const char *hear_model; } opt = { -1, 1, 2, false, false, NULL, NULL, false, false, NULL };
 
 static void progress(void *user, long long received, long long total, double eta) {
     if (eta >= 0) fprintf(stderr, "\r%5.1f%% of %.0f MB, %.0f s left   ", 100.0 * (double)received / (double)total, (double)total / 1e6, eta);
@@ -389,6 +389,7 @@ int main(int argc, char **argv) {
         }
         return code;
     }
+    if (opt.countdown < 0) opt.countdown = 3;
     if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }
     int rc = 2;
     if (!SDL_strcmp(args[0], "fetch") && nargs == 1) rc = fetch();

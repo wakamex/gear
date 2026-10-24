@@ -34,6 +34,7 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame);
 char *gear_pipeline_poll(gear_pipeline *p);
 const char *gear_pipeline_text(const gear_pipeline *p);  // the message so far
 double gear_pipeline_countdown(const gear_pipeline *p);  // seconds left before sending, < 0 when not counting
+void gear_pipeline_set_countdown(gear_pipeline *p, double seconds);  // from the next frame on
 bool gear_pipeline_hearing(const gear_pipeline *p);      // in a piece of speech now
 void gear_pipeline_cancel(gear_pipeline *p);             // drops the message
 // The message as it stands, sent now rather than when the countdown ends (the Enter key), or NULL
