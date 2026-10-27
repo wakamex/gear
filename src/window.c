@@ -281,10 +281,17 @@ static gs_update *start_updates(SDL_Window *win) {
                            .program = GEAR_PROGRAM, .agent = "gear", .state = state[0] ? state : NULL };
     gs_update *u = gs_update_start(&c);
     if (gs_update_consent(u) == GS_UPDATE_ASK) {
-        const SDL_MessageBoxButtonData buttons[] = { { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Keep it up to date" },
+        // (SDL's message box does not wrap, so the lines are broken here, and the buttons kept short,
+        // since Windows clips a longer label)
+        const SDL_MessageBoxButtonData buttons[] = { { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Yes" },
                                                      { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Not now" } };
         const SDL_MessageBoxData box = { SDL_MESSAGEBOX_INFORMATION, win, "gear test build " GEAR_BUILD,
-                                         GS_UPDATE_NOTICE " Click the test build's name in gear's status bar to turn it on or off.", 2, buttons, NULL };
+                                         "This is a test build of gear. It can keep itself up to date:\n"
+                                         "it downloads each new version and restarts when you have left\n"
+                                         "it alone for a couple of minutes, coming back as it was.\n\n"
+                                         "Click the test build's name in gear's status bar to turn this\n"
+                                         "on or off later.\n\n"
+                                         "Keep it up to date?", 2, buttons, NULL };
         int yes = 0;
         SDL_ShowMessageBox(&box, &yes);
         gs_update_set_consent(u, yes == 1);
