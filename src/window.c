@@ -44,6 +44,8 @@ typedef struct {
     bool pending;           // speech heard and not yet in the message
     double left, total;     // the countdown, left < 0 when not counting
     int countdown_setting;  // the countdown's length, shown with - and + to change it; 0 hides it
+    char build[200];        // a test build's name and whether it updates itself, or a notice; "" for none
+    bool build_ready;       // a new build is in place: the label restarts into it
     const char *reply;
     bool speaking;
     char status[300];
@@ -55,6 +57,7 @@ typedef struct {
 static float px, small;  // the text size and the small size, in points
 static gs_rect status_line;  // where the status bar's first line was drawn, for a click on it
 static gs_rect countdown_less, countdown_more;  // the countdown control's - and +, for clicks on them
+static gs_rect build_label;  // a test build's label in the status bar, for a click on it
 
 // A panel: a frame with its title set into the top rule. Returns the inside.
 static gs_rect panel(gs_ui *ui, gs_rect r, const char *title) {
@@ -228,7 +231,15 @@ static void draw(gs_ui *ui, const view *v) {
     SDL_strlcpy(first, v->status, second ? SDL_min((size_t)(second - v->status) + 1, sizeof first) : sizeof first);
     status_line = (gs_rect){ bar.x, bar.y + 4, bar.w, line };
     gs_ui_text(ui, status_line, first, small, v->fault ? OVER : DIM, -1);
-    if (second) gs_ui_text(ui, (gs_rect){ bar.x, bar.y + 4 + line, bar.w, line }, second + 1, small, DIM, -1);
+    gs_rect below = { bar.x, bar.y + 4 + line, bar.w, line };
+    // A test build says so at the right of the second line: its name, and whether it updates itself.
+    build_label = (gs_rect){ 0 };
+    if (v->build[0]) {
+        build_label = gs_cut_right(&below, gs_ui_text_width(ui, v->build, small) + 4);
+        bool hot = gs_ui_hovered(ui, build_label);
+        gs_ui_text(ui, build_label, v->build, small, v->build_ready || hot ? ACCENT : DIM, 1);
+    }
+    if (second) gs_ui_text(ui, below, second + 1, small, DIM, -1);
     gs_cut_bottom(&r, 8);
     float mh = message_height(ui, v, r.w - 20) + 20;
     gs_rect m = gs_cut_top(&r, mh);
@@ -259,14 +270,28 @@ static const Uint8 publisher[32] = {
     0x9d, 0x6c, 0xf0, 0x33, 0x08, 0xde, 0x1c, 0xad, 0x1b, 0x07, 0x9a, 0xa5, 0xcf, 0xde, 0x20, 0x7a,
 };
 
-// A published build (named by -Dbuild) keeps itself up to date with gesso's gs_update; a build of
-// one's own never looks.
-static gs_update *start_updates(void) {
+// A published build (named by -Dbuild) is a test build: it asks once whether to keep itself up to
+// date with gesso's gs_update, and looks for new builds only after a yes. A build of one's own never looks.
+static gs_update *start_updates(SDL_Window *win) {
 #ifdef GEAR_BUILD
     const char *from = SDL_getenv("GEAR_UPDATE_FROM");
-    gs_update_config c = { .build = GEAR_BUILD, .manifest = from && *from ? from : UPDATES, .key = publisher, .program = GEAR_PROGRAM, .agent = "gear" };
-    return gs_update_start(&c);
+    char state[1100] = "", *pref = SDL_GetPrefPath("wakamex", "gear");
+    if (pref) SDL_snprintf(state, sizeof state, "%supdate.txt", pref), SDL_free(pref);
+    gs_update_config c = { .build = GEAR_BUILD, .manifest = from && *from ? from : UPDATES, .key = publisher,
+                           .program = GEAR_PROGRAM, .agent = "gear", .state = state[0] ? state : NULL };
+    gs_update *u = gs_update_start(&c);
+    if (gs_update_consent(u) == GS_UPDATE_ASK) {
+        const SDL_MessageBoxButtonData buttons[] = { { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Keep it up to date" },
+                                                     { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Not now" } };
+        const SDL_MessageBoxData box = { SDL_MESSAGEBOX_INFORMATION, win, "gear test build " GEAR_BUILD,
+                                         GS_UPDATE_NOTICE " Click the test build's name in gear's status bar to turn it on or off.", 2, buttons, NULL };
+        int yes = 0;
+        SDL_ShowMessageBox(&box, &yes);
+        gs_update_set_consent(u, yes == 1);
+    }
+    return u;
 #else
+    (void)win;
     return NULL;
 #endif
 }
@@ -340,7 +365,24 @@ typedef struct {
     char hear_slug[96], say_slug[96], voice_slug[64];  // the model files in use, without their extensions
     char hear_file[128];
     int hear_at, hear_count;  // its place among the recognition models in the folder, from 1
+    gs_update *update;
+    char notice[160];         // said once in the status bar: an update, or going back from a failing build
+    Uint64 notice_until;
 } app;
+
+// A test build's label: a notice for a while after an update or a rollback, else its name and
+// whether it updates itself, or that a new build is ready to restart into.
+static void build_view(app *a, view *v) {
+#ifdef GEAR_BUILD
+    if (a->notice[0] && SDL_GetTicks() < a->notice_until) SDL_strlcpy(v->build, a->notice, sizeof v->build);
+    else if (gs_update_ready(a->update)) {
+        SDL_strlcpy(v->build, "a new test build is ready: click to restart", sizeof v->build);
+        v->build_ready = true;
+    } else SDL_snprintf(v->build, sizeof v->build, "test build %s, updates %s", GEAR_BUILD, gs_update_consent(a->update) == GS_UPDATE_YES ? "on" : "off");
+#else
+    (void)a, (void)v;
+#endif
+}
 
 static void fill(app *a, view *v) {
     SDL_zerop(v);
@@ -375,6 +417,7 @@ static void fill(app *a, view *v) {
         SDL_snprintf(v->status, sizeof v->status, "hear %s%s · say %s, %s\n%s · %s", a->hear_slug, which, a->say_slug, a->voice_slug,
                      SDL_strcasecmp(device, "cpu") ? "on the GPU" : "on the CPU", echo ? "echo cancel on" : "headphones");
     }
+    build_view(a, v);
 }
 
 static void demo(view *v) {
@@ -584,7 +627,11 @@ int gear_window(const gear_window_options *o) {
     SDL_SetAppMetadataProperty(SDL_PROP_APP_METADATA_CREATOR_STRING, "wakamex");  // gear's data folder is wakamex/gear
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }
     SDL_PropertiesID p = SDL_CreateProperties();
+#ifdef GEAR_BUILD
+    SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "gear (test build " GEAR_BUILD ")");
+#else
     SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "gear");
+#endif
     SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, 560);
     SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, 480);
     SDL_SetNumberProperty(p, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | (o->shot ? 0 : SDL_WINDOW_HIDDEN));
@@ -609,6 +656,12 @@ int gear_window(const gear_window_options *o) {
     app a = { .o = o };
     view v;
     char error[512] = "";
+    a.update = o->shot || o->demo ? NULL : start_updates(win);
+    if (gs_update_rolled_back(a.update)) SDL_strlcpy(a.notice, "the newest test build kept failing, so gear went back to this one", sizeof a.notice);
+#ifdef GEAR_BUILD
+    else if (o->restarted) SDL_strlcpy(a.notice, "updated to test build " GEAR_BUILD, sizeof a.notice);
+#endif
+    a.notice_until = SDL_GetTicks() + 60000;
     fetcher fetch = { .dir = o->models };
     bool fetching = !o->demo && !o->shot && o->models[0] && !gear_models_present(o->models);
     if (fetching) {
@@ -616,18 +669,18 @@ int gear_window(const gear_window_options *o) {
         fetch.thread = SDL_CreateThread(fetch_run, "gear-fetch", &fetch);
     } else if (!o->demo && !open_loop(&a, error, sizeof error)) SDL_strlcpy(a.fault, error, sizeof a.fault);
     int code = 0, frames = 0;
-    Uint64 drawn = 0, busy = 0;
-    // A published build keeps itself up to date, and starts the new one after 10 s of nothing to
-    // hear, send, wait for or read, so that no conversation is cut off.
-    gs_update *update = o->shot || o->demo ? NULL : start_updates();
+    Uint64 drawn = 0, input_at = SDL_GetTicks();
+    bool restart = false;
     for (bool running = true; running;) {
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, 10)) {
             do {
                 if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
+                if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL) input_at = SDL_GetTicks();
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
+        bool busy = fetching;
         if (a.pipe) {
             listen_frames(&a);
             char *message = gear_pipeline_poll(a.pipe);
@@ -636,14 +689,12 @@ int gear_window(const gear_window_options *o) {
             bool reading = gear_say_busy(a.say);
             if (reading && !a.speaking_since) a.speaking_since = SDL_GetTicks();
             if (!reading) a.speaking_since = 0;
-            if (reading || gear_pipeline_countdown(a.pipe) >= 0 || gear_pipeline_hearing(a.pipe) || gear_pipeline_pending(a.pipe) ||
-                *gear_pipeline_text(a.pipe) || (a.relay && gear_relay_waiting(a.relay)))
-                busy = SDL_GetTicks();
+            // Busy: reading a reply, hearing or transcribing speech, a message not yet sent, or a
+            // reply still awaited; gs_update_due also waits for two minutes without a key or click.
+            busy |= reading || gear_pipeline_countdown(a.pipe) >= 0 || gear_pipeline_hearing(a.pipe) || gear_pipeline_pending(a.pipe) ||
+                    *gear_pipeline_text(a.pipe) || (a.relay && gear_relay_waiting(a.relay));
         }
-        if (gs_update_ready(update) && SDL_GetTicks() - busy > 10000) {
-            code = a.muted ? GEAR_UPDATED_MUTED : GEAR_UPDATED;
-            running = false;
-        }
+        if (gs_update_due(a.update, busy, input_at)) restart = true, running = false;
         // Drawn twenty times a second: the meter and countdown move by themselves.
         if (SDL_GetTicks() - drawn < 50 && !o->shot) continue;
         drawn = SDL_GetTicks();
@@ -682,6 +733,10 @@ int gear_window(const gear_window_options *o) {
                 else gear_pipeline_cancel(a.pipe);
             }
             if (gs_ui_clicked(ui, status_line)) switch_hear(&a);
+            if (gs_ui_clicked(ui, build_label)) {
+                if (gs_update_ready(a.update)) restart = true, running = false;  // restart now
+                else gs_update_set_consent(a.update, gs_update_consent(a.update) != GS_UPDATE_YES), a.notice[0] = 0;
+            }
             int step = gs_ui_clicked(ui, countdown_more) ? 1 : gs_ui_clicked(ui, countdown_less) ? -1 : 0;
             if (step && a.countdown + step >= 1 && a.countdown + step <= 10) {
                 a.countdown += step;
@@ -701,7 +756,6 @@ int gear_window(const gear_window_options *o) {
         }
         SDL_RenderPresent(ren);
     }
-    gs_update_free(update);
     if (fetching) {
         SDL_SetAtomicInt(&fetch.stop, 1);
         SDL_WaitThread(fetch.thread, NULL);
@@ -712,6 +766,21 @@ int gear_window(const gear_window_options *o) {
     gs_fontset_free(fonts);
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
+    // The new build takes over with this run's arguments, muted if this one was (gs_update_restart_as
+    // adds --restarted, so its window does not take the keyboard and it says it was updated).
+    if (restart) {
+        const char *args[72];
+        int n = 0;
+        for (int i = 0; i < o->argc && n < 70; i++)
+            if (i == 0 || (SDL_strcmp(o->argv[i], "--muted") && SDL_strcmp(o->argv[i], "--restarted"))) args[n++] = o->argv[i];
+        if (a.muted) args[n++] = "--muted";
+        args[n] = NULL;
+        if (!gs_update_restart_as(a.update, n, (char **)args)) {
+            fprintf(stderr, "gear: the new build could not be started: %s\n", SDL_GetError());
+            code = 1;
+        }
+    }
+    gs_update_free(a.update);  // (a run that ends without it counts against a build on trial)
     SDL_Quit();
     return code;
 }

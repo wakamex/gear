@@ -374,6 +374,7 @@ int main(int argc, char **argv) {
         else if (!SDL_strcmp(argv[i], "--demo")) opt.demo = true;
         else if (!SDL_strcmp(argv[i], "--no-keep")) opt.no_keep = true;
         else if (!SDL_strcmp(argv[i], "--muted")) opt.muted = true;
+        else if (!SDL_strcmp(argv[i], "--restarted")) {}  // (gs_update_restarted)
         else if (!SDL_strcmp(argv[i], "--hear-model") && i + 1 < argc) opt.hear_model = argv[++i];
         else if (nargs < 4 && (argv[i][0] != '-' || !argv[i][1])) args[nargs++] = argv[i];
         else { fputs(usage, stderr); return 2; }
@@ -381,22 +382,8 @@ int main(int argc, char **argv) {
     if (!nargs || !SDL_strcmp(args[0], "window")) {
         if (nargs > 1) { fputs(usage, stderr); return 2; }
         const char *dir = opt.demo ? "" : gear_models_dir();
-        gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.no_keep, opt.shot, opt.demo, opt.hear_model, opt.muted };
-        int code = gear_window(&o);
-        // A newer build is in place: it takes over, and this one ends.
-        // (muted, it starts muted; --muted is dropped otherwise, so unmuting is kept too)
-        if (code == GEAR_UPDATED || code == GEAR_UPDATED_MUTED) {
-            const char *again[72];
-            int n = 0;
-            for (int i = 0; i < argc && n < 70; i++)
-                if (SDL_strcmp(argv[i], "--muted")) again[n++] = argv[i];
-            if (code == GEAR_UPDATED_MUTED) again[n++] = "--muted";
-            again[n] = NULL;
-            if (gs_update_restart(NULL, GEAR_PROGRAM, n, (char **)again)) return 0;
-            fprintf(stderr, "gear: the new build could not be started: %s\n", SDL_GetError());
-            return 1;
-        }
-        return code;
+        gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.no_keep, opt.shot, opt.demo, opt.hear_model, opt.muted, gs_update_restarted(argc, argv), argc, argv };
+        return gear_window(&o);
     }
     if (opt.countdown < 0) opt.countdown = 3;
     if (!SDL_Init(SDL_INIT_AUDIO | SDL_INIT_EVENTS)) { fprintf(stderr, "gear: %s\n", SDL_GetError()); return 1; }

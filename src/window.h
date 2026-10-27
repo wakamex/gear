@@ -15,13 +15,14 @@ typedef struct {
     bool demo;            // show a made-up exchange instead of running the loop (no models needed)
     const char *hear_model;  // a recognition model file or path; NULL for the last chosen
     bool muted;           // start muted
+    bool restarted;       // started by the build before this one, after an update (--restarted)
+    int argc;             // the program's arguments, for starting a newer build with them
+    char **argv;
 } gear_window_options;
 
-// Runs until the window closes; the exit code. GEAR_UPDATED when a newer build was put in place
-// and the window ended, idle, for it to be started; GEAR_UPDATED_MUTED the same while muted, for
-// it to start muted.
+// Runs until the window closes; the exit code. When a newer build is in place and gear is idle (or
+// its label is clicked), the window closes and starts the new build first.
 int gear_window(const gear_window_options *o);
-enum { GEAR_UPDATED = 75, GEAR_UPDATED_MUTED = 76 };
 #ifdef _WIN32
 #define GEAR_PROGRAM "gear.exe"
 #else

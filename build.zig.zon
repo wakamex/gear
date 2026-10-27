@@ -9,8 +9,8 @@
             .hash = "hearsay-0.0.0-qFXHiG9SAQAXo1qt4ABuSUO5YgZRrKmQNB0DJ48kkex1",
         },
         .gesso = .{
-            .url = "git+https://github.com/wakamex/gesso.git#579271decc72946e112d925e2addf548d63a31a7",
-            .hash = "gesso-0.0.0-LFvUr63XRwAs9p3vM2nePvaV83owLj2OmOgkXOyI9TPo",
+            .url = "git+https://github.com/wakamex/gesso.git#41cd890a124c53868ce173d0a2f9d7c7ff568173",
+            .hash = "gesso-0.0.0-LFvUr884SQCgP_cOdIt9Mdnt0Y3jI0fL7jd-03LaMjr8",
         },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src", "tests", "README.md", "BRIEF.md" },
