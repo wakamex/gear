@@ -1,4 +1,5 @@
 #include "models.h"
+#include <string.h>
 #include "gs_eta.h"
 #include "gs_http.h"
 #include "gs_sha256.h"
@@ -225,5 +226,27 @@ void gear_countdown_remember(const char *dir, double seconds) {
     char path[1200], text[32];
     SDL_snprintf(path, sizeof path, "%s/countdown.txt", dir);
     SDL_snprintf(text, sizeof text, "%g", seconds);
+    SDL_SaveFile(path, text, SDL_strlen(text));
+}
+
+bool gear_target_remembered(const char *dir, char *name, size_t name_size, char *host, size_t host_size) {
+    char path[1200];
+    SDL_snprintf(path, sizeof path, "%s/target.txt", dir);
+    char *text = SDL_LoadFile(path, NULL);
+    if (!text) return false;
+    char *line2 = SDL_strchr(text, '\n');
+    if (line2) *line2++ = 0;
+    SDL_strlcpy(name, text, name_size);
+    SDL_strlcpy(host, line2 ? line2 : "", host_size);
+    host[strcspn(host, "\r\n")] = 0;
+    SDL_free(text);
+    return name[0] != 0;
+}
+
+void gear_target_remember(const char *dir, const char *name, const char *host) {
+    char path[1200], text[600];
+    SDL_snprintf(path, sizeof path, "%s/target.txt", dir);
+    if (!name || !*name) { SDL_RemovePath(path); return; }
+    SDL_snprintf(text, sizeof text, "%s\n%s\n", name, host ? host : "");
     SDL_SaveFile(path, text, SDL_strlen(text));
 }

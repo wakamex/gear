@@ -558,6 +558,8 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     if (o->to) {
         gear_agent agent;
         if (!gear_agent_find(o->to, &agent, error, error_size)) return false;
+        // (found, it is where a start without --to goes next time, on the same host)
+        if (!o->shot) gear_target_remember(o->models, o->to, gear_agent_host());
         a->relay = gear_relay_new(agent.name);
         SDL_snprintf(a->target, sizeof a->target, "→ %s (%s)", agent.name, agent.harness);
     } else SDL_strlcpy(a->target, "→ nobody: each message is read back", sizeof a->target);

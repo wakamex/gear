@@ -8,11 +8,18 @@ static const char *wakterm(void) {
     return w && *w ? w : "wakterm";
 }
 
-// GEAR_WAKTERM_HOST names a machine to run wakterm on over SSH, for agents on another computer.
-static const char *host(void) {
+// GEAR_WAKTERM_HOST names a machine to run wakterm on over SSH, for agents on another computer;
+// without it, the host gear_agent_set_host gave, if any.
+static char fallback_host[256];
+
+void gear_agent_set_host(const char *h) { SDL_strlcpy(fallback_host, h ? h : "", sizeof fallback_host); }
+
+const char *gear_agent_host(void) {
     const char *h = SDL_getenv("GEAR_WAKTERM_HOST");
-    return h && *h ? h : NULL;
+    return h && *h ? h : fallback_host[0] ? fallback_host : NULL;
 }
+
+static const char *host(void) { return gear_agent_host(); }
 
 // An argument in single quotes for a POSIX shell, a quote inside it closed, escaped and reopened.
 static void shell_quote(char *out, size_t size, const char *a) {

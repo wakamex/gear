@@ -28,7 +28,8 @@ enum { READ_LIMIT = 1200 };  // the mix, rendered 10 ms at a time offline
 
 static const char usage[] =
     "usage: gear fetch                         download the models\n"
-    "       gear window [--to AGENT]           the window: talk, and hear the replies\n"
+    "       gear window [--to AGENT|none]      the window: talk, and hear the replies (AGENT is remembered;\n"
+    "                                          without --to, the last one, on the same host; none forgets it)\n"
     "       gear window --demo --shot F.png    a picture of the window with a made-up exchange\n"
     "       gear agents [NAME]                 the agents Wakterm can reach, or the one NAME (an agent or a tab) reaches\n"
     "       gear listen --to AGENT             talk to AGENT; its replies are read aloud\n"
@@ -394,6 +395,13 @@ int main(int argc, char **argv) {
     if (!nargs || !SDL_strcmp(args[0], "window")) {
         if (nargs > 1) { fputs(usage, stderr); return 2; }
         const char *dir = opt.demo ? "" : gear_models_dir();
+        // Without --to, the agent the window last reached, on its host; --to none forgets it.
+        static char to[256], host[256];
+        if (dir && *dir && opt.to && !SDL_strcmp(opt.to, "none")) gear_target_remember(dir, NULL, NULL), opt.to = NULL;
+        else if (dir && *dir && !opt.to && !opt.demo && gear_target_remembered(dir, to, sizeof to, host, sizeof host)) {
+            opt.to = to;
+            if (host[0]) gear_agent_set_host(host);
+        }
         gear_window_options o = { dir ? dir : "", opt.to, opt.countdown, opt.hear_threads, opt.say_threads, opt.no_echo, opt.no_keep, opt.shot, opt.demo, opt.hear_model, opt.muted, gs_update_restarted(argc, argv), argc, argv };
         return gear_window(&o);
     }

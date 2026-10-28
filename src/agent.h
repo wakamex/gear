@@ -25,3 +25,8 @@ typedef enum { GEAR_REPLY_PENDING, GEAR_REPLY_DONE, GEAR_REPLY_FAILED } gear_rep
 // Where the request stands. DONE sets *reply to the agent's final message (SDL_free it); FAILED
 // puts the reason in `error`.
 gear_reply_state gear_agent_reply(const char *request_id, char **reply, char *error, size_t error_size);
+
+// The machine wakterm runs on over SSH: GEAR_WAKTERM_HOST, else the one set here (a remembered
+// target's), else NULL for this machine.
+void gear_agent_set_host(const char *host);
+const char *gear_agent_host(void);
