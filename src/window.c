@@ -5,6 +5,7 @@
 #include "gs_draw.h"
 #include "gs_mix.h"
 #include "gs_text.h"
+#include "gs_loopback.h"
 #include "gs_ui.h"
 #include "gs_update.h"
 #include "gs_voice.h"
@@ -383,6 +384,8 @@ static void fetch_status(fetcher *f, char *out, size_t size) {
 typedef struct {
     const gear_window_options *o;
     gs_voice *voice;
+    gs_loopback *loopback;  // what the speakers play, every app's, as the echo canceller's reference
+    char loopback_why[160];  // why there is none, or why it stopped
     gear_vad *vad;
     gear_hear *hear;
     gear_say *say;
@@ -426,6 +429,7 @@ static void build_view(app *a, view *v) {
 
 static void fill(app *a, view *v) {
     SDL_zerop(v);
+    if (a->loopback && !a->loopback_why[0]) gs_loopback_error(a->loopback, a->loopback_why, sizeof a->loopback_why);
     bool speaking = a->say && gear_say_busy(a->say);
     double left = gear_pipeline_countdown(a->pipe);
     bool hearing = gear_pipeline_hearing(a->pipe), pending = gear_pipeline_pending(a->pipe);
@@ -455,7 +459,8 @@ static void fill(app *a, view *v) {
         if (a->hear_count > 1) SDL_snprintf(which, sizeof which, " (%d of %d, click to switch)", a->hear_at, a->hear_count);
         const char *device = gear_hear_device(a->hear);
         SDL_snprintf(v->status, sizeof v->status, "hear %s%s · say %s, %s\n%s · %s", a->hear_slug, which, a->say_slug, a->voice_slug,
-                     SDL_strcasecmp(device, "cpu") ? "on the GPU" : "on the CPU", echo ? "echo cancel on" : "headphones");
+                     SDL_strcasecmp(device, "cpu") ? "on the GPU" : "on the CPU",
+                     !echo ? "headphones" : !a->loopback ? "echo cancel: gear's audio" : !a->loopback_why[0] ? "echo cancel: all audio" : "echo cancel stopped: speakers no longer recorded");
     }
     build_view(a, v);
 }
@@ -526,6 +531,11 @@ static void listen_frames(app *a) {
         }
         SDL_memcpy(a->raw + a->kept_at, frame, sizeof frame);
         int before = gear_pipeline_interruptions(a->pipe);
+        if (a->loopback) {  // the speakers' 10 ms beside the microphone's, read in step with it
+            float played[GEAR_FRAME];
+            gs_loopback_read(a->loopback, played, GEAR_FRAME);
+            gs_voice_played(a->voice, played);
+        }
         gear_pipeline_frame(a->pipe, frame);
         SDL_memcpy(a->clean + a->kept_at, frame, sizeof frame);
         a->kept_at = (a->kept_at + GEAR_FRAME) % KEPT;
@@ -576,6 +586,9 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     if (!gear_models_present(o->models)) { SDL_snprintf(error, error_size, "The models are not in %s; run gear fetch", o->models); return false; }
     bool echo = !o->no_echo && gs_voice_has_echo();
     a->voice = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (echo ? GS_VOICE_ECHO : 0));
+    // The canceller's reference is everything the speakers play, so a podcast or a call from another
+    // app is not taken for the user; where that cannot be recorded, it is what gear plays.
+    if (echo) a->loopback = gs_loopback_open(NULL, GEAR_RATE, a->loopback_why, sizeof a->loopback_why);
     gear_model_path(o->models, GEAR_MODEL_VAD, path, sizeof path);
     if (!(a->vad = gear_vad_open(path, error, error_size))) return false;
     char hear_name[128];
@@ -587,7 +600,7 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     if (!gs_mix_open(MIX_RATE)) { SDL_snprintf(error, error_size, "No playback device: %s", SDL_GetError()); return false; }
     gear_model_path(o->models, GEAR_MODEL_SAY, path, sizeof path);
     gear_model_path(o->models, GEAR_MODEL_VOICE, voice, sizeof voice);
-    if (!(a->say = gear_say_open(path, voice, o->say_threads, echo ? a->voice : NULL, error, error_size))) return false;
+    if (!(a->say = gear_say_open(path, voice, o->say_threads, echo && !a->loopback ? a->voice : NULL, error, error_size))) return false;
     if (o->to) {
         gear_agent agent;
         if (!gear_agent_find(o->to, &agent, error, error_size)) return false;
@@ -648,6 +661,7 @@ static void switch_hear(app *a) {
 static void close_loop(app *a) {
     if (a->mic) SDL_DestroyAudioStream(a->mic);
     gear_pipeline_free(a->pipe);
+    gs_loopback_close(a->loopback);
     gear_vad_free(a->vad);
     gear_relay_free(a->relay);
     gear_say_close(a->say);
