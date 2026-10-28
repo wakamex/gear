@@ -47,7 +47,7 @@ gear listen --speak-back                     # no agent: each message is printed
 gear window --to AGENT                       # the window; GEAR_WAKTERM_HOST=host reaches agents on another machine
 ```
 
-`--cpu` keeps the models on the CPU in a GPU build. `GEAR_MODELS` names another folder for the models. Three modes run the same pipeline on recordings, without a microphone or speakers:
+On Windows gear.exe is a windowed program, so starting it from a shortcut or the taskbar opens no console; run from a terminal, the command-line modes print to it, though the prompt can come back before they finish (pipe the output, for example to `Out-String` in PowerShell, to wait for it). `--cpu` keeps the models on the CPU in a GPU build. `GEAR_MODELS` names another folder for the models. Three modes run the same pipeline on recordings, without a microphone or speakers:
 
 ```sh
 gear hear speech.wav                         # messages as they would be sent, with their times

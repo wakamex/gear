@@ -1,6 +1,7 @@
 // gear's command line. The live mode runs the spoken loop on the microphone and speakers; the file
 // modes run the same pipeline on recordings, so it can be tested without either.
 #include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>  // (on Windows, the entry point of a windowed program, which calls main)
 #include <stdio.h>
 #include <stdlib.h>
 #include "gs_mix.h"
@@ -17,6 +18,9 @@
 #include "speakable.h"
 #include "wav.h"
 #include "window.h"
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 enum { MIX_RATE = 48000, MIX_STEP = MIX_RATE / 100 };
 // The most of a reply read aloud, in characters of speakable text: about a minute and a quarter.
@@ -359,6 +363,14 @@ static int interrupt_file(const char *text, const char *mic_path, const char *ou
 }
 
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    // A windowed program has no console of its own. Output redirected to a pipe or file arrives as
+    // handles and is kept; otherwise, started from a terminal, it writes to that terminal's console
+    // (which does not wait for it, so the prompt may come back first).
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if ((!out || out == INVALID_HANDLE_VALUE || GetFileType(out) == FILE_TYPE_UNKNOWN) && AttachConsole(ATTACH_PARENT_PROCESS))
+        freopen("CONOUT$", "w", stdout), freopen("CONOUT$", "w", stderr);
+#endif
     const char *args[4] = { 0 };
     int nargs = 0;
     for (int i = 1; i < argc; i++) {

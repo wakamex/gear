@@ -28,6 +28,9 @@ pub fn build(b: *std.Build) void {
     mod.linkLibrary(gesso);
     mod.linkLibrary(hearsay);
     const exe = b.addExecutable(.{ .name = "gear", .root_module = mod });
+    // A windowed program on Windows, so starting it from a shortcut or the taskbar opens no console;
+    // run from a terminal, it writes to that terminal's console (main.c).
+    if (target.result.os.tag == .windows) exe.subsystem = .windows;
     // The icon Explorer, the taskbar and the window show (assets/icon/update.sh makes it).
     if (target.result.os.tag == .windows) mod.addWin32ResourceFile(.{ .file = b.path("assets/icon/gear.rc") });
     b.installArtifact(exe);
