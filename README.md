@@ -1,6 +1,6 @@
 # gear
 
-gear is a voice front-end for coding agents. You speak to an agent such as [Claude Code](https://www.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex), gear sends the message when you stop talking, reads the reply aloud and listens again, all on your own machine. [BRIEF.md](BRIEF.md) holds the goals the project started from; this README records the decisions made since.
+gear is a voice front-end for coding agents. You speak to an agent such as [Claude Code](https://www.anthropic.com/claude-code) or [Codex](https://github.com/openai/codex), gear sends the message when you stop talking, reads the reply aloud and listens again, all on your own machine. This README records what works and the decisions behind it.
 
 gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies the window, audio, echo cancellation and downloads, and [hearsay](https://github.com/wakamex/hearsay), which supplies speech detection, recognition and synthesis. It runs on Linux and Windows, on the GPU where one is usable and on the CPU otherwise; the Windows build is 50 MB with echo cancellation, most of it the GPU's compiled shaders, and 6.2 MB built for the CPU only.
 
@@ -159,3 +159,13 @@ How it was measured: each recording was played with 0.5 s of silence before and 
 ## Credits
 
 [Earheart](https://github.com/cleanunicorn/earheart), an MIT-licensed dictation app by another author, is prior work for running local speech models in a lean native app.
+
+## License
+
+gear's own files are under the MIT license in [LICENSE](LICENSE), the icon in `assets/icon/` included.
+
+`assets/ClankerMono-Regular.ttf`, the window's font, is Clanker Mono, built from the glyphs of NAVER Corporation's D2Coding, under the SIL Open Font License in [assets/ClankerMono-LICENSE.txt](assets/ClankerMono-LICENSE.txt).
+
+`tests/utterance.wav` is utterance 1089-134686-0010 of LibriSpeech test-clean, by Vassil Panayotov, Guoguo Chen, Daniel Povey and Sanjeev Khudanpur ([LibriSpeech](https://www.openslr.org/12), 2015), under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). It was converted from FLAC to a 16-bit WAV at its original 16 kHz, without trimming.
+
+The models gear downloads are not part of it: Parakeet and Pocket TTS are under CC-BY-4.0, and Kyutai's terms for Pocket TTS prohibit cloning a voice without consent and deceptive use; Silero VAD is under MIT.

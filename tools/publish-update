@@ -5,8 +5,8 @@
     tools/publish-update --bin DIR --build ID  publish the files in DIR, built already as build ID
     tools/publish-update --to PLACE            publish to PLACE instead
 
-PLACE is HOST:FOLDER (by default HOST:/srv/gear-updates, served at the address in src/window.c)
-or a local folder. It gets files/SHA256 for each file of the build, a manifest naming the build and
+PLACE is HOST:FOLDER or a local folder: by default the one named in ~/.config/gear/publish-to, the
+folder the update server serves at the address in src/window.c. It gets files/SHA256 for each file of the build, a manifest naming the build and
 each file's name, hash and size, the manifest's signature with the key in
 ~/.config/gear/update-signing.key as manifest.txt.sig, where gesso's gs_update reads it, and
 gear-test-windows.zip of the same files for a first install, named as a test build since it updates
@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FILES = ["gear.exe", "ClankerMono-Regular.ttf", "ClankerMono-LICENSE.txt"]
 KEY = os.path.expanduser("~/.config/gear/update-signing.key")
+PLACE = os.path.expanduser("~/.config/gear/publish-to")
 
 
 def run(*command, **kw):
@@ -39,8 +40,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--bin", help="publish the files in this folder, built already")
     parser.add_argument("--build", help="the build they are (with --bin; by default the commit's short hash)")
-    parser.add_argument("--to", default="HOST:/srv/gear-updates")
+    parser.add_argument("--to", help="where to publish (by default the place in ~/.config/gear/publish-to)")
     args = parser.parse_args()
+    if not args.to:
+        if not os.path.exists(PLACE):
+            sys.exit(f"name where to publish with --to, or in {PLACE}")
+        args.to = open(PLACE).read().strip()
     build = args.build
     if not args.bin:
         if subprocess.run(["git", "-C", ROOT, "diff", "--quiet", "HEAD"]).returncode:
