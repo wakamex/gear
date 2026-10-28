@@ -121,12 +121,44 @@ static float message_height(gs_ui *ui, const view *v, float w) {
     return SDL_max(gs_ui_text_height(ui, t, px, w), gs_ui_line_height(ui, px) * 2) + countdown_height() + 4;
 }
 
-static void message(gs_ui *ui, gs_rect r, const view *v) {
-    char text[4200];
+// The message panel, in `box`. A message taller than the panel shows its end, where new words come,
+// and the wheel over it scrolls back to the start; the title says how much is above. New words, or a
+// new message, bring it back to the end.
+static gs_rect message_box;      // where the panel was drawn, for the wheel
+static float message_wheel;      // wheel steps over it since the last frame, up positive
+static float message_scroll;     // points scrolled back from the end
+static size_t message_length;    // of the message last drawn, to see it grow
+
+static void message(gs_ui *ui, gs_rect box, const view *v) {
+    char text[4200], title[64] = "MESSAGE";
     SDL_snprintf(text, sizeof text, "%s%s", v->message, v->pending ? (*v->message ? " …" : "…") : "");
-    if (*text) gs_ui_text_wrapped(ui, r, text, px, TEXT);
-    else gs_ui_text_wrapped(ui, r, "say something", px, DIM);
-    if (v->left >= 0) countdown(ui, (gs_rect){ r.x, r.y + r.h - countdown_height(), r.w, countdown_height() }, v);
+    gs_rect inside = gs_inset(box, 10);
+    gs_rect area = inside;
+    if (v->left >= 0) area.h -= countdown_height();
+    float line = gs_ui_line_height(ui, px), full = *text ? gs_ui_text_height(ui, text, px, area.w) : 0;
+    if (full > area.h) {  // (whole lines only, so none is cut through)
+        float shown = SDL_floorf(area.h / line) * line;
+        area.y += area.h - shown, area.h = shown;
+    }
+    size_t n = SDL_strlen(v->message);
+    if (n != message_length) message_scroll = 0, message_length = n;
+    message_scroll = SDL_clamp(message_scroll + message_wheel * line * 3, 0, SDL_max(full - area.h, 0));
+    message_wheel = 0;
+    float hidden = full - area.h - message_scroll;
+    int above = (int)SDL_ceilf(hidden / line - 0.01f);
+    if (above > 0) SDL_snprintf(title, sizeof title, "MESSAGE · %d more line%s above", above, above == 1 ? "" : "s");
+    message_box = box;
+    panel(ui, box, title);
+    if (!*text) gs_ui_text_wrapped(ui, area, "say something", px, DIM);
+    else if (full <= area.h) gs_ui_text_wrapped(ui, area, text, px, TEXT);
+    else {
+        // (clipped a little below the first line's top: the line above's descenders reach into it)
+        gs_rect clip = { area.x, area.y + SDL_ceilf(line * 0.12f), area.w, area.h - SDL_ceilf(line * 0.12f) };
+        gs_ui_clip(ui, &clip);
+        gs_ui_text_wrapped(ui, (gs_rect){ area.x, area.y - hidden, area.w, full }, text, px, TEXT);
+        gs_ui_clip(ui, NULL);
+    }
+    if (v->left >= 0) countdown(ui, (gs_rect){ inside.x, inside.y + inside.h - countdown_height(), inside.w, countdown_height() }, v);
 }
 
 // A box for what the reading skipped: code and tables stay visible, titled as not read.
@@ -241,9 +273,10 @@ static void draw(gs_ui *ui, const view *v) {
     }
     if (second) gs_ui_text(ui, below, second + 1, small, DIM, -1);
     gs_cut_bottom(&r, 8);
-    float mh = message_height(ui, v, r.w - 20) + 20;
-    gs_rect m = gs_cut_top(&r, mh);
-    message(ui, panel(ui, m, "MESSAGE"), v);
+    // The message takes what it needs, up to half the room; the reply has the rest.
+    float room = r.h - 16, least = gs_ui_line_height(ui, px) * 2 + countdown_height() + 24;
+    float mh = SDL_min(message_height(ui, v, r.w - 20) + 20, SDL_max(room / 2, least));
+    message(ui, gs_cut_top(&r, mh), v);
     gs_cut_top(&r, 16);
     gs_rect inside = panel(ui, r, "REPLY");
     gs_ui_clip(ui, &inside);
@@ -686,6 +719,9 @@ int gear_window(const gear_window_options *o) {
             do {
                 if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
                 if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL) input_at = SDL_GetTicks();
+                if (e.type == SDL_EVENT_MOUSE_WHEEL && e.wheel.mouse_x >= message_box.x && e.wheel.mouse_x < message_box.x + message_box.w &&
+                    e.wheel.mouse_y >= message_box.y && e.wheel.mouse_y < message_box.y + message_box.h)
+                    message_wheel += e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y;
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
