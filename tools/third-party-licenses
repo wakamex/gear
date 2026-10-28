@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Writes the license texts of everything compiled into gear, from the packages Zig fetched.
+
+    tools/third-party-licenses [--target windows|linux] [--echo] OUT
+
+OUT gets one text file with each component's license notices under a heading: gesso and the code it
+vendors, SDL, hearsay with transcribe.cpp, ggml (with llamafile's matrix code) and pockettts.cpp
+(with yyjson), the Vulkan and SPIR-V headers of the GPU build, and with --echo WebRTC's audio
+processing and Abseil. The list follows the symbols linked into a build with every option on;
+gesso's Opus, minimp3, VA-API and video packages are not linked into gear. Run after a build, so
+zig-pkg/ holds the packages.
+"""
+
+import argparse
+import os
+import re
+import sys
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PKG = os.path.join(ROOT, "zig-pkg")
+
+
+def package(zon, name):
+    """The folder Zig fetched a dependency into, from the hash its build.zig.zon gives it."""
+    text = open(zon).read()
+    m = re.search(r"\." + name + r"\s*=\s*\.\{[^{}]*?\.hash\s*=\s*\"([^\"]+)\"", text)
+    if not m or not os.path.isdir(os.path.join(PKG, m.group(1))):
+        sys.exit(f"no package for {name} in {zon}: run zig build first")
+    return os.path.join(PKG, m.group(1))
+
+
+def read(*parts):
+    return open(os.path.join(*parts), encoding="utf-8", errors="replace").read().strip()
+
+
+def every(folder):
+    """Each file of a folder of license texts (SDL's and the Khronos headers' REUSE sets), by name."""
+    return "\n\n".join(f"--- {name} ---\n\n{read(folder, name)}" for name in sorted(os.listdir(folder)))
+
+
+def header_notice(path):
+    """The leading comment of a source file, // lines or a /* */ block, for code that carries its
+    notice there."""
+    text = open(path, encoding="utf-8").read().lstrip()
+    if text.startswith("/*"):
+        return "\n".join(line.strip(" *") for line in text[2:text.index("*/")].splitlines()).strip()
+    lines = []
+    for line in text.splitlines():
+        if not line.startswith("//"):
+            break
+        lines.append(line[2:].strip())
+    return "\n".join(lines).strip()
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--target", choices=("windows", "linux"), default="windows")
+    p.add_argument("--echo", action="store_true", help="the build has WebRTC's echo canceller")
+    p.add_argument("out")
+    a = p.parse_args()
+    zon = os.path.join(ROOT, "build.zig.zon")
+    gesso, hearsay = package(zon, "gesso"), package(zon, "hearsay")
+    sdl = package(os.path.join(gesso, "build.zig.zon"), "sdl")
+    hz = os.path.join(hearsay, "build.zig.zon")
+    tr, pt = package(hz, "transcribe"), package(hz, "pockettts")
+    v = os.path.join(gesso, "vendor")
+    parts = [
+        ("gesso", read(gesso, "LICENSE")),
+        ("kb_text_shape (in gesso)", read(v, "kb", "LICENSE")),
+        ("stb (in gesso)", read(v, "stb", "LICENSE")),
+        ("RNNoise's voice detector weights (in gesso)", read(v, "rnnoise", "COPYING")),
+        ("TweetNaCl (in gesso)", "Public domain.\n\n" + read(v, "tweetnacl", "VERSION")),
+        ("WebRTC's noise suppression and gain control, ported (in gesso)", read(v, "webrtc", "LICENSE") + "\n\n" + read(v, "webrtc", "PATENTS")),
+        ("SDL", read(sdl, "LICENSE.txt") + "\n\n" + read(sdl, "REUSE.toml") + "\n\n" + every(os.path.join(sdl, "LICENSES"))),
+    ]
+    if a.target == "linux":
+        deps = package(os.path.join(sdl, "build.zig.zon"), "sdl_linux_deps")
+        parts.append(("SDL's Linux dependencies", read(deps, "LICENSE.txt") + "\n\n" + every(os.path.join(deps, "LICENSES"))))
+    if a.echo:
+        parts.append(("WebRTC audio processing (gesso -Decho)", read(package(os.path.join(gesso, "build.zig.zon"), "webrtc_audio_processing"), "COPYING")))
+        parts.append(("Abseil (gesso -Decho)", read(package(os.path.join(gesso, "build.zig.zon"), "abseil"), "LICENSE")))
+    parts += [
+        ("hearsay", read(hearsay, "LICENSE")),
+        ("transcribe.cpp (in hearsay)", read(tr, "LICENSE")),
+        ("ggml (in hearsay)", read(tr, "ggml", "LICENSE")),
+        ("llamafile's matrix kernels (in ggml)", header_notice(os.path.join(tr, "ggml", "src", "ggml-cpu", "llamafile", "sgemm.cpp"))),
+        ("pockettts.cpp (in hearsay)", read(pt, "LICENSE")),
+        ("yyjson (in pockettts.cpp)", header_notice(os.path.join(pt, "vendor", "yyjson", "yyjson.h"))),
+        ("Vulkan-Headers (hearsay -Dgpu=vulkan)", read(package(hz, "vulkan_headers"), "LICENSE.md") + "\n\n" + every(os.path.join(package(hz, "vulkan_headers"), "LICENSES"))),
+        ("SPIRV-Headers (hearsay -Dgpu=vulkan)", read(package(hz, "spirv_headers"), "LICENSE")),
+    ]
+    with open(a.out, "w", encoding="utf-8") as f:
+        f.write("Third-party licenses\n\ngear's own license is in LICENSE. These are the notices of the code compiled into it.\n")
+        for name, text in parts:
+            f.write(f"\n\n{'=' * 72}\n{name}\n{'=' * 72}\n\n{text}\n")
+
+
+if __name__ == "__main__":
+    main()
