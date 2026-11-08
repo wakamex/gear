@@ -30,9 +30,306 @@ static void end_sentence(buf *b) {
 
 static bool word_char(char c) { return SDL_isalnum((unsigned char)c) || (unsigned char)c >= 0x80; }
 
+// Numbers and the symbols around them, as they are said: Pocket TTS reads digits unreliably (139 as
+// "39", 0.34 as "through"), so they reach it as words. Integers up to the trillions, decimals and
+// versions digit by digit after "point", leading-zero codes digit by digit, four-digit years in
+// pairs, times, ISO dates, percent, money, minus, "x" as "times" and the common units.
+static const char *ones[] = { "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+    "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen" };
+static const char *tens[] = { "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety" };
+
+static void say_below_1000(buf *b, int n) {
+    if (n >= 100) {
+        puts_(b, ones[n / 100]);
+        puts_(b, " hundred");
+        if (!(n %= 100)) return;
+        puts_(b, " ");
+    }
+    if (n < 20) { puts_(b, ones[n]); return; }
+    puts_(b, tens[n / 10]);
+    if (n % 10) { puts_(b, " "); puts_(b, ones[n % 10]); }
+}
+
+static void say_integer(buf *b, unsigned long long n) {
+    static const char *scales[] = { "trillion", "billion", "million", "thousand" };
+    static const unsigned long long sizes[] = { 1000000000000ull, 1000000000ull, 1000000ull, 1000ull };
+    bool any = false;
+    for (int i = 0; i < 4; i++) {
+        if (n < sizes[i]) continue;
+        if (any) puts_(b, " ");
+        say_below_1000(b, (int)(n / sizes[i] % 1000));
+        puts_(b, " ");
+        puts_(b, scales[i]);
+        n %= sizes[i];
+        any = true;
+    }
+    if (n || !any) {
+        if (any) puts_(b, " ");
+        say_below_1000(b, (int)n);
+    }
+}
+
+static void say_digits(buf *b, const char *d, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (i) puts_(b, " ");
+        puts_(b, ones[d[i] - '0']);
+    }
+}
+
+// 1905 as "nineteen oh five", 2021 as "twenty twenty one", 2005 as "two thousand five".
+static void say_year(buf *b, int y) {
+    if (y >= 2000 && y < 2010) { say_integer(b, (unsigned long long)y); return; }
+    say_below_1000(b, y / 100);
+    if (y % 100 == 0) { puts_(b, " hundred"); return; }
+    puts_(b, " ");
+    if (y % 100 < 10) puts_(b, "oh ");
+    say_below_1000(b, y % 100);
+}
+
+// The last word said, made an ordinal: "twenty one" to "twenty first".
+static void ordinal(buf *b) {
+    static const struct { const char *word, *nth; } odd[] = { { "one", "first" }, { "two", "second" },
+        { "three", "third" }, { "five", "fifth" }, { "eight", "eighth" }, { "nine", "ninth" }, { "twelve", "twelfth" } };
+    size_t start = b->len;
+    while (start && b->s[start - 1] != ' ') start--;
+    for (size_t i = 0; i < SDL_arraysize(odd); i++)
+        if (!SDL_strcmp(b->s + start, odd[i].word)) { b->len = start; b->s[start] = 0; puts_(b, odd[i].nth); return; }
+    if (b->len && b->s[b->len - 1] == 'y') { b->s[--b->len] = 0; puts_(b, "ieth"); return; }
+    puts_(b, "th");
+}
+
+static const char *unit_word(const char *u, size_t n) {
+    static const struct { const char *unit, *word; } units[] = { { "ms", "milliseconds" }, { "s", "seconds" },
+        { "min", "minutes" }, { "KB", "kilobytes" }, { "MB", "megabytes" }, { "GB", "gigabytes" }, { "TB", "terabytes" },
+        { "KiB", "kilobytes" }, { "MiB", "megabytes" }, { "GiB", "gigabytes" }, { "TiB", "terabytes" },  // as people say them
+        { "kHz", "kilohertz" }, { "Hz", "hertz" }, { "fps", "frames a second" } };
+    for (size_t i = 0; i < SDL_arraysize(units); i++)
+        if (SDL_strlen(units[i].unit) == n && !SDL_strncmp(u, units[i].unit, n)) return units[i].word;
+    return NULL;
+}
+
+static bool digit(char c) { return c >= '0' && c <= '9'; }
+static bool hex(char c) { return digit(c) || (c >= 'a' && c <= 'f'); }
+
+static size_t digits(const char *s) {
+    size_t n = 0;
+    while (digit(s[n])) n++;
+    return n;
+}
+
+// A commit hash or other hex code (seven or more, with a digit and a letter): its first six
+// characters, spelled, are enough to tell it apart (four were not: 6ad68495 and 6ad68651).
+enum { HASH_SAID = 6 };
+static size_t hash_length(const char *s) {
+    size_t n = 0;
+    bool d = false, l = false;
+    while (hex(s[n])) { d |= digit(s[n]); l |= !digit(s[n]); n++; }
+    return n >= 7 && d && l && !word_char(s[n]) ? n : 0;
+}
+
+// $0.70 as "seventy cents", $8.50 as "eight dollars and fifty cents"; returns the characters taken
+// after the $, or 0 when the amount has no cents.
+static size_t say_money(buf *b, const char *s) {
+    size_t n = digits(s), used = n;
+    if (!n) return 0;
+    unsigned long long dollars = 0;
+    for (size_t i = 0; i < n; i++) dollars = dollars * 10 + (unsigned)(s[i] - '0');
+    while (n <= 3 && s[used] == ',' && digits(s + used + 1) == 3) {
+        for (size_t i = used + 1; i < used + 4; i++) dollars = dollars * 10 + (unsigned)(s[i] - '0');
+        used += 4;
+    }
+    if (s[used] != '.' || digits(s + used + 1) != 2) return 0;
+    int cents = (s[used + 1] - '0') * 10 + (s[used + 2] - '0');
+    if (dollars || !cents) {
+        say_integer(b, dollars);
+        puts_(b, dollars == 1 ? " dollar" : " dollars");
+        if (cents) puts_(b, " and ");
+    }
+    if (cents) {
+        say_integer(b, (unsigned long long)cents);
+        puts_(b, cents == 1 ? " cent" : " cents");
+    }
+    return used + 3;
+}
+
+static const char *months[] = { "January", "February", "March", "April", "May", "June", "July", "August",
+    "September", "October", "November", "December" };
+
+// One number starting at s, said; returns the characters it took.
+static size_t say_number(buf *b, const char *s) {
+    size_t n = digits(s);
+    // 2026-10-28
+    if (n == 4 && s[4] == '-' && digits(s + 5) == 2 && s[7] == '-' && digits(s + 8) == 2 && !digit(s[10])) {
+        int month = SDL_atoi(s + 5), day = SDL_atoi(s + 8);
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            puts_(b, months[month - 1]);
+            puts_(b, " ");
+            say_integer(b, (unsigned long long)day);
+            ordinal(b);
+            puts_(b, ", ");
+            say_year(b, SDL_atoi(s));
+            return 10;
+        }
+    }
+    // 12:15 and 2:05, and 02:55:08 with its seconds
+    if (n <= 2 && s[n] == ':' && digits(s + n + 1) == 2) {
+        int h = SDL_atoi(s), m = SDL_atoi(s + n + 1);
+        size_t used = n + 3;
+        say_integer(b, (unsigned long long)h);
+        if (m) {
+            puts_(b, " ");
+            if (m < 10) puts_(b, "oh ");
+            say_integer(b, (unsigned long long)m);
+        }
+        if (s[used] == ':' && digits(s + used + 1) == 2) {
+            puts_(b, " and ");
+            say_integer(b, (unsigned long long)SDL_atoi(s + used + 1));
+            puts_(b, " seconds");
+            used += 3;
+        }
+        return used;
+    }
+    size_t used = n;
+    unsigned long long value = 0;
+    bool grouped = false;
+    for (size_t i = 0; i < n; i++) value = value * 10 + (unsigned)(s[i] - '0');
+    // 7,445 and 535,587,314
+    while (n <= 3 && s[used] == ',' && digits(s + used + 1) == 3) {
+        for (size_t i = used + 1; i < used + 4; i++) value = value * 10 + (unsigned)(s[i] - '0');
+        used += 4;
+        grouped = true;
+    }
+    if (n > 15) say_digits(b, s, n);
+    else if (n > 1 && s[0] == '0') say_digits(b, s, n);  // 020, 0073
+    else if (!grouped && n == 4 && value >= 1100 && value < 2100 && s[4] != '.') say_year(b, (int)value);
+    else say_integer(b, value);
+    // 0.34, 1.40, and versions and addresses: 0.5.0, 192.168.2.1
+    while (s[used] == '.' && digit(s[used + 1])) {
+        size_t f = digits(s + used + 1);
+        puts_(b, " point ");
+        bool version = s[used + 1 + f] == '.' && digit(s[used + 2 + f]);
+        if (version || (used && SDL_strchr(s, '.') != s + used)) say_integer(b, (unsigned long long)SDL_atoi(s + used + 1));
+        else say_digits(b, s + used + 1, f);
+        used += 1 + f;
+    }
+    return used;
+}
+
+// The end of a site's name (com in Chess.com), where "dot" is said; a file's extension is not.
+static bool site_ending(const char *s) {
+    static const char *endings[] = { "com", "org", "net", "io", "dev", "ai", "app", "co", "mx", "fyi", "uk", "ca", "gov", "edu" };
+    size_t n = 0;
+    while (SDL_isalpha((unsigned char)s[n])) n++;
+    if (s[n] && s[n] != '/' && s[n] != '.') return false;
+    for (size_t i = 0; i < SDL_arraysize(endings); i++)
+        if (SDL_strlen(endings[i]) == n && !SDL_strncmp(s, endings[i], n)) return true;
+    return false;
+}
+
+// A word with numbers in it, said: the numbers as words, letters beside them set apart (w3sim as
+// "w three sim"), and the symbols that go with numbers. Returns whether it ends in a number, so a
+// unit in the next word can be read as one.
+static bool say_word(buf *b, const char *w, bool after_number) {
+    size_t n = SDL_strlen(w);
+    const char *unit = unit_word(w, n);
+    if (unit && after_number) { puts_(b, unit); return false; }
+    const char *last_dot = SDL_strrchr(w, '.');
+    bool site = last_dot && site_ending(last_dot + 1);  // every dot of a site's name is said
+    bool has_digit = strpbrk(w, "0123456789") != NULL;
+    bool number = false;
+    for (const char *p = w; *p;) {
+        bool start = p == w || !word_char(p[-1]);
+        size_t h = start && p[0] == '0' && p[1] == 'x' ? hash_length(p + 2) + 2 : start ? hash_length(p) : 0;
+        if (h > 2) {
+            const char *code = p[0] == '0' && p[1] == 'x' ? p + 2 : p;
+            for (int i = 0; i < HASH_SAID; i++) {
+                if (i) puts_(b, " ");
+                if (digit(code[i])) puts_(b, ones[code[i] - '0']);
+                else put(b, code + i, 1);
+            }
+            p += h;
+            number = false;
+            continue;
+        }
+        if (digit(*p) && p[digits(p)] == '/' && digit(p[digits(p) + 1])) {  // 1/2 and 7/9 as written
+            size_t f = digits(p) + 1;
+            f += digits(p + f);
+            put(b, p, f);
+            p += f;
+            continue;
+        }
+        size_t money = *p == '$' && start ? say_money(b, p + 1) : 0;
+        if (money) {
+            p += 1 + money;
+            number = false;
+            continue;
+        }
+        if ((*p == '-' || *p == '$' || *p == '~') && digit(p[1]) && start) {
+            puts_(b, *p == '-' ? "minus " : *p == '~' ? "about " : "");
+            bool dollars = *p == '$';
+            p++;
+            p += say_number(b, p);
+            if (dollars) puts_(b, " dollars");
+            number = !dollars;
+            continue;
+        }
+        if (digit(*p)) {
+            if (b->len && word_char(b->s[b->len - 1])) puts_(b, " ");
+            const char *begun = p;
+            p += say_number(b, p);
+            number = true;
+            size_t letters = 0;
+            while (SDL_isalpha((unsigned char)p[letters])) letters++;
+            if (*p == '%') { puts_(b, " percent"); p++; number = false; }
+            else if (letters == 1 && *p == 'x' && !word_char(p[1])) { puts_(b, " times"); p++; number = false; }
+            else if (letters == 2 && !word_char(p[2]) && (!SDL_strncmp(p, "st", 2) || !SDL_strncmp(p, "nd", 2) || !SDL_strncmp(p, "rd", 2) || !SDL_strncmp(p, "th", 2))) {
+                ordinal(b);
+                p += 2;
+                number = false;
+            } else if (letters && !word_char(p[letters]) && (unit = unit_word(p, letters))) {
+                puts_(b, " ");
+                puts_(b, unit);
+                p += letters;
+                number = false;
+            } else if (*p == '-' && begun == w && digits(p + 1) == SDL_strlen(p + 1)) {  // 4-9 and 496-501
+                puts_(b, " to ");
+                p++;
+            } else if (letters || *p == '-') {  // a name's parts: claude-opus-5-5
+                puts_(b, " ");
+                if (*p == '-') p++;
+            }
+            continue;
+        }
+        if (p > w && word_char(p[-1]) && word_char(p[1]) && (*p == '=' || *p == '+')) {
+            puts_(b, *p == '=' ? " equals " : " plus ");  // v=DMARC1, a+b
+            p++;
+            continue;
+        }
+        if (*p == '-' && has_digit && p > w && word_char(p[-1]) && word_char(p[1])) {
+            puts_(b, " ");  // m8-fogunits-wait3: a name's parts
+            p++;
+            continue;
+        }
+        if (*p == '/' && p > w && SDL_isalpha((unsigned char)p[-1]) && SDL_isalpha((unsigned char)p[1])) {
+            puts_(b, " ");  // tmp/live, claude/ACCOUNT
+            p++;
+            continue;
+        }
+        if (*p == '.' && p > w && SDL_isalpha((unsigned char)p[-1]) && SDL_isalpha((unsigned char)p[1]) && site) {
+            puts_(b, " dot ");  // Chess.com
+            p++;
+            continue;
+        }
+        put(b, p, 1);
+        number = false;
+        p++;
+    }
+    return number;
+}
+
 // One whitespace-free token, made speakable: an address read as its site, a path as its file's
-// name, snake_case as words, an arrow as "to".
-static void token(buf *b, const char *t, size_t n) {
+// name, snake_case as words, an arrow as "to", numbers as words. Returns whether it ends in a number.
+static bool token(buf *b, const char *t, size_t n, bool after_number) {
     // Punctuation that ends a sentence or clause stays outside the token.
     size_t tail = n;
     while (tail && SDL_strchr(".,;:!?)\"'", t[tail - 1])) tail--;
@@ -42,7 +339,7 @@ static void token(buf *b, const char *t, size_t n) {
     const char *w = t + head;
     size_t m = tail - head;
     char word[1024];
-    if (m >= sizeof word) { put(b, t + head, n - head); return; }
+    if (m >= sizeof word) { put(b, t + head, n - head); return false; }
     SDL_memcpy(word, w, m);
     word[m] = 0;
     const char *scheme = SDL_strstr(word, "://");
@@ -50,11 +347,15 @@ static void token(buf *b, const char *t, size_t n) {
         const char *host = scheme + 3;
         if (!SDL_strncmp(host, "www.", 4)) host += 4;
         size_t h = strcspn(host, "/:?#");
+        char site[256];
+        SDL_snprintf(site, sizeof site, "%.*s", (int)SDL_min(h, sizeof site - 1), host);
         puts_(b, "a ");
-        put(b, host, h);
+        say_word(b, site, false);
         puts_(b, " link");
     } else if (!SDL_strcmp(word, "->") || !SDL_strcmp(word, "=>")) {
         puts_(b, "to");
+    } else if (!SDL_strcmp(word, "+") || !SDL_strcmp(word, "=") || !SDL_strcmp(word, "==") || !SDL_strcmp(word, "&")) {
+        puts_(b, word[0] == '+' ? "plus" : word[0] == '&' ? "and" : "equals");
     } else {
         // A path: two or more separators, or one that starts it, read as its last part.
         int slashes = 0;
@@ -72,13 +373,16 @@ static void token(buf *b, const char *t, size_t n) {
             if (cut && cut[1]) name = cut + 1;
         }
         // snake_case and kebab-free identifiers: underscores between letters read as spaces.
-        for (const char *p = name; *p; p++) {
-            char c = *p;
-            if (c == '_' && p > name && word_char(p[-1]) && word_char(p[1])) c = ' ';
-            put(b, &c, 1);
-        }
+        char said[1024];
+        size_t k = 0;
+        for (const char *p = name; *p; p++) said[k++] = *p == '_' && p > name && word_char(p[-1]) && word_char(p[1]) ? ' ' : *p;
+        said[k] = 0;
+        bool number = say_word(b, said, after_number);
+        put(b, t + tail, n - tail);
+        return number && tail == n;
     }
     put(b, t + tail, n - tail);
+    return false;
 }
 
 // Inline Markdown dropped from one line of text: code spans keep their content, links their text,
@@ -120,10 +424,11 @@ static void inline_text(buf *out, const char *s) {
         put(&plain, p, 1);
         p++;
     }
+    bool number = false;  // the last word ended in a number, so a unit after it is read as one
     for (const char *p = plain.s ? plain.s : ""; *p;) {
         if (*p == ' ' || *p == '\t') { if (out->len && out->s[out->len - 1] != ' ') puts_(out, " "); p++; continue; }
         size_t n = strcspn(p, " \t");
-        token(out, p, n);
+        number = token(out, p, n, number);
         p += n;
     }
     SDL_free(plain.s);

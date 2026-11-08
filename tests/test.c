@@ -265,7 +265,7 @@ static void speaks(const char *reply, size_t limit, const char *expected) {
 
 static void test_speakable(void) {
     speaks("I found the bug in `src/listen.c`. See https://github.com/wakamex/gesso/pull/12 for details.", 0,
-           "I found the bug in listen.c. See a github.com link for details.");
+           "I found the bug in listen.c. See a github dot com link for details.");
     speaks("Here is the fix:\n\n```c\nint a;\nint b;\n```\n\nWant me to commit it?", 0,
            "Here is the fix: A code block of 2 lines. Want me to commit it?");
     speaks("```\nls -la\n```", 0, "A one-line code block.");
@@ -274,7 +274,7 @@ static void test_speakable(void) {
            "Next steps: Fix the countdown. Run zig build test. Commit it.");
     speaks("## Summary\nAll tests pass", 0, "Summary. All tests pass.");
     speaks("Call `gear_listen_new` and then gs_voice_frame.", 0, "Call gear listen new and then gs voice frame.");
-    speaks("Keep it and/or drop half of 1/2.", 0, "Keep it and/or drop half of 1/2.");
+    speaks("Keep it and/or drop half of 1/2 in tmp/live.", 0, "Keep it and or drop half of 1/2 in tmp live.");
     speaks("[The README](README.md) explains it, and *so* does _the brief_.", 0, "The README explains it, and so does the brief.");
     speaks("It was in ~/.config/gear/settings.json and C:\\Users\\me\\gear.exe", 0, "It was in settings.json and gear.exe.");
     speaks("First line\nsecond line of the same paragraph.\n\nNew paragraph", 0,
@@ -283,6 +283,22 @@ static void test_speakable(void) {
     speaks("One. Two. Three. Four.", 10, "One. Two. The rest is not read aloud.");
     speaks("It prints `Hello, world!`.", 0, "It prints Hello, world!");
     speaks("", 0, "");
+    speaks("Block 139 failed at 575, and 7,445 s is 83.5% of the 0.34 budget.", 0,
+           "Block one hundred thirty nine failed at five hundred seventy five, and seven thousand four hundred forty five "
+           "seconds is eighty three point five percent of the zero point three four budget.");
+    speaks("Pin 6ad685e5 for v0.5.0, port-0073, 41 GiB and 1.55x on w3sim.", 0,
+           "Pin six a d six eight five for v zero point five point zero, port zero zero seven three, forty one gigabytes and one "
+           "point five five times on w three sim.");
+    speaks("It ran 1905 to 2021, on 2026-10-28 at 12:15 and 02:05, for $8 and -0.44 (~3 ms).", 0,
+           "It ran nineteen oh five to twenty twenty one, on October twenty eighth, twenty twenty six at twelve fifteen and "
+           "two oh five, for eight dollars and minus zero point four four (about three milliseconds).");
+    speaks("The record is at dmarc.example.org, not notes.md.", 0, "The record is at dmarc dot example dot org, not notes.md.");
+    speaks("Costs $0.70, $1.00 or $1,249.50 for claude-opus-5-5 under m8-fogunits-wait3.", 0,
+           "Costs seventy cents, one dollar or one thousand two hundred forty nine dollars and fifty cents for claude opus "
+           "five five under m eight fogunits wait three.");
+    speaks("Set v=DMARC1 so len + i == n & done.", 0, "Set v equals DMARC one so len plus i equals n and done.");
+    speaks("See Chess.com, e.g. the 21st of 4-9 at 192.168.2.1.", 0,
+           "See Chess dot com, e.g. the twenty first of four to nine at one hundred ninety two point one hundred sixty eight point two point one.");
 }
 
 int main(int argc, char **argv) {
