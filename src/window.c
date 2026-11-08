@@ -477,7 +477,7 @@ static void demo(view *v) {
     v->left = 1.6;
     v->total = 3;
     v->reply = "I found the bug. The countdown timer resets whenever the voice detector reports silence, so a long pause never sends the message. I moved the reset into the speech start handler in `src/listen.c`:\n\n```c\nif (l->below < l->p.pause_frames && l->piece_frames < l->p.max_frames)\n    return GEAR_LISTEN_NONE;\n```\n\nAll 14 tests pass. Want me to commit it?";
-    SDL_strlcpy(v->status, "hear parakeet-ft-v1-Q4_K_M · say pocket-tts-english_2026-09-Q8_0, alba\non the GPU · echo cancel on", sizeof v->status);
+    SDL_strlcpy(v->status, "hear parakeet-ft-v1-Q4_K_M · say phonon-31m-en, delia\non the GPU · echo cancel on", sizeof v->status);
 }
 
 // A reading stopped by talking: logged, and with GEAR_DEBUG the last seconds the microphone heard are
@@ -572,10 +572,13 @@ static void take_replies(app *a) {
 }
 
 // A model file's name without its extension: parakeet-tdt_ctc-110m-Q4_K_M.gguf reads parakeet-tdt_ctc-110m-Q4_K_M.
+// A model file's name for the status line: its folder when it has one, else its name without the
+// extension.
 static void slug(char *out, size_t size, const char *file) {
     SDL_strlcpy(out, file, size);
-    char *dot = SDL_strrchr(out, '.');
-    if (dot) *dot = 0;
+    char *cut = SDL_strchr(out, '/');
+    if (!cut) cut = SDL_strrchr(out, '.');
+    if (cut) *cut = 0;
 }
 
 static void count_hear(app *a);

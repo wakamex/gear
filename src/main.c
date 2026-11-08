@@ -311,7 +311,7 @@ static int say_file(const char *text, const char *out) {
     }
     double first, audio;
     gear_say_last(say, &first, &audio);
-    printf("first audio from Pocket %.3f s, first sound in the mix %.3f s, %.2f s of speech in %.2f s\n", first, heard, audio, (double)r.frames / MIX_RATE);
+    printf("first audio from the speech model %.3f s, first sound in the mix %.3f s, %.2f s of speech in %.2f s\n", first, heard, audio, (double)r.frames / MIX_RATE);
     bool ok = gear_wav_write(out, r.lr, r.frames, 2, MIX_RATE);
     gear_say_close(say);
     SDL_free(r.lr);

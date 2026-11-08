@@ -13,7 +13,7 @@ struct gear_say {
     struct pt_context *ctx;
     struct pt_voice *voice;
     gs_stream *stream;
-    SDL_AudioStream *conv;  // Pocket's 24 kHz mono to the mix's rate in stereo
+    SDL_AudioStream *conv;  // the model's 24 kHz mono to the mix's rate in stereo
     SDL_Thread *thread;
     SDL_Mutex *lock;
     SDL_Condition *wake;

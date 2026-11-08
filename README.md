@@ -9,18 +9,19 @@ gear is a C program on [gesso](https://github.com/wakamex/gesso), which supplies
 The spoken loop runs end to end, from microphone to message and from reply text to the speakers:
 
 - Listening: each 10 ms of microphone audio goes through gesso's `gs_voice` for echo cancellation, and [Silero VAD](https://github.com/snakers4/silero-vad) decides when speech starts and stops. Speech is cut into pieces at pauses of half a second, each piece keeping the 0.5 s before its start, and a recognizer thread transcribes each piece with Parakeet as it ends. Pieces add up to one message; once the user has stopped and every piece has its text, a countdown (3 s by default) runs, and talking again stops it.
-- Speaking: a reply is synthesized by Pocket TTS on a thread of its own and played as it is made, through a `gs_stream` in gesso's mix. The first sound plays 0.17 to 0.31 s after the reply is queued on the CPU, and 0.01 s after on an RTX 3080. hearsay puts a comma before each piece Pocket generates, which keeps a short first word: without it Pocket dropped an opening "I" from 4.4% of replies and from 8.1% of the later pieces of long ones.
+- Speaking: a reply is synthesized by Gradium's [Phonon](https://huggingface.co/gradium/phonon-31m-en) (phonon-31m-en, built on Kyutai's [Pocket TTS](https://github.com/kyutai-labs/pocket-tts)) in its American Delia voice, on a thread of its own, and played as it is made, through a `gs_stream` in gesso's mix. On 300 sentences from a week of agent replies, read aloud and transcribed by parakeet-ft-v1, Phonon got as many words across as Pocket TTS (10.10% of words wrong against 10.50%, with gear's reading rules below) and scored slightly higher for naturalness on UTMOS, a predicted listener rating from 1 to 5 (4.42 against 4.38); its download is half the size.
 - Interrupting: when the user starts talking during a reply, the reply stops. In the tests, talking is detected 80 ms after the speech begins with headphones and 0.11 to 0.17 s after it over loudspeakers with the echo canceller, and the player is silent 10 ms later.
 - Echo: with `-Decho=true`, gesso's WebRTC echo canceller is given everything the speakers play, recorded with gesso's `gs_loopback` (WASAPI loopback on Windows, the default output's monitor on Linux), so neither a reply nor a podcast or call from another app is taken for the user talking. Where the speakers cannot be recorded (macOS, for now), it is given what gear plays. The status bar says which: "echo cancel: all audio" or "echo cancel: gear's audio". In the tests, where the microphone hears the reply at half its level 100 ms late as well as the user, the reply plays on until the user talks; without the canceller it cuts itself off 0.5 to 0.65 s in. Without `-Decho`, use headphones.
 - Agents: messages go to a coding agent through [Wakterm](https://github.com/wakamex/wakterm)'s Agent API, and the agent's final reply comes back to be read aloud. `wakterm cli agent catalog` lists the agents, `wakterm cli agent admit --return-final` gives one a message, with its text on standard input so it never shows in the process list, and `wakterm cli agent request get` returns the reply once the agent has finished. Wakterm knows each harness (Claude Code, Codex and the others it supports), so gear has no logic for any one agent. `--to` names an agent or, when no agent has that name, a tab, and gear looks it up again for each message, so a message reaches whatever harness is running there now, even after a restart. A relay thread sends messages in order and asks for each reply twice a second; a one-sentence answer from a Claude agent came back 3.1 s after sending.
-- Reading replies: a reply is turned into what is worth hearing before it is spoken, by fixed rules. Code blocks and tables are named rather than read ("A code block of 6 lines.", "A table of 2 rows."), Markdown's marks are dropped, links are read as their text and bare addresses as their site ("a github.com link"), paths as their file's name, snake_case as words, and headings and list items become sentences. Past 1,200 characters, about a minute and a quarter of speech, the reading stops at a sentence and says the rest is not read. `gear read` prints what would be said of a reply.
-- Models: the window downloads any that are missing, showing its progress, and `gear fetch` does the same from the command line: four files, 631 MB in all, from Hugging Face at pinned commits, resuming a broken download and keeping a file only when its size and SHA-256 match the published ones.
+- Reading replies: a reply is turned into what is worth hearing before it is spoken, by fixed rules. Code blocks and tables are named rather than read ("A code block of 6 lines.", "A table of 2 rows."), Markdown's marks are dropped, links are read as their text and bare addresses as their site ("a github dot com link"), paths as their file's name, snake_case as words, and headings and list items become sentences. Numbers and the symbols around them are written out as words, since the speech model reads digits unreliably (Pocket TTS read 139 as "39" and 0.34 as "through"): integers, decimals and versions, codes with leading zeros digit by digit, years in pairs, times, dates, percent, money in dollars and cents, units, and a hex hash as its first six characters. On the 300 sentences above, this cut the words Pocket TTS got wrong from 14.88% to 10.88%. Past 1,200 characters, about a minute and a quarter of speech, the reading stops at a sentence and says the rest is not read. `gear read` prints what would be said of a reply.
+- Models: the window downloads any that are missing, showing its progress, and `gear fetch` does the same from the command line: six files, 552 MB in all, from Hugging Face at pinned commits, resuming a broken download and keeping a file only when its size and SHA-256 match the published ones.
 
 | File | What it is | Size |
 | --- | --- | ---: |
 | `parakeet-ft-v1-Q4_K_M.gguf` | [parakeet-ft-v1](https://huggingface.co/freetranscribe/parakeet-ft-v1), a fine-tune of NVIDIA's Parakeet TDT 0.6B v3, speech recognition (CC-BY-4.0) | 485 MB |
-| `pocket-tts-english_2026-09-Q8_0.gguf` | Kyutai [Pocket TTS](https://github.com/kyutai-labs/pocket-tts), English speech synthesis (CC-BY-4.0) | 138 MB |
-| `alba.safetensors` | Kyutai's alba voice for Pocket TTS (CC-BY-4.0) | 6 MB |
+| `phonon-31m-en/model.q8.gguf` | Gradium phonon-31m-en, English speech synthesis (Apache-2.0) | 65 MB |
+| `phonon-31m-en/config.json`, `phonon-31m-en/tokenizer.model` | its settings and tokenizer (Apache-2.0) | 70 KB |
+| `delia.safetensors` | Gradium's Delia voice for Phonon, American English (Apache-2.0) | 256 KB |
 | `silero-vad-v6.2-F32.gguf` | Silero VAD v6.2, telling speech from other sound (MIT) | 1.2 MB |
 
 - Window: `gear window` draws the loop in the toolcore-native style: the state (LISTENING, HEARING, SENDING, WAITING, SPEAKING, MUTED or STOPPED), the target agent, the countdown's length with `-` and `+` beside it to change it a second at a time (1 to 10 s, remembered), a microphone meter, the message with its countdown (a long message takes up to half the window and shows its newest words, the wheel scrolling back to the start, with how many lines are above in the box's title), the reply as written with code and tables boxed as not read, and a status bar that turns rust with a fault. Space mutes: the microphone pauses and the pipeline hears silence instead, so a piece of speech under way ends and a counting message is still sent. Esc stops the reading or drops the message, Enter sends now, and `+` and `-` change the text size. `gear window --demo --shot F.png` draws a made-up exchange to a picture without a display.
@@ -78,7 +79,7 @@ The window is to be drawn with gesso's `gs_ui` in the toolcore-native style: war
 │ └────────────────────────────────────────────────────┘   │
 │ Want me to commit it?                                    │
 ├──────────────────────────────────────────────────────────┤
-│ echo cancel on · Parakeet 0.07 cpu · Pocket · 0.6 GB     │
+│ echo cancel on · Parakeet 0.07 cpu · Phonon · 0.6 GB     │
 └──────────────────────────────────────────────────────────┘
 ```
 
@@ -121,7 +122,7 @@ LibriSpeech is read audiobook speech. How these models handle coding vocabulary,
 
 ### Models run on the GPU where one is usable
 
-gear is built with ggml's [Vulkan](https://www.vulkan.org/) backend, so both models run on the GPU of any vendor whose driver supports Vulkan, and on the CPU where there is no GPU, no Vulkan driver, or `--cpu` was given. The GPU makes the larger, more accurate recognition models cheap: on an RTX 3080, parakeet-ft-v1 transcribes 10 s of speech in 0.20 s, three times faster than the 110M model on one CPU thread, and Pocket starts speaking 10 to 50 ms after a reply is queued instead of about 100 ms.
+gear is built with ggml's [Vulkan](https://www.vulkan.org/) backend, so both models run on the GPU of any vendor whose driver supports Vulkan, and on the CPU where there is no GPU, no Vulkan driver, or `--cpu` was given. The GPU makes the larger, more accurate recognition models cheap: on an RTX 3080, parakeet-ft-v1 transcribes 10 s of speech in 0.20 s, three times faster than the 110M model on one CPU thread, and Phonon starts speaking about 10 ms after a reply is queued instead of about 50 ms.
 
 Times on a Windows 11 PC with a Ryzen 7 3800XT and an RTX 3080, recognition on one CPU thread and synthesis on two, the models loaded once:
 
@@ -130,8 +131,8 @@ Times on a Windows 11 PC with a Ryzen 7 3800XT and an RTX 3080, recognition on o
 | parakeet-ft-v1 Q4_K_M, time for 10 s of speech | 0.20 s | 2.97 s |
 | parakeet-ft-v1 Q4_K_M, slowest of 57 utterances | 0.49 s | |
 | Parakeet TDT-CTC 110M Q4_K_M, time for 10 s of speech | 0.10 s | 0.69 s |
-| Pocket TTS, time to first audio | 0.01 to 0.05 s | 0.07 to 0.13 s |
-| Pocket TTS, time for 6 s of speech | 0.14 s | 1.64 s |
+| phonon-31m-en, time to first audio | about 0.01 s | 0.05 s |
+| phonon-31m-en, speed, seconds of speech made per second | 28 | 3.4 |
 | Load, parakeet-ft-v1 | 0.50 s | 0.34 s |
 
 The GPU gives the same accuracy: on the 556 LibriSpeech utterances used for accuracy above, parakeet-ft-v1 scores 2.10% and 3.54% on the GPU against 2.10% and 3.61% on the CPU, and the 110M model 2.70% and 5.27% against 2.64% and 5.16%; the transcripts differ only where rounding tips a word.
@@ -169,4 +170,4 @@ gear's own files are under the MIT license in [LICENSE](LICENSE), the icon in `a
 
 `tests/utterance.wav` is utterance 1089-134686-0010 of LibriSpeech test-clean, by Vassil Panayotov, Guoguo Chen, Daniel Povey and Sanjeev Khudanpur ([LibriSpeech](https://www.openslr.org/12), 2015), under [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/). It was converted from FLAC to a 16-bit WAV at its original 16 kHz, without trimming.
 
-The models gear downloads are not part of it: Parakeet and Pocket TTS are under CC-BY-4.0, and Kyutai's terms for Pocket TTS prohibit cloning a voice without consent and deceptive use; Silero VAD is under MIT.
+The models gear downloads are not part of it: Parakeet is under CC-BY-4.0, Phonon and its voices under Apache-2.0, and Silero VAD under MIT.

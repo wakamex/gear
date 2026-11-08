@@ -1,8 +1,8 @@
 // Speech synthesis on a thread of its own, played as it is made. Text queued with gear_say_speak is
-// synthesized by Pocket TTS sentence by sentence; each chunk of audio goes into a gs_stream that is a
-// source in gs_mix, so the first words play while the rest is still being made. gear_say_stop drops
-// what is queued, ends the synthesis in progress at its next chunk and silences what is waiting to
-// play, for when the user starts talking over a reply.
+// synthesized by Phonon (hearsay's pockettts.cpp) sentence by sentence; each chunk of audio goes
+// into a gs_stream that is a source in gs_mix, so the first words play while the rest is still
+// being made. gear_say_stop drops what is queued, ends the synthesis in progress at its next chunk
+// and silences what is waiting to play, for when the user starts talking over a reply.
 //
 // What plays is also handed to gs_voice's echo canceller, 10 ms at a time at 16 kHz, so that with
 // loudspeakers the microphone does not hear the reply as the user talking.

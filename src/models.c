@@ -12,16 +12,28 @@ static const gear_model_file files[GEAR_MODEL_COUNT] = {
         "parakeet-ft-v1, a fine-tune of NVIDIA Parakeet TDT 0.6B v3, speech recognition (CC-BY-4.0)",
     },
     [GEAR_MODEL_SAY] = {
-        "pocket-tts-english_2026-09-Q8_0.gguf",
-        "https://huggingface.co/Serveurperso/pocket-tts-GGUF/resolve/b5a0115aee9658c110d747debb03edd548c4b9c7/pocket-tts-english_2026-09-Q8_0.gguf",
-        138498080, "1c91f8cd54efd089236737a338e998b9cd1bc9c3b1d6bc5bd038a99f2527deba",
-        "Kyutai Pocket TTS, English speech synthesis (CC-BY-4.0)",
+        "phonon-31m-en/model.q8.gguf",
+        "https://huggingface.co/gradium/phonon-31m-en/resolve/92741c5b07d085ff840e26fea8ce43110b87852f/model.q8.gguf",
+        64512352, "a7d9aad2cd6dc66473f24a08bc6d2939030ef4d751ef82349361fbef3272dbae",
+        "Gradium phonon-31m-en, English speech synthesis built on Kyutai's Pocket TTS (Apache-2.0)",
+    },
+    [GEAR_MODEL_SAY_CONFIG] = {
+        "phonon-31m-en/config.json",
+        "https://huggingface.co/gradium/phonon-31m-en/resolve/92741c5b07d085ff840e26fea8ce43110b87852f/config.json",
+        4634, "b5d0f88353638370d94035b7d73d7d6577c0554d78f8d7ecfd40490aae39ae85",
+        "phonon-31m-en's settings (Apache-2.0)",
+    },
+    [GEAR_MODEL_SAY_TOKENIZER] = {
+        "phonon-31m-en/tokenizer.model",
+        "https://huggingface.co/gradium/phonon-31m-en/resolve/92741c5b07d085ff840e26fea8ce43110b87852f/tokenizer.model",
+        65045, "82e4572006d64d483317074c22c368e87779640b6f3a9dcd07b7caae32b030ce",
+        "phonon-31m-en's tokenizer (Apache-2.0)",
     },
     [GEAR_MODEL_VOICE] = {
-        "alba.safetensors",
-        "https://huggingface.co/kyutai/pocket-tts-without-voice-cloning/resolve/575d14372df89a4534bcb989870a34e77544b09f/languages/english_2026-09/embeddings/alba.safetensors",
-        6195000, "d291428b416d6c36a1de7835e51dbe1e334b75e5af512bb18dd23a1047fe8f3b",
-        "Kyutai's alba voice for Pocket TTS (CC-BY-4.0)",
+        "delia.safetensors",
+        "https://huggingface.co/gradium/phonon-voices/resolve/0ee17205f254b5abc43b266c8a0f215565c352f7/voices/nGzMHMPAWGaJFHOo.safetensors",
+        256136, "a0c3dcb91b2247eca56536be9ae8e8becc1c807b1136c5fe101552d6a155b24a",
+        "Gradium's Delia voice for Phonon, American English (Apache-2.0)",
     },
     [GEAR_MODEL_VAD] = {
         "silero-vad-v6.2-F32.gguf",
@@ -97,6 +109,12 @@ static bool fetch_one(const char *dir, const gear_model_file *f, sink *s, SDL_At
     char dest[1200], part[1210];
     SDL_snprintf(dest, sizeof dest, "%s/%s", dir, f->name);
     SDL_snprintf(part, sizeof part, "%s.part", dest);
+    char *folder = SDL_strrchr(dest, '/');
+    if (folder > dest + SDL_strlen(dir)) {  // a file kept in its own folder: the folder is made first
+        *folder = 0;
+        SDL_CreateDirectory(dest);
+        *folder = '/';
+    }
     for (int attempt = 0; attempt < 2; attempt++) {
         // Bytes from an earlier try are kept and hashed again, so the sum covers the whole file.
         long long have = file_size(part);

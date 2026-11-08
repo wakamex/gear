@@ -6,10 +6,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-typedef enum { GEAR_MODEL_HEAR, GEAR_MODEL_SAY, GEAR_MODEL_VOICE, GEAR_MODEL_VAD, GEAR_MODEL_COUNT } gear_model;
+// The speech model's settings and tokenizer sit beside it in its folder, where hearsay looks for them.
+typedef enum { GEAR_MODEL_HEAR, GEAR_MODEL_SAY, GEAR_MODEL_SAY_CONFIG, GEAR_MODEL_SAY_TOKENIZER, GEAR_MODEL_VOICE, GEAR_MODEL_VAD, GEAR_MODEL_COUNT } gear_model;
 
 typedef struct {
-    const char *name;    // the file's name in the models folder
+    const char *name;    // the file's name in the models folder, with its folder there if it has one
     const char *url;     // at a pinned commit
     long long bytes;
     const char *sha256;
