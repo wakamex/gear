@@ -327,6 +327,51 @@ static bool say_word(buf *b, const char *w, bool after_number) {
     return number;
 }
 
+// The word that ends at s[end], spaces after it aside, lowercased into w: where it starts, or -1 when
+// what comes before is the start of the text or punctuation, which ends a clause.
+static int word_before(const char *s, int end, char *w, size_t size) {
+    while (end > 0 && s[end - 1] == ' ') end--;
+    int start = end;
+    while (start > 0 && (SDL_isalpha((unsigned char)s[start - 1]) || s[start - 1] == '\'')) start--;
+    if (start == end) return -1;
+    size_t n = SDL_min((size_t)(end - start), size - 1);
+    for (size_t i = 0; i < n; i++) w[i] = (char)SDL_tolower((unsigned char)s[start + i]);
+    w[n] = 0;
+    return start;
+}
+
+static bool among(const char *w, const char *words) {  // words: each between two spaces
+    char key[48];
+    SDL_snprintf(key, sizeof key, " %s ", w);
+    return SDL_strstr(words, key) != NULL;
+}
+
+// Whether "read", about to be said after what b holds and before `after`, is the past form, which is
+// then written "red". Phonon said "reed" in "She read only the first page", "It read the engine code"
+// and "is read aloud" 16 times of 18, and "red" for "red" in their place 11 times of 12 (by the
+// vowel's first resonance, against the same sentences with "reed"). Only where grammar leaves no
+// choice: after a form of be or have ("has never read", but not "is read only"), and after he, she or
+// it ("it just read"), unless the verb before that takes the plain form ("let it read", "did she
+// read"); a few adverbs may come between. Elsewhere ("I read the file") the model follows the sentence.
+static bool read_is_past(const buf *b, const char *after) {
+    static const char be_have[] = " am is are was were be been being isn't aren't wasn't weren't have has had having haven't hasn't hadn't"
+                                  " i've you've we've they've who've would've could've should've you're we're they're it's he's she's that's ";
+    static const char adverbs[] = " not no now already just never ever also only still all both yet always often actually fully first longer best then even really ";
+    static const char plain[] = " let lets make makes made help helps helped have had did does do didn't doesn't don't can can't cannot could couldn't"
+                                " will won't would wouldn't should shouldn't may might must see saw watch watched ";
+    char w[40], next[16];
+    size_t k = 0;
+    while (*after == ' ') after++;
+    for (; SDL_isalpha((unsigned char)*after) && k + 1 < sizeof next; after++) next[k++] = (char)SDL_tolower((unsigned char)*after);
+    next[k] = 0;
+    if (among(next, " access permission permissions ")) return false;  // "give it read access"
+    int at = b->len ? word_before(b->s, (int)b->len, w, sizeof w) : -1;
+    while (at >= 0 && among(w, adverbs)) at = word_before(b->s, at, w, sizeof w);
+    if (at < 0) return false;
+    if (among(w, " he she it ")) return word_before(b->s, at, w, sizeof w) < 0 || !among(w, plain);
+    return among(w, be_have) && SDL_strcmp(next, "only");
+}
+
 // One whitespace-free token, made speakable: an address read as its site, a path as its file's
 // name, snake_case as words, an arrow as "to", numbers as words. Returns whether it ends in a number.
 static bool token(buf *b, const char *t, size_t n, bool after_number) {
@@ -342,6 +387,11 @@ static bool token(buf *b, const char *t, size_t n, bool after_number) {
     if (m >= sizeof word) { put(b, t + head, n - head); return false; }
     SDL_memcpy(word, w, m);
     word[m] = 0;
+    if (!SDL_strcmp(word, "read") && !head && read_is_past(b, t + n)) {
+        puts_(b, "red");
+        put(b, t + tail, n - tail);
+        return false;
+    }
     const char *scheme = SDL_strstr(word, "://");
     if (scheme && (!SDL_strncmp(word, "http", 4))) {
         const char *host = scheme + 3;

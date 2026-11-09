@@ -337,6 +337,14 @@ static void test_speakable(void) {
            "Costs seventy cents, one dollar or one thousand two hundred forty nine dollars and fifty cents for claude opus "
            "five five under m eight fogunits wait three.");
     speaks("Set v=DMARC1 so len + i == n & done.", 0, "Set v equals DMARC one so len plus i equals n and done.");
+    // "read" in the past is written as it sounds, where grammar says it is the past.
+    speaks("She read only the first page. Everything I say is read aloud, and it has never been read twice.", 0,
+           "She red only the first page. Everything I say is red aloud, and it has never been red twice.");
+    speaks("It just read the log, I've read it too, and what it read was short.", 0, "It just red the log, I've red it too, and what it red was short.");
+    speaks("I read the file. Read it first, then let it read the rest; it can read all of it, and did she read it?", 0,
+           "I read the file. Read it first, then let it read the rest; it can read all of it, and did she read it?");
+    speaks("The mount is read only, so give it read access. I will read it, and they read it daily.", 0,
+           "The mount is read only, so give it read access. I will read it, and they read it daily.");
     speaks("See Chess.com, e.g. the 21st of 4-9 at 192.168.2.1.", 0,
            "See Chess dot com, e.g. the twenty first of four to nine at one hundred ninety two point one hundred sixty eight point two point one.");
 }
