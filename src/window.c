@@ -58,6 +58,8 @@ typedef struct {
 static float px, small;  // the text size and the small size, in points
 static gs_rect status_line;  // where the status bar's first line was drawn, for a click on it
 static gs_rect countdown_less, countdown_more;  // the countdown control's - and +, for clicks on them
+static gs_rect volume_slider;  // where the volume slider was drawn, for the wheel
+static float volume = 1;       // of everything gear plays, 0 to 1.5, set by the slider
 static gs_rect build_label;  // a test build's label in the status bar, for a click on it
 
 // A panel: a frame with its title set into the top rule. Returns the inside.
@@ -86,7 +88,15 @@ static void state_line(gs_ui *ui, gs_rect r, const view *v) {
         float h = 2 + 12 * SDL_clamp(v->levels[i], 0, 1);
         gs_ui_fill(ui, (gs_rect){ meter.x + (float)i * 5, meter.y + meter.h / 2 + 7 - h, 3, h }, v->speech ? TEXT : DIM);
     }
-    // The countdown's length before the meter: - and + change it a second at a time.
+    // The volume before the meter, as in gtube: dragged, or the wheel over it.
+    volume_slider = (gs_rect){ 0 };
+    if (v->countdown_setting > 0) {
+        gs_cut_right(&r, 14);
+        volume_slider = gs_cut_right(&r, 80);
+        gs_ui_slider(ui, volume_slider, "volume", &volume, 0, 1.5f);
+        gs_ui_text(ui, gs_cut_right(&r, gs_ui_text_width(ui, "vol", small) + 8), "vol", small, DIM, -1);
+    }
+    // The countdown's length before the volume: - and + change it a second at a time.
     countdown_less = countdown_more = (gs_rect){ 0 };
     if (v->countdown_setting > 0) {
         char secs[16];
@@ -728,7 +738,9 @@ int gear_window(const gear_window_options *o) {
         fetch.thread = SDL_CreateThread(fetch_run, "gear-fetch", &fetch);
     } else if (!o->demo && !open_loop(&a, error, sizeof error)) SDL_strlcpy(a.fault, error, sizeof a.fault);
     int code = 0, frames = 0;
-    Uint64 drawn = 0, input_at = SDL_GetTicks();
+    Uint64 drawn = 0, input_at = SDL_GetTicks(), volume_changed_at = 0;
+    volume = o->models[0] ? gear_volume_remembered(o->models, 1) : 1;
+    float played_volume = -1;  // set on the mix at the first frame
     bool restart = false;
     for (bool running = true; running;) {
         SDL_Event e;
@@ -739,6 +751,9 @@ int gear_window(const gear_window_options *o) {
                 if (e.type == SDL_EVENT_MOUSE_WHEEL && e.wheel.mouse_x >= message_box.x && e.wheel.mouse_x < message_box.x + message_box.w &&
                     e.wheel.mouse_y >= message_box.y && e.wheel.mouse_y < message_box.y + message_box.h)
                     message_wheel += e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y;
+                if (e.type == SDL_EVENT_MOUSE_WHEEL && e.wheel.mouse_x >= volume_slider.x && e.wheel.mouse_x < volume_slider.x + volume_slider.w &&
+                    e.wheel.mouse_y >= volume_slider.y - 6 && e.wheel.mouse_y < volume_slider.y + volume_slider.h + 6)
+                    volume = SDL_clamp(volume + 0.05f * (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y), 0, 1.5f);
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
@@ -799,6 +814,12 @@ int gear_window(const gear_window_options *o) {
                 if (gs_update_ready(a.update)) restart = true, running = false;  // restart now
                 else gs_update_set_consent(a.update, gs_update_consent(a.update) != GS_UPDATE_YES), a.notice[0] = 0;
             }
+            // A new volume is heard at once and written down once it has been still for a second.
+            if (volume != played_volume) {
+                if (played_volume >= 0) volume_changed_at = SDL_GetTicks();
+                gs_mix_set_volume(played_volume = volume);
+            }
+            if (volume_changed_at && SDL_GetTicks() - volume_changed_at > 1000) gear_volume_remember(o->models, volume), volume_changed_at = 0;
             int step = gs_ui_clicked(ui, countdown_more) ? 1 : gs_ui_clicked(ui, countdown_less) ? -1 : 0;
             if (step && a.countdown + step >= 1 && a.countdown + step <= 10) {
                 a.countdown += step;

@@ -42,6 +42,9 @@ void gear_hear_model_remember(const char *dir, const char *name);  // kept in di
 // else `fallback`.
 double gear_countdown_remembered(const char *dir, double fallback);
 void gear_countdown_remember(const char *dir, double seconds);
+// The volume of what gear plays, 0 to 1.5, as last set in the window (dir/volume.txt), else `fallback`.
+float gear_volume_remembered(const char *dir, float fallback);
+void gear_volume_remember(const char *dir, float volume);
 // The agent the window last sent to, and the host it ran on ("" for this machine), from
 // dir/target.txt; false when there is none. Remembering an empty name forgets it.
 bool gear_target_remembered(const char *dir, char *name, size_t name_size, char *host, size_t host_size);

@@ -247,6 +247,22 @@ void gear_countdown_remember(const char *dir, double seconds) {
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
+float gear_volume_remembered(const char *dir, float fallback) {
+    char path[1200];
+    SDL_snprintf(path, sizeof path, "%s/volume.txt", dir);
+    char *text = SDL_LoadFile(path, NULL);
+    float v = text ? SDL_clamp((float)SDL_atof(text), 0, 1.5f) : fallback;
+    SDL_free(text);
+    return v;
+}
+
+void gear_volume_remember(const char *dir, float volume) {
+    char path[1200], text[32];
+    SDL_snprintf(path, sizeof path, "%s/volume.txt", dir);
+    SDL_snprintf(text, sizeof text, "%.2f", volume);
+    SDL_SaveFile(path, text, SDL_strlen(text));
+}
+
 bool gear_target_remembered(const char *dir, char *name, size_t name_size, char *host, size_t host_size) {
     char path[1200];
     SDL_snprintf(path, sizeof path, "%s/target.txt", dir);
