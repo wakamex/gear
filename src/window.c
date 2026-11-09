@@ -45,7 +45,7 @@ typedef struct {
     const char *message;
     bool pending;           // speech heard and not yet in the message
     double left, total;     // the countdown, left < 0 when not counting
-    int countdown_setting;  // the countdown's length, shown with - and + to change it; 0 hides it
+    int countdown_setting;  // the countdown's length, shown with - and + to change it; -1 hides it (and the volume)
     char build[200];        // a test build's name and whether it updates itself, or a notice; "" for none
     bool build_ready;       // a new build is in place: the label restarts into it
     const char *reply;
@@ -91,7 +91,7 @@ static void state_line(gs_ui *ui, gs_rect r, const view *v) {
     }
     // The volume before the meter, as in gtube: dragged, or the wheel over it.
     volume_slider = (gs_rect){ 0 };
-    if (v->countdown_setting > 0) {
+    if (v->countdown_setting >= 0) {
         gs_cut_right(&r, 14);
         volume_slider = gs_cut_right(&r, 80);
         gs_ui_slider(ui, volume_slider, "volume", &volume, 0, 2);
@@ -99,7 +99,7 @@ static void state_line(gs_ui *ui, gs_rect r, const view *v) {
     }
     // The countdown's length before the volume: - and + change it a second at a time.
     countdown_less = countdown_more = (gs_rect){ 0 };
-    if (v->countdown_setting > 0) {
+    if (v->countdown_setting >= 0) {
         char secs[16];
         SDL_snprintf(secs, sizeof secs, "%d s", v->countdown_setting);
         float sign = small * 1.4f, w = gs_ui_text_width(ui, "10 s", small) + 8;
@@ -641,7 +641,7 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     slug(a->say_slug, sizeof a->say_slug, gear_model_info(GEAR_MODEL_SAY)->name);
     slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(GEAR_MODEL_VOICE)->name);
     gear_listen_params lp = gear_listen_defaults();
-    a->countdown = o->countdown > 0 ? o->countdown : gear_countdown_remembered(o->models, 3);
+    a->countdown = o->countdown >= 0 ? o->countdown : gear_countdown_remembered(o->models, 3);
     a->pipe = gear_pipeline_new(a->voice, a->vad, a->hear, a->say, &lp, a->countdown);
     if (!o->no_keep) {
         char heard[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
@@ -797,10 +797,12 @@ int gear_window(const gear_window_options *o) {
             if (o->demo) demo(&v);
             else if (fetching) {
                 SDL_zero(v);
+                v.countdown_setting = -1;
                 v.state = "FETCHING", v.state_color = ACCENT, v.message = "", v.left = -1;
                 fetch_status(&fetch, v.status, sizeof v.status);
             } else {
                 SDL_zero(v);
+                v.countdown_setting = -1;
                 v.state = "STOPPED", v.state_color = OVER, v.message = "", v.left = -1, v.fault = true;
                 SDL_strlcpy(v.status, a.fault, sizeof v.status);
             }
@@ -831,7 +833,7 @@ int gear_window(const gear_window_options *o) {
             }
             if (volume_changed_at && SDL_GetTicks() - volume_changed_at > 1000) gear_volume_remember(o->models, volume), volume_changed_at = 0;
             int step = gs_ui_clicked(ui, countdown_more) ? 1 : gs_ui_clicked(ui, countdown_less) ? -1 : 0;
-            if (step && a.countdown + step >= 1 && a.countdown + step <= 10) {
+            if (step && a.countdown + step >= 0 && a.countdown + step <= 10) {
                 a.countdown += step;
                 gear_pipeline_set_countdown(a.pipe, a.countdown);
                 gear_countdown_remember(o->models, a.countdown);
