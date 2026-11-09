@@ -175,7 +175,7 @@ static int listen_live(void) {
     }
     if (opt.speak_back || relay) {
         if (!gs_mix_open(MIX_RATE)) { fprintf(stderr, "gear: no playback device: %s\n", SDL_GetError()); return 1; }
-        if (!(say = open_say(dir, voice))) return 1;
+        if (!(say = open_say(dir, !opt.no_echo && gs_voice_has_echo() ? voice : NULL))) return 1;
     }
     const SDL_AudioSpec spec = { SDL_AUDIO_F32, 1, GEAR_RATE };
     SDL_AudioStream *mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, NULL, NULL);
@@ -328,7 +328,7 @@ static int interrupt_file(const char *text, const char *mic_path, const char *ou
     if (!mic) { fprintf(stderr, "gear: cannot read %s: %s\n", mic_path, SDL_GetError()); return 1; }
     gs_voice *voice = open_voice();
     gear_hear *hear = open_hear(dir);
-    gear_say *say = hear ? open_say(dir, voice) : NULL;
+    gear_say *say = hear ? open_say(dir, !opt.no_echo && gs_voice_has_echo() ? voice : NULL) : NULL;
     gear_vad *vad = say ? open_vad(dir) : NULL;
     if (!vad) return 1;
     gear_listen_params lp = gear_listen_defaults();

@@ -8,7 +8,9 @@ enum { PLAYED_KEPT = 32 * GEAR_RATE, LEAD = 3 * GEAR_RATE / 10 };  // a piece is
 // A piece whose loudest 100 ms is quieter than this is not sent to the recognizer, which writes words
 // into breathing and room noise. Of the 119 kept pieces it found words in, the 9 below it were "Yeah",
 // "Okay", "So", "Thank you", "absolutely" (breathing) and the like; sentences of three words or more
-// peaked at 0.0147 (median), 95% of them above 0.0041.
+// peaked at 0.0147 (median), 95% of them above 0.0041. The recognizer's token probabilities do not tell
+// them apart: the 3 of those 9 that parakeet-ft-v1 still writes words into average 0.91 to 0.93, and
+// 33 of the 104 louder pieces with words average less.
 #define QUIET_PIECE 0.0015f
 
 static bool too_quiet(const float *piece, int n) {
@@ -38,6 +40,7 @@ struct gear_pipeline {
     // What the speakers played, the last PLAYED_KEPT samples, beside the microphone's.
     float *played;
     long played_at;        // samples written so far
+    bool recorded;         // whether the last frame came with the speakers' sound
     // For each piece sent to the recogniser, oldest first, whether the speakers' sound over the same
     // stretch follows it there; and a piece's text waiting for that.
     bool referenced[64];
@@ -154,6 +157,7 @@ static void drain(gear_pipeline *p);
 void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
     for (int i = 0; i < GEAR_FRAME; i++) p->played[(p->played_at + i) % PLAYED_KEPT] = played ? played[i] : 0;
     p->played_at += GEAR_FRAME;
+    p->recorded = played != NULL;
     gs_voice_frame(p->voice, frame);
     p->frames++;
     float speech = gear_vad_frame(p->vad, frame);
@@ -177,10 +181,12 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
         }
         gear_hear_submit(p->hear, piece, n);
         keep_piece(p, piece, n);
-        // The speakers over the same stretch, from a little before it, when they played anything.
+        // The speakers over the same stretch, from a little before it, when they played anything:
+        // their recording, or without one what gear itself played.
         int m = SDL_min(n + LEAD, PLAYED_KEPT);
         float *heard_out = SDL_malloc((size_t)m * sizeof(float));
-        for (int i = 0; i < m; i++) heard_out[i] = p->played[((p->played_at - m + i) % PLAYED_KEPT + PLAYED_KEPT) % PLAYED_KEPT];
+        if (p->recorded || !p->say || !gear_say_played(p->say, heard_out, m))
+            for (int i = 0; i < m; i++) heard_out[i] = p->played[((p->played_at - m + i) % PLAYED_KEPT + PLAYED_KEPT) % PLAYED_KEPT];
         bool refer = p->ref_count < 64 && !too_quiet(heard_out, m);
         if (refer) gear_hear_submit(p->hear, heard_out, m);
         SDL_free(heard_out);
@@ -216,6 +222,29 @@ void gear_pipeline_set_countdown(gear_pipeline *p, double seconds) { p->countdow
 
 double gear_pipeline_countdown(const gear_pipeline *p) { return counting(p) ? SDL_max(left(p), 0) : -1; }
 
+// The next word of s, lowercased letters, digits and apostrophes, into w; s past it, or NULL at the end.
+static const char *word(const char *s, char *w, size_t size) {
+    while (*s && !SDL_isalnum((unsigned char)*s)) s++;
+    if (!*s) return NULL;
+    size_t n = 0;
+    for (; *s && (SDL_isalnum((unsigned char)*s) || *s == '\''); s++)
+        if (n + 1 < size) w[n++] = (char)SDL_tolower((unsigned char)*s);
+    w[n] = 0;
+    return s;
+}
+
+// Whether `heard` has words and at least three in four of them are words of `text`.
+static bool mostly_in(const char *heard, const char *text) {
+    int words = 0, found = 0;
+    char w[64], v[64];
+    for (const char *h = heard; (h = word(h, w, sizeof w));) {
+        words++;
+        for (const char *t = text; (t = word(t, v, sizeof v));)
+            if (!SDL_strcmp(w, v)) { found++; break; }
+    }
+    return words && found * 4 >= words * 3;
+}
+
 static void drain(gear_pipeline *p) {
     for (;;) {
         if (!p->waiting && !(p->waiting = gear_hear_take(p->hear))) return;
@@ -225,13 +254,12 @@ static void drain(gear_pipeline *p) {
         if (p->ref_count) p->ref_head = (p->ref_head + 1) % 64, p->ref_count--;
         char *t = p->waiting;
         p->waiting = NULL;
-        bool echo = p->say && gear_say_echoes(p->say, t);
-        bool played_back = played && gear_mostly_in(t, played, 1);
+        bool played_back = played && mostly_in(t, played);
         if (SDL_getenv("GEAR_DEBUG"))
             SDL_Log("gear: heard \"%s\"%s%s%s%s", t, played ? ", the speakers \"" : "", played ? played : "", played ? "\"" : "",
-                    echo ? ": the reply's echo, dropped" : played_back ? ": the speakers' sound, dropped" : "");
+                    played_back ? ": the speakers' sound, dropped" : "");
         keep_text(p, t);
-        if (!echo && !played_back) append(p, t);
+        if (!played_back) append(p, t);
         SDL_free(t);
         SDL_free(played);
     }

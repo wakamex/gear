@@ -28,11 +28,11 @@ void gear_pipeline_keep(gear_pipeline *p, const char *dir, const char *model);
 // Another recogniser from here on, called `model` in what is kept. The old one is the caller's to close.
 void gear_pipeline_set_hear(gear_pipeline *p, gear_hear *hear, const char *model);
 // One microphone frame of GEAR_FRAME samples at 16 kHz, cleaned in place, and what the speakers played
-// in the same 10 ms (NULL when they are not recorded). When a piece of speech ends while the speakers
-// played something, their sound over the same stretch is transcribed after it, and the piece's text is
-// dropped when at least three in four of its words are in theirs: a video or a call heard through the
-// speakers, which the echo canceller let through, rather than the user. Its text joins the message only
-// once both are in.
+// in the same 10 ms (NULL when they are not recorded; what `say` played then stands for them, where it
+// keeps that). When a piece of speech ends while the speakers played something, their sound over the
+// same stretch is transcribed after it, and the piece's text is dropped when at least three in four of
+// its words are in theirs: a reply, a video or a call heard through the speakers, which the echo
+// canceller let through, rather than the user. Its text joins the message only once both are in.
 void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played);
 // Collects finished transcriptions. Returns the message when its countdown has run out (SDL_free it),
 // and starts the next one; NULL otherwise.

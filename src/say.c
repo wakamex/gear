@@ -5,7 +5,7 @@
 #include "env.h"
 #include "pocket.h"
 
-enum { POCKET_RATE = 24000, SCRATCH = 1024 };
+enum { POCKET_RATE = 24000, SCRATCH = 1024, KEPT = 32 * 16000 };
 
 typedef struct line { struct line *next; char *text; } line;
 
@@ -22,12 +22,13 @@ struct gear_say {
     SDL_AtomicInt generation;  // advanced by gear_say_stop; synthesis of an older one gives up
     double first_audio, audio;
     int rate;
-    char *said;       // the text last queued, for telling its echo from the user
-    Uint64 busy_at;   // when it was last found busy
-    // The player, on the audio thread: what it plays, averaged down to 16 kHz for the canceller.
+    // The player, on the audio thread: what it plays, averaged down to 16 kHz for the canceller, and
+    // the last KEPT samples of that for gear_say_played, written 10 ms at a time at played_at.
     gs_voice *echo;
     float scratch[SCRATCH * 2], echo_frame[160], echo_sum;
     int echo_fill, echo_count;
+    float *played;
+    SDL_AtomicInt played_at;
 };
 
 typedef struct { gear_say *s; int generation; Uint64 start; bool heard; long samples; } job;
@@ -109,6 +110,9 @@ static void render(void *user, float *lr, int frames) {
             s->echo_count = 0;
             if (s->echo_fill == 160) {
                 gs_voice_played(s->echo, s->echo_frame);
+                int at = SDL_GetAtomicInt(&s->played_at);
+                SDL_memcpy(s->played + at, s->echo_frame, sizeof s->echo_frame);
+                SDL_SetAtomicInt(&s->played_at, (at + 160) % KEPT);
                 s->echo_fill = 0;
             }
         }
@@ -151,6 +155,7 @@ gear_say *gear_say_open(const char *model, const char *voice, int threads, gs_vo
     s->voice = v;
     s->rate = rate;
     s->echo = echo;
+    if (echo) s->played = SDL_calloc(KEPT, sizeof(float));
     // Four seconds ahead at most: synthesis runs faster than speech and then waits on the player.
     s->stream = gs_stream_new(rate, 4.0, 0.05);
     const SDL_AudioSpec from = { SDL_AUDIO_F32, 1, POCKET_RATE }, to = { SDL_AUDIO_F32, 2, rate };
@@ -178,7 +183,7 @@ void gear_say_close(gear_say *s) {
     pt_free(s->ctx);
     SDL_DestroyCondition(s->wake);
     SDL_DestroyMutex(s->lock);
-    SDL_free(s->said);
+    SDL_free(s->played);
     SDL_free(s);
 }
 
@@ -188,8 +193,6 @@ void gear_say_speak(gear_say *s, const char *text) {
     SDL_LockMutex(s->lock);
     for (q = &s->queue; *q; q = &(*q)->next) {}
     *q = l;
-    SDL_free(s->said);
-    s->said = SDL_strdup(text);
     SDL_SignalCondition(s->wake);
     SDL_UnlockMutex(s->lock);
 }
@@ -209,40 +212,18 @@ void gear_say_stop(gear_say *s) {
 
 bool gear_say_busy(gear_say *s) {
     SDL_LockMutex(s->lock);
-    bool busy = s->queue || s->generating || gs_stream_buffered(s->stream) > 0;
-    if (busy) s->busy_at = SDL_GetTicks();
+    bool busy = s->queue || s->generating;
     SDL_UnlockMutex(s->lock);
-    return busy;
+    return busy || gs_stream_buffered(s->stream) > 0;
 }
 
-// The next word of s, lowercased letters, digits and apostrophes, into w; s past it, or NULL at the end.
-static const char *word(const char *s, char *w, size_t size) {
-    while (*s && !SDL_isalnum((unsigned char)*s)) s++;
-    if (!*s) return NULL;
-    size_t n = 0;
-    for (; *s && (SDL_isalnum((unsigned char)*s) || *s == '\''); s++)
-        if (n + 1 < size) w[n++] = (char)SDL_tolower((unsigned char)*s);
-    w[n] = 0;
-    return s;
-}
-
-bool gear_mostly_in(const char *heard, const char *text, int least) {
-    int words = 0, found = 0;
-    char w[64], v[64];
-    for (const char *h = heard; (h = word(h, w, sizeof w));) {
-        words++;
-        for (const char *t = text; (t = word(t, v, sizeof v));)
-            if (!SDL_strcmp(w, v)) { found++; break; }
-    }
-    return words >= least && found * 4 >= words * 3;
-}
-
-bool gear_say_echoes(gear_say *s, const char *heard) {
-    SDL_LockMutex(s->lock);
-    bool recent = s->said && (s->queue || s->generating || gs_stream_buffered(s->stream) > 0 || SDL_GetTicks() - s->busy_at < 5000);
-    bool echo = recent && gear_mostly_in(heard, s->said, 2);
-    SDL_UnlockMutex(s->lock);
-    return echo;
+bool gear_say_played(gear_say *s, float *out, int n) {
+    if (!s->echo) return false;
+    // The newest sample is the one before played_at. The oldest 0.1 s kept is left out, as the audio
+    // thread may be writing over it.
+    int at = SDL_GetAtomicInt(&s->played_at);
+    for (int i = 0; i < n; i++) out[i] = n - i > KEPT - 1600 ? 0 : s->played[(at - (n - i) + KEPT) % KEPT];
+    return true;
 }
 
 void gear_say_last(gear_say *s, double *first_audio, double *audio) {
