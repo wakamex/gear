@@ -207,14 +207,18 @@ static void test_end_to_end(const char *dir, const char *data) {
     double heard, interrupted, quiet;
     if (duplex(model, voice_path, vad_path, hear, speech, n, HEADPHONES, &heard, &interrupted, &quiet)) {
         CHECK(heard > 0 && heard < 1.0);  // the reply starts within a second
-        // The utterance's speech begins 0.56 s into the file, so 2.56 s into the test; it is heard
-        // within 0.2 s of that (Silero needs two 32 ms windows of speech), and the reading stops at once.
-        CHECK(interrupted >= 2.56 && interrupted < 2.76);
+        // The utterance's speech begins 0.56 s into the file, so 2.56 s into the test; Silero hears it
+        // within 0.2 s, and once it has gone on for 0.3 s more the reading stops at once.
+        CHECK(interrupted >= 2.86 && interrupted < 3.06);
         CHECK(quiet >= interrupted && quiet - interrupted < 0.05);
     }
+    // A 0.15 s burst of speech, as long as the reply's own sound that once got past the canceller,
+    // leaves the reply playing.
+    if (duplex(model, voice_path, vad_path, hear, speech, (int)(0.71 * GEAR_RATE), HEADPHONES, &heard, &interrupted, &quiet))
+        CHECK(interrupted < 0);
     if (gs_voice_has_echo()) {
         if (duplex(model, voice_path, vad_path, hear, speech, n, LOUDSPEAKERS, &heard, &interrupted, &quiet))
-            CHECK(interrupted >= 2.56 && interrupted < 2.76);  // the reply's echo is not taken for talking
+            CHECK(interrupted >= 2.86 && interrupted < 3.06);  // the reply's echo is not taken for talking
         if (duplex(model, voice_path, vad_path, hear, speech, n, LOUDSPEAKERS_NO_CANCELLER, &heard, &interrupted, &quiet))
             CHECK(interrupted > 0 && interrupted < 2.56);  // without the canceller the reply stops itself
     } else printf("echo tests skipped: build with -Decho=true\n");

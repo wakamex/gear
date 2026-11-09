@@ -3,6 +3,8 @@
 #include "gs_json.h"
 #include "wav.h"
 
+enum { HOLD_FRAMES = 30 };  // 0.3 s of talking stops a reply
+
 struct gear_pipeline {
     gs_voice *voice;
     gear_vad *vad;
@@ -15,6 +17,8 @@ struct gear_pipeline {
     char *text;            // the message so far
     size_t len, cap;
     int interruptions;
+    float on;              // the speech score that counts as talking
+    int held;              // frames in a row of talking while a reply plays
     // Kept speech (gear_pipeline_keep): pieces saved as they end, their text written as it comes.
     char keep[1024], model[128];
     long message;            // the message the pieces belong to, counted from 1
@@ -29,6 +33,7 @@ gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_vad *vad, gear_hear *hear
     p->hear = hear;
     p->say = say;
     p->listen = gear_listen_new(listen);
+    p->on = listen->on;
     p->countdown = countdown;
     p->last_end = -1;
     p->cap = 256;
@@ -120,12 +125,17 @@ static void drain(gear_pipeline *p);
 void gear_pipeline_frame(gear_pipeline *p, float *frame) {
     gs_voice_frame(p->voice, frame);
     p->frames++;
-    switch (gear_listen_frame(p->listen, frame, gear_vad_frame(p->vad, frame))) {
+    float speech = gear_vad_frame(p->vad, frame);
+    // A reply stops for talking held 0.3 s. Through loudspeakers a low vowel of the reply can reach the
+    // microphone in a way the echo canceller does not model, a burst of 0.15 s that the voice detector
+    // takes for speech; stopping at the first 50 ms of speech cut replies off a sentence in.
+    p->held = p->say && gear_say_busy(p->say) && speech >= p->on ? p->held + 1 : 0;
+    if (p->held == HOLD_FRAMES) {
+        gear_say_stop(p->say);
+        p->interruptions++;
+    }
+    switch (gear_listen_frame(p->listen, frame, speech)) {
     case GEAR_LISTEN_START:
-        if (p->say && gear_say_busy(p->say)) {
-            gear_say_stop(p->say);
-            p->interruptions++;
-        }
         break;
     case GEAR_LISTEN_END: {
         int n;

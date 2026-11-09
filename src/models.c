@@ -251,7 +251,7 @@ float gear_volume_remembered(const char *dir, float fallback) {
     char path[1200];
     SDL_snprintf(path, sizeof path, "%s/volume.txt", dir);
     char *text = SDL_LoadFile(path, NULL);
-    float v = text ? SDL_clamp((float)SDL_atof(text), 0, 1.5f) : fallback;
+    float v = text ? SDL_clamp((float)SDL_atof(text), 0, 3) : fallback;
     SDL_free(text);
     return v;
 }
