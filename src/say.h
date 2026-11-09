@@ -25,5 +25,8 @@ bool gear_say_busy(gear_say *s);  // synthesizing, or audio still to play
 // echo canceller cannot keep up (the volume pushed past what the speakers render cleanly), the
 // microphone hears the reply and the recognizer writes it down as if the user had said it.
 bool gear_say_echoes(gear_say *s, const char *heard);
+// Whether `heard` has `least` words or more and at least three in four of them are words of `text`,
+// compared as lowercase letters and digits.
+bool gear_mostly_in(const char *heard, const char *text, int least);
 // Seconds from the start of the last synthesis to its first audio, and the seconds of audio it made.
 void gear_say_last(gear_say *s, double *first_audio, double *audio);

@@ -226,18 +226,23 @@ static const char *word(const char *s, char *w, size_t size) {
     return s;
 }
 
+bool gear_mostly_in(const char *heard, const char *text, int least) {
+    int words = 0, found = 0;
+    char w[64], v[64];
+    for (const char *h = heard; (h = word(h, w, sizeof w));) {
+        words++;
+        for (const char *t = text; (t = word(t, v, sizeof v));)
+            if (!SDL_strcmp(w, v)) { found++; break; }
+    }
+    return words >= least && found * 4 >= words * 3;
+}
+
 bool gear_say_echoes(gear_say *s, const char *heard) {
     SDL_LockMutex(s->lock);
     bool recent = s->said && (s->queue || s->generating || gs_stream_buffered(s->stream) > 0 || SDL_GetTicks() - s->busy_at < 5000);
-    int words = 0, found = 0;
-    char w[64], v[64];
-    for (const char *h = heard; recent && (h = word(h, w, sizeof w));) {
-        words++;
-        for (const char *t = s->said; (t = word(t, v, sizeof v));)
-            if (!SDL_strcmp(w, v)) { found++; break; }
-    }
+    bool echo = recent && gear_mostly_in(heard, s->said, 2);
     SDL_UnlockMutex(s->lock);
-    return words >= 2 && found * 4 >= words * 3;
+    return echo;
 }
 
 void gear_say_last(gear_say *s, double *first_audio, double *audio) {

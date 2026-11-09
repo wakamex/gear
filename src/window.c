@@ -548,7 +548,7 @@ static void listen_frames(app *a) {
             gs_loopback_read(a->loopback, played, GEAR_FRAME);
             gs_voice_played(a->voice, played);
         }
-        gear_pipeline_frame(a->pipe, frame);
+        gear_pipeline_frame(a->pipe, frame, a->loopback ? played : NULL);
         SDL_memcpy(a->clean + a->kept_at, frame, sizeof frame);
         gear_record_frame(a->record, a->raw + a->kept_at, a->loopback ? played : NULL, frame);
         a->kept_at = (a->kept_at + GEAR_FRAME) % KEPT;

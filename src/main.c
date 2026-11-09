@@ -198,7 +198,7 @@ static int listen_live(void) {
         for (SDL_Event e; SDL_PollEvent(&e);) quit |= e.type == SDL_EVENT_QUIT;
         while (SDL_GetAudioStreamAvailable(mic) >= (int)sizeof frame) {
             SDL_GetAudioStreamData(mic, frame, sizeof frame);
-            gear_pipeline_frame(p, frame);
+            gear_pipeline_frame(p, frame, NULL);
         }
         char *message = gear_pipeline_poll(p);
         if (SDL_strcmp(shown, gear_pipeline_text(p))) {
@@ -259,7 +259,7 @@ static int hear_file(const char *path) {
         // Frames come faster than speech here. Live, a piece is transcribed long before the next
         // second of audio arrives, so the file waits for each transcription to behave the same.
         while (gear_hear_pending(hear)) SDL_Delay(1);
-        gear_pipeline_frame(p, frame);
+        gear_pipeline_frame(p, frame, NULL);
         char *message = gear_pipeline_poll(p);
         if (message) {
             printf("%.2f s: %s\n", gear_pipeline_time(p), message);
@@ -342,7 +342,7 @@ static int interrupt_file(const char *text, const char *mic_path, const char *ou
         record_step(&r);
         SDL_memcpy(frame, mic + step * GEAR_FRAME, sizeof(float) * (size_t)SDL_min(GEAR_FRAME, n - step * GEAR_FRAME));
         int before = gear_pipeline_interruptions(p);
-        gear_pipeline_frame(p, frame);
+        gear_pipeline_frame(p, frame, NULL);
         double t = (double)(step + 1) / 100.0;
         if (gear_pipeline_interruptions(p) > before) stopped_at = t;
         if (stopped_at >= 0 && quiet_at < 0 && step_level(&r) < 1e-4) quiet_at = t;

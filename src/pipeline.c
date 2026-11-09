@@ -4,6 +4,7 @@
 #include "wav.h"
 
 enum { HOLD_FRAMES = 30 };  // 0.3 s of talking stops a reply
+enum { PLAYED_KEPT = 32 * GEAR_RATE, LEAD = 3 * GEAR_RATE / 10 };  // a piece is 30 s at most; 0.3 s more before it
 // A piece whose loudest 100 ms is quieter than this is not sent to the recognizer, which writes words
 // into breathing and room noise. Of the 119 kept pieces it found words in, the 9 below it were "Yeah",
 // "Okay", "So", "Thank you", "absolutely" (breathing) and the like; sentences of three words or more
@@ -34,6 +35,14 @@ struct gear_pipeline {
     int interruptions;
     float on;              // the speech score that counts as talking
     int held;              // frames in a row of talking while a reply plays
+    // What the speakers played, the last PLAYED_KEPT samples, beside the microphone's.
+    float *played;
+    long played_at;        // samples written so far
+    // For each piece sent to the recogniser, oldest first, whether the speakers' sound over the same
+    // stretch follows it there; and a piece's text waiting for that.
+    bool referenced[64];
+    int ref_head, ref_count;
+    char *waiting;
     // Kept speech (gear_pipeline_keep): pieces saved as they end, their text written as it comes.
     char keep[1024], model[128];
     long message;            // the message the pieces belong to, counted from 1
@@ -49,6 +58,7 @@ gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_vad *vad, gear_hear *hear
     p->say = say;
     p->listen = gear_listen_new(listen);
     p->on = listen->on;
+    p->played = SDL_calloc(PLAYED_KEPT, sizeof(float));
     p->countdown = countdown;
     p->last_end = -1;
     p->cap = 256;
@@ -60,6 +70,8 @@ void gear_pipeline_free(gear_pipeline *p) {
     if (!p) return;
     gear_listen_free(p->listen);
     SDL_free(p->text);
+    SDL_free(p->played);
+    SDL_free(p->waiting);
     SDL_free(p);
 }
 
@@ -74,6 +86,8 @@ void gear_pipeline_set_hear(gear_pipeline *p, gear_hear *hear, const char *model
     p->hear = hear;
     SDL_strlcpy(p->model, model ? model : "", sizeof p->model);
     p->pend_count = 0;  // pieces the old recogniser had not finished are not transcribed
+    p->ref_count = 0;
+    SDL_free(p->waiting), p->waiting = NULL;
 }
 
 static void keep_line(gear_pipeline *p, gs_jval *o) {
@@ -137,7 +151,9 @@ static void reset(gear_pipeline *p) {
 
 static void drain(gear_pipeline *p);
 
-void gear_pipeline_frame(gear_pipeline *p, float *frame) {
+void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
+    for (int i = 0; i < GEAR_FRAME; i++) p->played[(p->played_at + i) % PLAYED_KEPT] = played ? played[i] : 0;
+    p->played_at += GEAR_FRAME;
     gs_voice_frame(p->voice, frame);
     p->frames++;
     float speech = gear_vad_frame(p->vad, frame);
@@ -161,6 +177,14 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame) {
         }
         gear_hear_submit(p->hear, piece, n);
         keep_piece(p, piece, n);
+        // The speakers over the same stretch, from a little before it, when they played anything.
+        int m = SDL_min(n + LEAD, PLAYED_KEPT);
+        float *heard_out = SDL_malloc((size_t)m * sizeof(float));
+        for (int i = 0; i < m; i++) heard_out[i] = p->played[((p->played_at - m + i) % PLAYED_KEPT + PLAYED_KEPT) % PLAYED_KEPT];
+        bool refer = p->ref_count < 64 && !too_quiet(heard_out, m);
+        if (refer) gear_hear_submit(p->hear, heard_out, m);
+        SDL_free(heard_out);
+        if (p->ref_count < 64) p->referenced[(p->ref_head + p->ref_count++) % 64] = refer;
         p->last_end = p->frames;
         break;
     }
@@ -193,12 +217,23 @@ void gear_pipeline_set_countdown(gear_pipeline *p, double seconds) { p->countdow
 double gear_pipeline_countdown(const gear_pipeline *p) { return counting(p) ? SDL_max(left(p), 0) : -1; }
 
 static void drain(gear_pipeline *p) {
-    for (char *t; (t = gear_hear_take(p->hear));) {
+    for (;;) {
+        if (!p->waiting && !(p->waiting = gear_hear_take(p->hear))) return;
+        bool refer = p->ref_count && p->referenced[p->ref_head];
+        char *played = refer ? gear_hear_take(p->hear) : NULL;
+        if (refer && !played) return;  // (the speakers' text is still being made)
+        if (p->ref_count) p->ref_head = (p->ref_head + 1) % 64, p->ref_count--;
+        char *t = p->waiting;
+        p->waiting = NULL;
         bool echo = p->say && gear_say_echoes(p->say, t);
-        if (SDL_getenv("GEAR_DEBUG")) SDL_Log("gear: heard \"%s\" in %.2f s%s", t, gear_hear_last_seconds(p->hear), echo ? ", the reply's echo: dropped" : "");
+        bool played_back = played && gear_mostly_in(t, played, 1);
+        if (SDL_getenv("GEAR_DEBUG"))
+            SDL_Log("gear: heard \"%s\"%s%s%s%s", t, played ? ", the speakers \"" : "", played ? played : "", played ? "\"" : "",
+                    echo ? ": the reply's echo, dropped" : played_back ? ": the speakers' sound, dropped" : "");
         keep_text(p, t);
-        if (!echo) append(p, t);
+        if (!echo && !played_back) append(p, t);
         SDL_free(t);
+        SDL_free(played);
     }
 }
 

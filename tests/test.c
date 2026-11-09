@@ -125,7 +125,7 @@ static bool duplex(const char *model, const char *voice_path, const char *vad_pa
             for (int i = 0; i < GEAR_FRAME; i++) late[i] = (lr[6 * i] + lr[6 * i + 1] + lr[6 * i + 2] + lr[6 * i + 3] + lr[6 * i + 4] + lr[6 * i + 5]) / 6;
         }
         int before = gear_pipeline_interruptions(p);
-        gear_pipeline_frame(p, frame);
+        gear_pipeline_frame(p, frame, NULL);
         if (gear_pipeline_interruptions(p) > before && *interrupted < 0) *interrupted = t;
         SDL_free(gear_pipeline_poll(p));
         Uint64 due = start + (Uint64)(step + 1) * 10000000;
@@ -172,7 +172,7 @@ static void test_end_to_end(const char *dir, const char *data) {
         SDL_memset(frame, 0, sizeof frame);
         if (i + GEAR_FRAME <= n) SDL_memcpy(frame, speech + i, sizeof frame);
         while (gear_hear_pending(hear)) SDL_Delay(1);  // as live, where transcription outpaces speech
-        gear_pipeline_frame(p, frame);
+        gear_pipeline_frame(p, frame, NULL);
         message = gear_pipeline_poll(p);
     }
     CHECK(message);
@@ -183,6 +183,29 @@ static void test_end_to_end(const char *dir, const char *data) {
     }
     SDL_free(message);
     gear_pipeline_free(p);
+    // Heard as it plays through the speakers, the utterance is the speakers' sound and makes no message;
+    // said while the speakers play something else (the same audio backwards), it is still the message.
+    float *backwards = SDL_malloc((size_t)n * sizeof(float));
+    for (int i = 0; i < n; i++) backwards[i] = speech[n - 1 - i];
+    for (int other = 0; other < 2; other++) {
+        gear_pipeline *q = gear_pipeline_new(voice, vad, hear, NULL, &lp, 1.0);
+        char *got = NULL;
+        float played[GEAR_FRAME];
+        for (int i = 0; !got && i < n + GEAR_RATE * 4; i += GEAR_FRAME) {
+            SDL_memset(frame, 0, sizeof frame);
+            SDL_memset(played, 0, sizeof played);
+            if (i + GEAR_FRAME <= n) SDL_memcpy(frame, speech + i, sizeof frame), SDL_memcpy(played, (other ? backwards : speech) + i, sizeof played);
+            while (gear_hear_pending(hear)) SDL_Delay(1);
+            gear_pipeline_frame(q, frame, played);
+            got = gear_pipeline_poll(q);
+        }
+        if (got) lower_letters(got);
+        if (other) CHECK(got && !SDL_strcmp(got, utterance_text));
+        else CHECK(!got);
+        SDL_free(got);
+        gear_pipeline_free(q);
+    }
+    SDL_free(backwards);
     gear_vad_free(vad);
     // What was heard is kept: the piece's file, its text, and the message's outcome.
     char log[1300];
