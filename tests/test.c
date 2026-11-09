@@ -99,6 +99,11 @@ static bool duplex(const char *model, const char *voice_path, const char *vad_pa
     gear_listen_params lp = gear_listen_defaults();
     gear_pipeline *p = gear_pipeline_new(voice, vad, hear, say, &lp, 1.0);
     gear_say_speak(say, "Here is the plan. First, I will split the reply into sentences. Then each sentence goes to the speech engine while the previous one is playing.");
+    // Heard while it plays, its own words are its echo; the user's words, or a single word, are not.
+    CHECK(gear_say_echoes(say, "I will split the reply"));
+    CHECK(gear_say_echoes(say, "then each sentence goes to the engine"));
+    CHECK(!gear_say_echoes(say, "stop and check the weather"));
+    CHECK(!gear_say_echoes(say, "plan"));
     enum { STEP = 480, DELAY = 10 };
     float lr[STEP * 2], frame[GEAR_FRAME], echo[DELAY][GEAR_FRAME] = { { 0 } };
     *heard = *interrupted = *quiet = -1;

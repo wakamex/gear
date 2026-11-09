@@ -59,7 +59,7 @@ static float px, small;  // the text size and the small size, in points
 static gs_rect status_line;  // where the status bar's first line was drawn, for a click on it
 static gs_rect countdown_less, countdown_more;  // the countdown control's - and +, for clicks on them
 static gs_rect volume_slider;  // where the volume slider was drawn, for the wheel
-static float volume = 1;       // of everything gear plays, 0 to 3, set by the slider
+static float volume = 1;       // of everything gear plays, 0 to 2, set by the slider
 static gs_rect build_label;  // a test build's label in the status bar, for a click on it
 
 // A panel: a frame with its title set into the top rule. Returns the inside.
@@ -93,7 +93,7 @@ static void state_line(gs_ui *ui, gs_rect r, const view *v) {
     if (v->countdown_setting > 0) {
         gs_cut_right(&r, 14);
         volume_slider = gs_cut_right(&r, 80);
-        gs_ui_slider(ui, volume_slider, "volume", &volume, 0, 3);
+        gs_ui_slider(ui, volume_slider, "volume", &volume, 0, 2);
         gs_ui_text(ui, gs_cut_right(&r, gs_ui_text_width(ui, "vol", small) + 8), "vol", small, DIM, -1);
     }
     // The countdown's length before the volume: - and + change it a second at a time.
@@ -753,7 +753,7 @@ int gear_window(const gear_window_options *o) {
                     message_wheel += e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y;
                 if (e.type == SDL_EVENT_MOUSE_WHEEL && e.wheel.mouse_x >= volume_slider.x && e.wheel.mouse_x < volume_slider.x + volume_slider.w &&
                     e.wheel.mouse_y >= volume_slider.y - 6 && e.wheel.mouse_y < volume_slider.y + volume_slider.h + 6)
-                    volume = SDL_clamp(volume + 0.05f * (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y), 0, 3);
+                    volume = SDL_clamp(volume + 0.05f * (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y), 0, 2);
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }

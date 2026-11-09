@@ -4,6 +4,21 @@
 #include "wav.h"
 
 enum { HOLD_FRAMES = 30 };  // 0.3 s of talking stops a reply
+// A piece whose loudest 100 ms is quieter than this is not sent to the recognizer, which writes words
+// into breathing and room noise. Of the 119 kept pieces it found words in, the 9 below it were "Yeah",
+// "Okay", "So", "Thank you", "absolutely" (breathing) and the like; sentences of three words or more
+// peaked at 0.0147 (median), 95% of them above 0.0041.
+#define QUIET_PIECE 0.0015f
+
+static bool too_quiet(const float *piece, int n) {
+    enum { WINDOW = GEAR_RATE / 10 };  // 100 ms
+    for (int at = 0; at + WINDOW <= n; at += WINDOW / 2) {
+        float sum = 0;
+        for (int i = at; i < at + WINDOW; i++) sum += piece[i] * piece[i];
+        if (sum >= QUIET_PIECE * QUIET_PIECE * WINDOW) return false;
+    }
+    return true;
+}
 
 struct gear_pipeline {
     gs_voice *voice;
@@ -140,6 +155,10 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame) {
     case GEAR_LISTEN_END: {
         int n;
         const float *piece = gear_listen_piece(p->listen, &n);
+        if (too_quiet(piece, n)) {
+            if (SDL_getenv("GEAR_DEBUG")) SDL_Log("gear: a piece of %.2f s too quiet to be speech, dropped", (double)n / GEAR_RATE);
+            break;
+        }
         gear_hear_submit(p->hear, piece, n);
         keep_piece(p, piece, n);
         p->last_end = p->frames;
@@ -175,9 +194,10 @@ double gear_pipeline_countdown(const gear_pipeline *p) { return counting(p) ? SD
 
 static void drain(gear_pipeline *p) {
     for (char *t; (t = gear_hear_take(p->hear));) {
-        if (SDL_getenv("GEAR_DEBUG")) SDL_Log("gear: heard \"%s\" in %.2f s", t, gear_hear_last_seconds(p->hear));
+        bool echo = p->say && gear_say_echoes(p->say, t);
+        if (SDL_getenv("GEAR_DEBUG")) SDL_Log("gear: heard \"%s\" in %.2f s%s", t, gear_hear_last_seconds(p->hear), echo ? ", the reply's echo: dropped" : "");
         keep_text(p, t);
-        append(p, t);
+        if (!echo) append(p, t);
         SDL_free(t);
     }
 }

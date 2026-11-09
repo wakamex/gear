@@ -42,7 +42,7 @@ void gear_hear_model_remember(const char *dir, const char *name);  // kept in di
 // else `fallback`.
 double gear_countdown_remembered(const char *dir, double fallback);
 void gear_countdown_remember(const char *dir, double seconds);
-// The volume of what gear plays, 0 to 3 (above 1 gesso's mix rounds off peaks past full scale), as last set in the window (dir/volume.txt), else `fallback`.
+// The volume of what gear plays, 0 to 2: at 3 the speakers' sound got past the echo canceller, as last set in the window (dir/volume.txt), else `fallback`.
 float gear_volume_remembered(const char *dir, float fallback);
 void gear_volume_remember(const char *dir, float volume);
 // The agent the window last sent to, and the host it ran on ("" for this machine), from

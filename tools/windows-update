@@ -1,0 +1,13 @@
+#!/bin/sh
+# Replaces the gear that runs on a Windows machine with the one just built, and starts it again at once:
+#   tools/windows-update [SSH_HOST] [BIN_DIR] [FOLDER]   (defaults: windows, zig-out/windows/bin, gear in the user's folder)
+# Run after tools/publish-update, which builds zig-out/windows/bin with the commit's build name, so the
+# copy that starts is the published build and its own updater finds nothing newer. gear keeps its data
+# elsewhere. tools/windows_update.py does the exchange there, run by deskrun in the signed-in user's
+# session, which is where gear must be started to have a window.
+set -eu
+host=${1:-windows} bin=${2:-zig-out/windows/bin} folder=${3:-gear}
+here=$(dirname "$0")
+ssh -o BatchMode=yes "$host" "mkdir $folder/new" > /dev/null 2>&1 || true
+scp -q "$bin/gear.exe" "$bin/ClankerMono-Regular.ttf" "$bin/ClankerMono-LICENSE.txt" "$bin/LICENSE" "$bin/THIRD-PARTY-LICENSES.txt" "$host:$folder/new/"
+deskrun run --host "$host" --space gear --timeout 60 --put "$here/windows_update.py" -- python windows_update.py "$folder"

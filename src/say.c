@@ -22,6 +22,8 @@ struct gear_say {
     SDL_AtomicInt generation;  // advanced by gear_say_stop; synthesis of an older one gives up
     double first_audio, audio;
     int rate;
+    char *said;       // the text last queued, for telling its echo from the user
+    Uint64 busy_at;   // when it was last found busy
     // The player, on the audio thread: what it plays, averaged down to 16 kHz for the canceller.
     gs_voice *echo;
     float scratch[SCRATCH * 2], echo_frame[160], echo_sum;
@@ -176,6 +178,7 @@ void gear_say_close(gear_say *s) {
     pt_free(s->ctx);
     SDL_DestroyCondition(s->wake);
     SDL_DestroyMutex(s->lock);
+    SDL_free(s->said);
     SDL_free(s);
 }
 
@@ -185,6 +188,8 @@ void gear_say_speak(gear_say *s, const char *text) {
     SDL_LockMutex(s->lock);
     for (q = &s->queue; *q; q = &(*q)->next) {}
     *q = l;
+    SDL_free(s->said);
+    s->said = SDL_strdup(text);
     SDL_SignalCondition(s->wake);
     SDL_UnlockMutex(s->lock);
 }
@@ -204,9 +209,35 @@ void gear_say_stop(gear_say *s) {
 
 bool gear_say_busy(gear_say *s) {
     SDL_LockMutex(s->lock);
-    bool busy = s->queue || s->generating;
+    bool busy = s->queue || s->generating || gs_stream_buffered(s->stream) > 0;
+    if (busy) s->busy_at = SDL_GetTicks();
     SDL_UnlockMutex(s->lock);
-    return busy || gs_stream_buffered(s->stream) > 0;
+    return busy;
+}
+
+// The next word of s, lowercased letters, digits and apostrophes, into w; s past it, or NULL at the end.
+static const char *word(const char *s, char *w, size_t size) {
+    while (*s && !SDL_isalnum((unsigned char)*s)) s++;
+    if (!*s) return NULL;
+    size_t n = 0;
+    for (; *s && (SDL_isalnum((unsigned char)*s) || *s == '\''); s++)
+        if (n + 1 < size) w[n++] = (char)SDL_tolower((unsigned char)*s);
+    w[n] = 0;
+    return s;
+}
+
+bool gear_say_echoes(gear_say *s, const char *heard) {
+    SDL_LockMutex(s->lock);
+    bool recent = s->said && (s->queue || s->generating || gs_stream_buffered(s->stream) > 0 || SDL_GetTicks() - s->busy_at < 5000);
+    int words = 0, found = 0;
+    char w[64], v[64];
+    for (const char *h = heard; recent && (h = word(h, w, sizeof w));) {
+        words++;
+        for (const char *t = s->said; (t = word(t, v, sizeof v));)
+            if (!SDL_strcmp(w, v)) { found++; break; }
+    }
+    SDL_UnlockMutex(s->lock);
+    return words >= 2 && found * 4 >= words * 3;
 }
 
 void gear_say_last(gear_say *s, double *first_audio, double *audio) {

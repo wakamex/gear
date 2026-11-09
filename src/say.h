@@ -20,5 +20,10 @@ void gear_say_close(gear_say *s);
 void gear_say_speak(gear_say *s, const char *text);  // queued after anything already speaking
 void gear_say_stop(gear_say *s);
 bool gear_say_busy(gear_say *s);  // synthesizing, or audio still to play
+// Whether `heard` is most likely the reply coming back through the speakers: two words or more, at
+// least three in four of them in the text being read, while it plays or within 5 s after. When the
+// echo canceller cannot keep up (the volume pushed past what the speakers render cleanly), the
+// microphone hears the reply and the recognizer writes it down as if the user had said it.
+bool gear_say_echoes(gear_say *s, const char *heard);
 // Seconds from the start of the last synthesis to its first audio, and the seconds of audio it made.
 void gear_say_last(gear_say *s, double *first_audio, double *audio);
