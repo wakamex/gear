@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import time
+import winreg
 
 folder = os.path.join(os.path.expanduser("~"), sys.argv[1])
 subprocess.run(["taskkill", "/IM", "gear.exe", "/F"], capture_output=True, creationflags=0x08000000)
@@ -25,4 +26,12 @@ for attempt in range(120):  # (the program's file can be replaced once the progr
 else:
     sys.exit(f"the new files could not be put in place: {error!r}")
 shutil.rmtree(new)
-subprocess.Popen([os.path.join(folder, "gear.exe")], cwd=folder, creationflags=0x00000008 | 0x00000200)  # (on its own, not the worker's child)
+# The user's own variables as they are now (GEAR_DEBUG, say), which deskrun's worker, started before a
+# change, would not pass on.
+env = dict(os.environ)
+with winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment") as key:
+    for i in range(winreg.QueryInfoKey(key)[1]):
+        name, value, kind = winreg.EnumValue(key, i)
+        if name.upper() != "PATH" and kind in (winreg.REG_SZ, winreg.REG_EXPAND_SZ):
+            env[name] = os.path.expandvars(value)
+subprocess.Popen([os.path.join(folder, "gear.exe")], cwd=folder, env=env, creationflags=0x00000008 | 0x00000200)  # (on its own, not the worker's child)

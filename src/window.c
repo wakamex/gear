@@ -4,6 +4,7 @@
 #include "agent.h"
 #include "gs_draw.h"
 #include "gs_mix.h"
+#include "record.h"
 #include "gs_text.h"
 #include "gs_loopback.h"
 #include "gs_ui.h"
@@ -414,6 +415,7 @@ typedef struct {
     // The last KEPT samples heard, as recorded and as cleaned, for a report of an interruption.
     float *raw, *clean;
     int kept_at;
+    gear_record *record;  // with GEAR_DEBUG: microphone, speakers and cleaned microphone, written as they go
     Uint64 speaking_since;  // when the current reading started to play, or 0
     char hear_slug[96], say_slug[96], voice_slug[64];  // the model files in use, without their extensions
     char hear_file[128];
@@ -541,13 +543,14 @@ static void listen_frames(app *a) {
         }
         SDL_memcpy(a->raw + a->kept_at, frame, sizeof frame);
         int before = gear_pipeline_interruptions(a->pipe);
+        float played[GEAR_FRAME];
         if (a->loopback) {  // the speakers' 10 ms beside the microphone's, read in step with it
-            float played[GEAR_FRAME];
             gs_loopback_read(a->loopback, played, GEAR_FRAME);
             gs_voice_played(a->voice, played);
         }
         gear_pipeline_frame(a->pipe, frame);
         SDL_memcpy(a->clean + a->kept_at, frame, sizeof frame);
+        gear_record_frame(a->record, a->raw + a->kept_at, a->loopback ? played : NULL, frame);
         a->kept_at = (a->kept_at + GEAR_FRAME) % KEPT;
         if (gear_pipeline_interruptions(a->pipe) > before) report_interruption(a);
     }
@@ -628,6 +631,12 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     if (!a->muted) SDL_ResumeAudioStreamDevice(a->mic);
     a->raw = SDL_calloc(KEPT, sizeof(float));
     a->clean = SDL_calloc(KEPT, sizeof(float));
+    if (SDL_getenv("GEAR_DEBUG")) {
+        char dir[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
+        SDL_snprintf(dir, sizeof dir, "%srecordings", pref ? pref : "");
+        SDL_free(pref);
+        a->record = gear_record_open(dir);
+    }
     // The loop runs only once everything it needs is open: without it the window shows STOPPED.
     slug(a->say_slug, sizeof a->say_slug, gear_model_info(GEAR_MODEL_SAY)->name);
     slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(GEAR_MODEL_VOICE)->name);
@@ -684,6 +693,7 @@ static void close_loop(app *a) {
     SDL_free(a->reply);
     SDL_free(a->raw);
     SDL_free(a->clean);
+    gear_record_close(a->record);
 }
 
 int gear_window(const gear_window_options *o) {
