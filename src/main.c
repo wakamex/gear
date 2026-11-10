@@ -43,11 +43,12 @@ static const char usage[] =
     "         --cpu  run the models on the CPU (by default on the GPU where one is usable)\n"
     "         --muted  start the window muted\n"
     "         --hear-model FILE  a Parakeet GGUF in the models folder, or a path (default: the last chosen)\n"
+    "         --keep DIR  with hear, keep each piece in DIR as listen does, for tools/fit-speech-model\n"
     "         --no-keep  keep nothing heard (by default listen and window keep each piece of speech and\n"
     "                    its transcript in a heard folder in gear's data folder, for training later)\n"
     "models:  GEAR_MODELS, or a models folder in the user's data folder for gear\n";
 
-static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo, no_keep; const char *hear_model; bool muted; } opt = { -1, 1, 2, false, false, NULL, NULL, false, false, NULL, false };
+static struct { double countdown; int hear_threads, say_threads; bool speak_back, no_echo; const char *to, *shot; bool demo, no_keep; const char *hear_model; bool muted; const char *keep; } opt = { -1, 1, 2, false, false, NULL, NULL, false, false, NULL, false };
 
 static void progress(void *user, long long received, long long total, double eta) {
     if (eta >= 0) fprintf(stderr, "\r%5.1f%% of %.0f MB, %.0f s left   ", 100.0 * (double)received / (double)total, (double)total / 1e6, eta);
@@ -250,6 +251,7 @@ static int hear_file(const char *path) {
     if (!vad) return 1;
     gear_listen_params lp = gear_listen_defaults();
     gear_pipeline *p = gear_pipeline_new(voice, vad, hear, NULL, &lp, opt.countdown);
+    if (opt.keep) gear_pipeline_keep(p, opt.keep, hear_name);
     float frame[GEAR_FRAME];
     int sent = 0;
     for (int i = 0;; i += GEAR_FRAME) {
@@ -386,6 +388,7 @@ int main(int argc, char **argv) {
         else if (!SDL_strcmp(argv[i], "--shot") && i + 1 < argc) opt.shot = argv[++i];
         else if (!SDL_strcmp(argv[i], "--demo")) opt.demo = true;
         else if (!SDL_strcmp(argv[i], "--no-keep")) opt.no_keep = true;
+        else if (!SDL_strcmp(argv[i], "--keep") && i + 1 < argc) opt.keep = argv[++i];
         else if (!SDL_strcmp(argv[i], "--muted")) opt.muted = true;
         else if (!SDL_strcmp(argv[i], "--restarted")) {}  // (gs_update_restarted)
         else if (!SDL_strcmp(argv[i], "--hear-model") && i + 1 < argc) opt.hear_model = argv[++i];

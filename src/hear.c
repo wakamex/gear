@@ -2,7 +2,7 @@
 #include <SDL3/SDL.h>
 #include "transcribe.h"
 
-typedef struct piece { struct piece *next; float *samples; int n; char *text; } piece;
+typedef struct piece { struct piece *next; float *samples; int n; char *text; gear_hear_scores scores; } piece;
 
 struct gear_hear {
     struct transcribe_session *session;
@@ -49,6 +49,22 @@ static int run(void *user) {
         // Parakeet starts its text with a space; the pipeline joins pieces with one of its own.
         while (*text == ' ') text++;
         p->text = SDL_strdup(text);
+        // The recognizer's own scores for the piece, as means over the word pieces it wrote (hear.h). A
+        // model that gives none leaves the count at 0.
+        gear_hear_scores sum = { 0 };
+        for (int i = 0, tokens = st == TRANSCRIBE_OK ? transcribe_n_tokens(h->session) : 0; i < tokens; i++) {
+            struct transcribe_token tok;
+            transcribe_token_init(&tok);
+            if (transcribe_get_token(h->session, i, &tok) != TRANSCRIBE_OK || SDL_isnan(tok.logit)) continue;
+            sum.tokens++;
+            sum.raw += tok.logit, sum.blank += tok.logit - tok.blank_logit, sum.second += tok.logit - tok.runner_up_logit;
+            sum.energy += tok.logsumexp, sum.pmax += SDL_expf(tok.logit - tok.logsumexp), sum.conf += tok.p;
+        }
+        if (sum.tokens) {
+            float n = (float)sum.tokens;
+            sum.raw /= n, sum.blank /= n, sum.second /= n, sum.energy /= n, sum.pmax /= n, sum.conf /= n;
+        }
+        p->scores = sum;
         if (st != TRANSCRIBE_OK) SDL_Log("gear: transcription failed: %s", transcribe_status_string(st));
         SDL_free(p->samples);
         p->samples = NULL;
@@ -112,12 +128,13 @@ void gear_hear_submit(gear_hear *h, const float *samples, int n) {
     SDL_UnlockMutex(h->lock);
 }
 
-char *gear_hear_take(gear_hear *h) {
+char *gear_hear_take(gear_hear *h, gear_hear_scores *scores) {
     SDL_LockMutex(h->lock);
     piece *p = h->done;
     if (p) h->done = p->next;
     SDL_UnlockMutex(h->lock);
     if (!p) return NULL;
+    if (scores) *scores = p->scores;
     char *text = p->text;
     SDL_free(p);
     return text;

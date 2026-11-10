@@ -1,6 +1,7 @@
 #include "pipeline.h"
 #include <SDL3/SDL.h>
 #include "gs_json.h"
+#include "speech.h"
 #include "wav.h"
 
 enum { HOLD_FRAMES = 30 };  // 0.3 s of talking stops a reply
@@ -46,6 +47,12 @@ struct gear_pipeline {
     bool referenced[64];
     int ref_head, ref_count;
     char *waiting;
+    gear_hear_scores scores;      // the recognizer's, of the text waiting
+    // The two voice detectors over the piece being heard, over each piece at the recogniser (beside
+    // `referenced`), and their scores for the last frames, since a piece begins with those that started it.
+    gear_speech_heard hearing, heard[64];
+    float lately[8][2];
+    int start;                    // the frames that start a piece
     // Kept speech (gear_pipeline_keep): pieces saved as they end, their text written as it comes.
     char keep[1024], model[128];
     long message;            // the message the pieces belong to, counted from 1
@@ -61,6 +68,7 @@ gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_vad *vad, gear_hear *hear
     p->say = say;
     p->listen = gear_listen_new(listen);
     p->on = listen->on;
+    p->start = SDL_min(listen->start_frames, (int)SDL_arraysize(p->lately));
     p->played = SDL_calloc(PLAYED_KEPT, sizeof(float));
     p->countdown = countdown;
     p->last_end = -1;
@@ -122,7 +130,8 @@ static void keep_piece(gear_pipeline *p, const float *piece, int n) {
     if (gear_wav_write(path, piece, n, 1, GEAR_RATE)) p->pend_count++;
 }
 
-static void keep_text(gear_pipeline *p, const char *text) {
+// `in` are the piece's inputs to the speech score and `score` that score, or NULL when it has none.
+static void keep_text(gear_pipeline *p, const char *text, const float *in, float score) {
     if (!p->keep[0] || !p->pend_count) return;
     gs_jval *o = gs_jval_object();
     gs_jval_set(o, "file", gs_jval_str(p->pending[p->pend_head]));
@@ -130,6 +139,12 @@ static void keep_text(gear_pipeline *p, const char *text) {
     gs_jval_set(o, "model", gs_jval_str(p->model));
     gs_jval_set(o, "seconds", gs_jval_num(SDL_round(gear_hear_last_seconds(p->hear) * 1000) / 1000));
     gs_jval_set(o, "message", gs_jval_num((double)p->message));
+    if (in) {
+        gs_jval *inputs = gs_jval_array();
+        for (int i = 0; i < GEAR_SPEECH_INPUTS; i++) gs_jval_push(inputs, gs_jval_num(SDL_round((double)in[i] * 1e4) / 1e4));
+        gs_jval_set(o, "inputs", inputs);
+        gs_jval_set(o, "speech", gs_jval_num(SDL_round((double)score * 1e4) / 1e4));
+    }
     keep_line(p, o);
     p->pend_head = (p->pend_head + 1) % 64;
     p->pend_count--;
@@ -169,10 +184,17 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
         gear_say_stop(p->say);
         p->interruptions++;
     }
-    switch (gear_listen_frame(p->listen, frame, speech)) {
+    float second = gs_voice_speech(p->voice);
+    gear_listen_event event = gear_listen_frame(p->listen, frame, speech);
+    SDL_memmove(p->lately, p->lately + 1, sizeof p->lately - sizeof p->lately[0]);
+    p->lately[SDL_arraysize(p->lately) - 1][0] = speech, p->lately[SDL_arraysize(p->lately) - 1][1] = second;
+    switch (event) {
     case GEAR_LISTEN_START:
+        SDL_zero(p->hearing);
+        for (size_t k = SDL_arraysize(p->lately) - (size_t)p->start; k < SDL_arraysize(p->lately); k++) gear_speech_frame(&p->hearing, p->lately[k][0], p->lately[k][1]);
         break;
     case GEAR_LISTEN_END: {
+        gear_speech_frame(&p->hearing, speech, second);
         int n;
         const float *piece = gear_listen_piece(p->listen, &n);
         if (too_quiet(piece, n)) {
@@ -190,11 +212,13 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
         bool refer = p->ref_count < 64 && !too_quiet(heard_out, m);
         if (refer) gear_hear_submit(p->hear, heard_out, m);
         SDL_free(heard_out);
-        if (p->ref_count < 64) p->referenced[(p->ref_head + p->ref_count++) % 64] = refer;
+        if (p->ref_count < 64) p->heard[(p->ref_head + p->ref_count) % 64] = p->hearing, p->referenced[(p->ref_head + p->ref_count++) % 64] = refer;
         p->last_end = p->frames;
         break;
     }
-    case GEAR_LISTEN_NONE: break;
+    case GEAR_LISTEN_NONE:
+        if (gear_listen_in_piece(p->listen)) gear_speech_frame(&p->hearing, speech, second);
+        break;
     }
 }
 
@@ -247,19 +271,24 @@ static bool mostly_in(const char *heard, const char *text) {
 
 static void drain(gear_pipeline *p) {
     for (;;) {
-        if (!p->waiting && !(p->waiting = gear_hear_take(p->hear))) return;
+        if (!p->waiting && !(p->waiting = gear_hear_take(p->hear, &p->scores))) return;
         bool refer = p->ref_count && p->referenced[p->ref_head];
-        char *played = refer ? gear_hear_take(p->hear) : NULL;
+        char *played = refer ? gear_hear_take(p->hear, NULL) : NULL;
         if (refer && !played) return;  // (the speakers' text is still being made)
-        if (p->ref_count) p->ref_head = (p->ref_head + 1) % 64, p->ref_count--;
         char *t = p->waiting;
         p->waiting = NULL;
+        // Whether the piece is speech at all, by its score; one with no words or no scores is not judged.
+        float in[GEAR_SPEECH_INPUTS], score = 1;
+        bool scored = p->ref_count && p->scores.tokens;
+        if (scored) gear_speech_inputs(&p->heard[p->ref_head], &p->scores, in), score = gear_speech_score(in);
+        bool other = score < gear_speech_cut();
+        if (p->ref_count) p->ref_head = (p->ref_head + 1) % 64, p->ref_count--;
         bool played_back = played && mostly_in(t, played);
         if (SDL_getenv("GEAR_DEBUG"))
-            SDL_Log("gear: heard \"%s\"%s%s%s%s", t, played ? ", the speakers \"" : "", played ? played : "", played ? "\"" : "",
-                    played_back ? ": the speakers' sound, dropped" : "");
-        keep_text(p, t);
-        if (!played_back) append(p, t);
+            SDL_Log("gear: heard \"%s\" (speech %.2f)%s%s%s%s", t, score, played ? ", the speakers \"" : "", played ? played : "", played ? "\"" : "",
+                    other ? ": not speech, dropped" : played_back ? ": the speakers' sound, dropped" : "");
+        keep_text(p, t, scored ? in : NULL, score);
+        if (!other && !played_back) append(p, t);
         SDL_free(t);
         SDL_free(played);
     }

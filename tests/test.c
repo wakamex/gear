@@ -12,6 +12,7 @@
 #include "pipeline.h"
 #include "say.h"
 #include "speakable.h"
+#include "speech.h"
 #include "wav.h"
 
 static int failures;
@@ -349,12 +350,31 @@ static void test_speakable(void) {
            "See Chess dot com, e.g. the twenty first of four to nine at one hundred ninety two point one hundred sixty eight point two point one.");
 }
 
+static void test_speech(void) {
+    CHECK(gear_speech_checked() < 1e-4f);  // the model's table gives the scores the fitting tool got
+    // Ten frames of a piece: Silero has 8 at 0.5 or more, 4 of those at 0.95 or more and 2 at 0.99; the
+    // second detector has 5 at 0.5 or more.
+    static const float silero[] = { 0.6f, 0.7f, 0.96f, 0.97f, 0.99f, 1.0f, 0.9f, 0.85f, 0.2f, 0.1f };
+    static const float second[] = { 0.1f, 0.6f, 0.95f, 0.99f, 1.0f, 0.9f, 0.4f, 0.3f, 0.0f, 0.0f };
+    gear_speech_heard h = { 0 };
+    for (int i = 0; i < 10; i++) gear_speech_frame(&h, silero[i], second[i]);
+    gear_hear_scores scores = { 2, -1.5f, 3.0f, 2.0f, -1.0f, 0.8f, 0.9f };
+    float in[GEAR_SPEECH_INPUTS];
+    gear_speech_inputs(&h, &scores, in);
+    CHECK(SDL_fabsf(in[0] - 4 / 8.f) < 1e-6f && SDL_fabsf(in[1] - 2 / 8.f) < 1e-6f && SDL_fabsf(in[4] - 1.0f) < 1e-6f);
+    CHECK(in[6] == -1.5f && in[7] == 3.0f && in[11] == 0.9f);
+    CHECK(SDL_fabsf(in[12] - 5 / 8.f) < 1e-6f && SDL_fabsf(in[15] - 1.0f) < 1e-6f);
+    float score = gear_speech_score(in);
+    CHECK(score >= 0 && score <= 1);
+}
+
 int main(int argc, char **argv) {
     const char *data = argc > 1 ? argv[1] : "tests";
     SDL_Init(SDL_INIT_AUDIO);
     char *tmp = SDL_GetPrefPath("wakamex", "gear-tests");
     test_listen();
     test_speakable();
+    test_speech();
     test_wav(tmp);
     test_agent_refused();
     const char *agent = SDL_getenv("GEAR_AGENT");
