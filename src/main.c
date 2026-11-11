@@ -88,7 +88,7 @@ static gear_hear *open_hear(const char *dir) {
 static gear_say *open_say(const char *dir, gs_voice *echo) {
     char model[1200], voice[1200], error[512];
     gear_model_path(dir, GEAR_MODEL_SAY, model, sizeof model);
-    gear_model_path(dir, GEAR_MODEL_VOICE, voice, sizeof voice);
+    gear_model_path(dir, gear_voice_remembered(dir), voice, sizeof voice);
     gear_say *s = gear_say_open(model, voice, opt.say_threads, echo, error, sizeof error);
     if (!s) fprintf(stderr, "gear: %s\n", error);
     return s;

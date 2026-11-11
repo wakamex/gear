@@ -233,7 +233,7 @@ static void test_end_to_end(const char *dir, const char *data) {
     // without it, where the reply should cut itself off.
     char model[1200], voice_path[1200];
     gear_model_path(dir, GEAR_MODEL_SAY, model, sizeof model);
-    gear_model_path(dir, GEAR_MODEL_VOICE, voice_path, sizeof voice_path);
+    gear_model_path(dir, GEAR_MODEL_VOICE_ALBA, voice_path, sizeof voice_path);
     gs_voice_free(voice);
     double heard, interrupted, quiet;
     if (duplex(model, voice_path, vad_path, hear, speech, n, HEADPHONES, &heard, &interrupted, &quiet, NULL)) {
@@ -261,6 +261,83 @@ static void test_end_to_end(const char *dir, const char *data) {
     SDL_free(message);
     gear_hear_close(hear);
     SDL_free(speech);
+}
+
+// The median pitch of what is voiced in 16 kHz mono x, by autocorrelation over 40 ms frames.
+static double median_pitch(const float *x, int n) {
+    enum { FRAME = 640, LO = 16000 / 400, HI = 16000 / 70 };
+    static double found[2000];
+    int count = 0;
+    for (int i = 0; i + FRAME <= n && count < 2000; i += FRAME / 2) {
+        double mean = 0, energy = 0, best = 0;
+        for (int k = 0; k < FRAME; k++) mean += x[i + k] / FRAME;
+        for (int k = 0; k < FRAME; k++) energy += (x[i + k] - mean) * (x[i + k] - mean);
+        if (energy / FRAME < 0.02 * 0.02) continue;
+        int lag = 0;
+        for (int l = LO; l < HI; l++) {
+            double ac = 0;
+            for (int k = 0; k + l < FRAME; k++) ac += (x[i + k] - mean) * (x[i + k + l] - mean);
+            if (ac > best) best = ac, lag = l;
+        }
+        if (lag && best > 0.5 * energy) found[count++] = 16000.0 / lag;
+    }
+    for (int a = 1; a < count; a++)
+        for (int b = a; b > 0 && found[b - 1] > found[b]; b--) { double t = found[b]; found[b] = found[b - 1]; found[b - 1] = t; }
+    return count ? found[count / 2] : 0;
+}
+
+// A sentence played through the mix in real time, as 16 kHz mono, and its median pitch.
+static double say_pitch(gear_say *say, const char *text) {
+    enum { STEP = 480, MAX = 16000 * 20 };
+    static float mono[MAX];
+    float lr[STEP * 2];
+    int factor = gs_mix_rate() / 16000, n = 0;
+    gear_say_speak(say, text);
+    Uint64 start = SDL_GetTicksNS();
+    for (int step = 0; step < 2000 && (step < 100 || gear_say_busy(say)); step++) {
+        gs_mix_render(lr, STEP);
+        for (int i = 0; i + factor <= STEP && n < MAX; i += factor) {
+            float sum = 0;
+            for (int k = 0; k < factor; k++) sum += (lr[2 * (i + k)] + lr[2 * (i + k) + 1]) / 2;
+            mono[n++] = sum / (float)factor;
+        }
+        Uint64 due = start + (Uint64)(step + 1) * 10000000;
+        if (SDL_GetTicksNS() < due) SDL_DelayNS(due - SDL_GetTicksNS());
+    }
+    return median_pitch(mono, n);
+}
+
+// Switching voice between replies: alba is a low voice and mary a higher one (their median pitches
+// were 121 and 182 Hz on five agent replies; this estimate of one passage reads them less far
+// apart), and switching back gives alba again.
+static void test_voice_switch(const char *dir) {
+    char model[1200], alba[1200], mary[1200], error[512];
+    gear_model_path(dir, GEAR_MODEL_SAY, model, sizeof model);
+    gear_model_path(dir, GEAR_MODEL_VOICE_ALBA, alba, sizeof alba);
+    gear_model_path(dir, GEAR_MODEL_VOICE_MARY, mary, sizeof mary);
+    gear_say *say = gear_say_open(model, alba, 2, NULL, error, sizeof error);
+    CHECK(say);
+    if (!say) { fprintf(stderr, "%s\n", error); return; }
+    const char *text = "The tests pass, and the build is ready to publish. I read the log and found nothing else to fix, so I will push it now.";
+    double low = say_pitch(say, text);
+    gear_say_set_voice(say, mary);
+    double high = say_pitch(say, text);
+    gear_say_set_voice(say, alba);
+    double again = say_pitch(say, text);
+    printf("voices: alba %.0f Hz, mary %.0f Hz, alba again %.0f Hz\n", low, high, again);
+    CHECK(low > 0 && high > low * 1.15 && again < high / 1.15);
+    gear_say_close(say);
+
+    // The choice is remembered, and anything but mary reads as alba.
+    char tmp[1100], *pref = SDL_GetPrefPath("wakamex", "gear-tests");
+    SDL_snprintf(tmp, sizeof tmp, "%svoice-%llu", pref, (unsigned long long)SDL_GetTicksNS());
+    SDL_free(pref);
+    SDL_CreateDirectory(tmp);
+    CHECK(gear_voice_remembered(tmp) == GEAR_MODEL_VOICE_ALBA);
+    gear_voice_remember(tmp, GEAR_MODEL_VOICE_MARY);
+    CHECK(gear_voice_remembered(tmp) == GEAR_MODEL_VOICE_MARY);
+    gear_voice_remember(tmp, GEAR_MODEL_VOICE_ALBA);
+    CHECK(gear_voice_remembered(tmp) == GEAR_MODEL_VOICE_ALBA);
 }
 
 // Against the real wakterm, with an agent that does not exist, so nothing is delivered: the refusal
@@ -381,7 +458,7 @@ int main(int argc, char **argv) {
     if (agent && *agent) test_agent_round_trip(agent);
     else printf("agent round trip skipped: GEAR_AGENT is not set\n");
     const char *dir = SDL_getenv("GEAR_MODELS");
-    if (dir && gear_models_present(dir)) test_end_to_end(dir, data);
+    if (dir && gear_models_present(dir)) test_end_to_end(dir, data), test_voice_switch(dir);
     else printf("end-to-end tests skipped: GEAR_MODELS does not hold the models\n");
     SDL_free(tmp);
     SDL_Quit();

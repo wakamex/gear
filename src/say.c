@@ -18,6 +18,7 @@ struct gear_say {
     SDL_Mutex *lock;
     SDL_Condition *wake;
     line *queue;
+    char *next_voice;  // a voice to switch to, loaded by the synthesis thread before its next line
     bool generating, quit;
     SDL_AtomicInt generation;  // advanced by gear_say_stop; synthesis of an older one gives up
     double first_audio, audio;
@@ -68,8 +69,16 @@ static int run(void *user) {
         line *l = s->queue;
         s->queue = l->next;
         s->generating = true;
+        char *next_voice = s->next_voice;
+        s->next_voice = NULL;
         job j = { s, SDL_GetAtomicInt(&s->generation), SDL_GetTicksNS(), false, 0 };
         SDL_UnlockMutex(s->lock);
+        if (next_voice) {
+            struct pt_voice *v = pt_voice_load(s->ctx, next_voice, 0);
+            if (v) pt_voice_free(s->voice), s->voice = v;
+            else SDL_Log("gear: could not load the voice %s: %s", next_voice, pt_last_error());
+            SDL_free(next_voice);
+        }
         struct pt_tts_params p;
         pt_tts_default_params(&p);
         p.text = l->text;
@@ -180,6 +189,7 @@ void gear_say_close(gear_say *s) {
     gs_stream_free(s->stream);
     SDL_DestroyAudioStream(s->conv);
     pt_voice_free(s->voice);
+    SDL_free(s->next_voice);
     pt_free(s->ctx);
     SDL_DestroyCondition(s->wake);
     SDL_DestroyMutex(s->lock);
@@ -194,6 +204,13 @@ void gear_say_speak(gear_say *s, const char *text) {
     for (q = &s->queue; *q; q = &(*q)->next) {}
     *q = l;
     SDL_SignalCondition(s->wake);
+    SDL_UnlockMutex(s->lock);
+}
+
+void gear_say_set_voice(gear_say *s, const char *voice) {
+    SDL_LockMutex(s->lock);
+    SDL_free(s->next_voice);
+    s->next_voice = SDL_strdup(voice);
     SDL_UnlockMutex(s->lock);
 }
 

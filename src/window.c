@@ -58,6 +58,7 @@ typedef struct {
 
 static float px, small;  // the text size and the small size, in points
 static gs_rect status_line;  // where the status bar's first line was drawn, for a click on it
+static gs_rect voice_part;   // the part of it from "voice" on, where a click switches the voice
 static gs_rect countdown_less, countdown_more;  // the countdown control's - and +, for clicks on them
 static gs_rect volume_slider;  // where the volume slider was drawn, for the wheel
 static float volume = 1;       // of everything gear plays, 0 to 2, set by the slider
@@ -275,6 +276,16 @@ static void draw(gs_ui *ui, const view *v) {
     SDL_strlcpy(first, v->status, second ? SDL_min((size_t)(second - v->status) + 1, sizeof first) : sizeof first);
     status_line = (gs_rect){ bar.x, bar.y + 4, bar.w, line };
     gs_ui_text(ui, status_line, first, small, v->fault ? OVER : DIM, -1);
+    // A click on the models switches the recognition model, and from "voice" on the voice.
+    const char *say = v->fault ? NULL : SDL_strstr(first, " · voice ");
+    voice_part = (gs_rect){ 0 };
+    if (say) {
+        char before[300];
+        SDL_strlcpy(before, first, (size_t)(say - first) + 1);
+        float x = gs_ui_text_width(ui, before, small);
+        voice_part = (gs_rect){ status_line.x + x, status_line.y, status_line.w - x, line };
+        status_line.w = x;
+    }
     gs_rect below = { bar.x, bar.y + 4 + line, bar.w, line };
     // A test build says so at the right of the second line: its name, and whether it updates itself.
     build_label = (gs_rect){ 0 };
@@ -417,7 +428,8 @@ typedef struct {
     int kept_at;
     gear_record *record;  // with GEAR_DEBUG: microphone, speakers and cleaned microphone, written as they go
     Uint64 speaking_since;  // when the current reading started to play, or 0
-    char hear_slug[96], say_slug[96], voice_slug[64];  // the model files in use, without their extensions
+    char hear_slug[96], voice_slug[64];  // the model files in use, without their extensions
+    gear_model voice_model;
     char hear_file[128];
     int hear_at, hear_count;  // its place among the recognition models in the folder, from 1
     gs_update *update;
@@ -470,7 +482,8 @@ static void fill(app *a, view *v) {
         char which[48] = "";
         if (a->hear_count > 1) SDL_snprintf(which, sizeof which, " (%d of %d, click to switch)", a->hear_at, a->hear_count);
         const char *device = gear_hear_device(a->hear);
-        SDL_snprintf(v->status, sizeof v->status, "hear %s%s · say %s, %s\n%s · %s", a->hear_slug, which, a->say_slug, a->voice_slug,
+        const char *other = a->voice_model == GEAR_MODEL_VOICE_ALBA ? "mary" : "alba";
+        SDL_snprintf(v->status, sizeof v->status, "hear %s%s · voice %s (click for %s)\n%s · %s", a->hear_slug, which, a->voice_slug, other,
                      SDL_strcasecmp(device, "cpu") ? "on the GPU" : "on the CPU",
                      !echo ? "headphones" : !a->loopback ? "echo cancel: gear's audio" : !a->loopback_why[0] ? "echo cancel: all audio" : "echo cancel stopped: speakers no longer recorded");
     }
@@ -489,7 +502,7 @@ static void demo(view *v) {
     v->left = 1.6;
     v->total = 3;
     v->reply = "I found the bug. The countdown timer resets whenever the voice detector reports silence, so a long pause never sends the message. I moved the reset into the speech start handler in `src/listen.c`:\n\n```c\nif (l->below < l->p.pause_frames && l->piece_frames < l->p.max_frames)\n    return GEAR_LISTEN_NONE;\n```\n\nAll 14 tests pass. Want me to commit it?";
-    SDL_strlcpy(v->status, "hear parakeet-ft-v1-Q4_K_M · say phonon-31m-en, delia\non the GPU · echo cancel on", sizeof v->status);
+    SDL_strlcpy(v->status, "hear parakeet-ft-v1-Q4_K_M · voice alba (click for mary)\non the GPU · echo cancel on", sizeof v->status);
 }
 
 // A reading stopped by talking: logged, and with GEAR_DEBUG the last seconds the microphone heard are
@@ -585,13 +598,10 @@ static void take_replies(app *a) {
 }
 
 // A model file's name without its extension: parakeet-tdt_ctc-110m-Q4_K_M.gguf reads parakeet-tdt_ctc-110m-Q4_K_M.
-// A model file's name for the status line: its folder when it has one, else its name without the
-// extension.
 static void slug(char *out, size_t size, const char *file) {
     SDL_strlcpy(out, file, size);
-    char *cut = SDL_strchr(out, '/');
-    if (!cut) cut = SDL_strrchr(out, '.');
-    if (cut) *cut = 0;
+    char *dot = SDL_strrchr(out, '.');
+    if (dot) *dot = 0;
 }
 
 static void count_hear(app *a);
@@ -615,7 +625,8 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     count_hear(a);
     if (!gs_mix_open(MIX_RATE)) { SDL_snprintf(error, error_size, "No playback device: %s", SDL_GetError()); return false; }
     gear_model_path(o->models, GEAR_MODEL_SAY, path, sizeof path);
-    gear_model_path(o->models, GEAR_MODEL_VOICE, voice, sizeof voice);
+    a->voice_model = gear_voice_remembered(o->models);
+    gear_model_path(o->models, a->voice_model, voice, sizeof voice);
     if (!(a->say = gear_say_open(path, voice, o->say_threads, echo && !a->loopback ? a->voice : NULL, error, error_size))) return false;
     if (o->to) {
         gear_agent agent;
@@ -638,8 +649,7 @@ static bool open_loop(app *a, char *error, size_t error_size) {
         a->record = gear_record_open(dir);
     }
     // The loop runs only once everything it needs is open: without it the window shows STOPPED.
-    slug(a->say_slug, sizeof a->say_slug, gear_model_info(GEAR_MODEL_SAY)->name);
-    slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(GEAR_MODEL_VOICE)->name);
+    slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(a->voice_model)->name);
     gear_listen_params lp = gear_listen_defaults();
     a->countdown = o->countdown >= 0 ? o->countdown : gear_countdown_remembered(o->models, 3);
     a->pipe = gear_pipeline_new(a->voice, a->vad, a->hear, a->say, &lp, a->countdown);
@@ -678,6 +688,17 @@ static void switch_hear(app *a) {
     gear_hear_model_remember(a->o->models, next);
     count_hear(a);
     a->fault[0] = 0;
+}
+
+// The other voice, spoken from the next line on and remembered.
+static void switch_voice(app *a) {
+    char path[1200];
+    if (!a->say) return;
+    a->voice_model = a->voice_model == GEAR_MODEL_VOICE_ALBA ? GEAR_MODEL_VOICE_MARY : GEAR_MODEL_VOICE_ALBA;
+    gear_model_path(a->o->models, a->voice_model, path, sizeof path);
+    gear_say_set_voice(a->say, path);
+    slug(a->voice_slug, sizeof a->voice_slug, gear_model_info(a->voice_model)->name);
+    gear_voice_remember(a->o->models, a->voice_model);
 }
 
 static void close_loop(app *a) {
@@ -822,6 +843,7 @@ int gear_window(const gear_window_options *o) {
                 else gear_pipeline_cancel(a.pipe);
             }
             if (gs_ui_clicked(ui, status_line)) switch_hear(&a);
+            if (gs_ui_clicked(ui, voice_part)) switch_voice(&a);
             if (gs_ui_clicked(ui, build_label)) {
                 if (gs_update_ready(a.update)) restart = true, running = false;  // restart now
                 else gs_update_set_consent(a.update, gs_update_consent(a.update) != GS_UPDATE_YES), a.notice[0] = 0;

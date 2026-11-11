@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .hearsay = .{
-            .url = "git+https://github.com/wakamex/hearsay#172681835ed09ed172a20d3f7739bbe73cb36083",
-            .hash = "hearsay-0.0.0-qFXHiPSZAgAsiIV-MaRBRiiCPXlC6Se6OUCgr5bmajm6",
+            .url = "git+https://github.com/wakamex/hearsay#04d4cf74fdcaa3ce43ac31c7fdf6af47ffc34004",
+            .hash = "hearsay-0.0.0-qFXHiG2fAgANBlsfJKkZOq3yRzPO1a0kggWsZxrFiMgN",
         },
         .gesso = .{
             .url = "git+https://github.com/wakamex/gesso.git#6b19b7c67ad84971e9200804acac47c5ca756beb",

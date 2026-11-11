@@ -6,11 +6,11 @@
 #include <stdbool.h>
 #include <stddef.h>
 
-// The speech model's settings and tokenizer sit beside it in its folder, where hearsay looks for them.
-typedef enum { GEAR_MODEL_HEAR, GEAR_MODEL_SAY, GEAR_MODEL_SAY_CONFIG, GEAR_MODEL_SAY_TOKENIZER, GEAR_MODEL_VOICE, GEAR_MODEL_VAD, GEAR_MODEL_COUNT } gear_model;
+// The speech model has two voices, both downloaded, and the window switches between them.
+typedef enum { GEAR_MODEL_HEAR, GEAR_MODEL_SAY, GEAR_MODEL_VOICE_ALBA, GEAR_MODEL_VOICE_MARY, GEAR_MODEL_VAD, GEAR_MODEL_COUNT } gear_model;
 
 typedef struct {
-    const char *name;    // the file's name in the models folder, with its folder there if it has one
+    const char *name;    // the file's name in the models folder
     const char *url;     // at a pinned commit
     long long bytes;
     const char *sha256;
@@ -46,6 +46,9 @@ void gear_countdown_remember(const char *dir, double seconds);
 // microphone as loud as the user's voice, and the echo canceller took the voice out with it (README, Echo).
 float gear_volume_remembered(const char *dir, float fallback);
 void gear_volume_remember(const char *dir, float volume);
+// The voice last chosen in the window (dir/voice.txt), else alba.
+gear_model gear_voice_remembered(const char *dir);
+void gear_voice_remember(const char *dir, gear_model voice);
 // The agent the window last sent to, and the host it ran on ("" for this machine), from
 // dir/target.txt; false when there is none. Remembering an empty name forgets it.
 bool gear_target_remembered(const char *dir, char *name, size_t name_size, char *host, size_t host_size);
