@@ -54,9 +54,9 @@ struct gear_pipeline {
     gear_speech_heard hearing, heard[64];
     float lately[8][2];
     int start;                    // the frames that start a piece
-    // Drafts (gear_pipeline_set_drafts): pieces are counted from 1 as they go to the recogniser, and as
+    // Drafts (gear_pipeline_set_drafter): pieces are counted from 1 as they go to the recogniser, and as
     // their text comes back; the draft shown belongs to piece draft_piece until that one's text is in.
-    bool drafts;
+    gear_hear *drafter;
     int submitted, finished, draft_piece;
     long drafted_at;              // the frame of the last draft sent
     char *draft;
@@ -94,7 +94,12 @@ void gear_pipeline_free(gear_pipeline *p) {
     SDL_free(p);
 }
 
-void gear_pipeline_set_drafts(gear_pipeline *p, bool on) { p->drafts = on; }
+static void clear_draft(gear_pipeline *p);
+
+void gear_pipeline_set_drafter(gear_pipeline *p, gear_hear *drafter) {
+    p->drafter = drafter;
+    clear_draft(p);
+}
 
 const char *gear_pipeline_draft(const gear_pipeline *p) { return p->draft ? p->draft : ""; }
 
@@ -238,10 +243,10 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
         if (!gear_listen_in_piece(p->listen)) break;
         gear_speech_frame(&p->hearing, speech, second);
         // The piece so far, for its words to show while it is being said.
-        if (p->drafts && p->frames - p->drafted_at >= DRAFT_FRAMES) {
+        if (p->drafter && p->frames - p->drafted_at >= DRAFT_FRAMES) {
             int n;
             const float *piece = gear_listen_piece(p->listen, &n);
-            if (!too_quiet(piece, n)) gear_hear_draft(p->hear, piece, n, p->submitted + 1), p->drafted_at = p->frames;
+            if (!too_quiet(piece, n)) gear_hear_draft(p->drafter, piece, n, p->submitted + 1), p->drafted_at = p->frames;
         }
         break;
     }
@@ -296,7 +301,7 @@ static bool mostly_in(const char *heard, const char *text) {
 
 static void drain(gear_pipeline *p) {
     int id;
-    char *draft = gear_hear_draft_take(p->hear, &id);
+    char *draft = p->drafter ? gear_hear_draft_take(p->drafter, &id) : NULL;
     if (draft && id > p->finished) SDL_free(p->draft), p->draft = draft, p->draft_piece = id;
     else SDL_free(draft);
     for (;;) {

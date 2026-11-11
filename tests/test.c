@@ -144,6 +144,37 @@ static bool duplex(const char *model, const char *voice_path, const char *vad_pa
     return true;
 }
 
+// The utterance played in real time with `drafter` writing drafts: words show while it is being said,
+// the first of them as the message has it, and the draft is gone once the piece's own text is in.
+static void drafts(gs_voice *voice, gear_vad *vad, gear_hear *hear, gear_hear *drafter, const float *speech, int n) {
+    gear_listen_params lp = gear_listen_defaults();
+    gear_pipeline *p = gear_pipeline_new(voice, vad, hear, NULL, &lp, 1.0);
+    gear_pipeline_set_drafter(p, drafter);
+    char *message = NULL, last[256] = "";
+    float frame[GEAR_FRAME];
+    int updates = 0;
+    Uint64 start = SDL_GetTicksNS();
+    for (int i = 0, step = 0; !message && i < n + GEAR_RATE * 10; i += GEAR_FRAME, step++) {
+        SDL_memset(frame, 0, sizeof frame);
+        if (i + GEAR_FRAME <= n) SDL_memcpy(frame, speech + i, sizeof frame);
+        gear_pipeline_frame(p, frame, NULL);
+        message = gear_pipeline_poll(p);
+        const char *draft = gear_pipeline_draft(p);
+        if (*draft && SDL_strcmp(draft, last)) updates++, SDL_strlcpy(last, draft, sizeof last);
+        Uint64 due = start + (Uint64)(step + 1) * 10000000;
+        if (SDL_GetTicksNS() < due) SDL_DelayNS(due - SDL_GetTicksNS());
+    }
+    printf("drafts%s: %d, the last \"%s\"\n", drafter == hear ? "" : " from a second recogniser", updates, last);
+    CHECK(message && updates >= 2 && !*gear_pipeline_draft(p));
+    if (message) {
+        lower_letters(message), lower_letters(last);
+        CHECK(!SDL_strcmp(message, utterance_text));
+        CHECK(!SDL_strncmp(last, "well now", 8));
+    }
+    SDL_free(message);
+    gear_pipeline_free(p);
+}
+
 static void test_end_to_end(const char *dir, const char *data) {
     char path[1200], wav[1200], error[512];
     SDL_snprintf(wav, sizeof wav, "%s/utterance.wav", data);
@@ -187,33 +218,12 @@ static void test_end_to_end(const char *dir, const char *data) {
     }
     SDL_free(message);
     gear_pipeline_free(p);
-    // With drafts, played in real time: words show while the utterance is being said, the first of
-    // them as the message has it, and the draft is gone once the piece's own text is in.
-    p = gear_pipeline_new(voice, vad, hear, NULL, &lp, 1.0);
-    gear_pipeline_set_drafts(p, true);
-    message = NULL;
-    char last[256] = "";
-    int updates = 0;
-    Uint64 start = SDL_GetTicksNS();
-    for (int i = 0, step = 0; !message && i < n + GEAR_RATE * 10; i += GEAR_FRAME, step++) {
-        SDL_memset(frame, 0, sizeof frame);
-        if (i + GEAR_FRAME <= n) SDL_memcpy(frame, speech + i, sizeof frame);
-        gear_pipeline_frame(p, frame, NULL);
-        message = gear_pipeline_poll(p);
-        const char *draft = gear_pipeline_draft(p);
-        if (*draft && SDL_strcmp(draft, last)) updates++, SDL_strlcpy(last, draft, sizeof last);
-        Uint64 due = start + (Uint64)(step + 1) * 10000000;
-        if (SDL_GetTicksNS() < due) SDL_DelayNS(due - SDL_GetTicksNS());
-    }
-    printf("drafts: %d, the last \"%s\"\n", updates, last);
-    CHECK(message && updates >= 2 && !*gear_pipeline_draft(p));
-    if (message) {
-        lower_letters(message), lower_letters(last);
-        CHECK(!SDL_strcmp(message, utterance_text));
-        CHECK(!SDL_strncmp(last, "well now", 8));
-    }
-    SDL_free(message);
-    gear_pipeline_free(p);
+    // Drafts, from the recogniser itself and from a second one on a thread of its own where it is there.
+    drafts(voice, vad, hear, hear, speech, n);
+    SDL_snprintf(path, sizeof path, "%s/%s", dir, GEAR_DRAFT_MODEL);
+    gear_hear *drafter = gear_hear_open(path, 1, error, sizeof error);
+    if (drafter) drafts(voice, vad, hear, drafter, speech, n), gear_hear_close(drafter);
+    else printf("second drafter skipped: no %s\n", GEAR_DRAFT_MODEL);
     // Heard as it plays through the speakers, the utterance is the speakers' sound and makes no message;
     // said while the speakers play something else (the same audio backwards), it is still the message.
     float *backwards = SDL_malloc((size_t)n * sizeof(float));

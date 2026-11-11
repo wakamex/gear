@@ -31,6 +31,9 @@ typedef void gear_fetch_progress(void *user, long long received, long long total
 // Setting *stop gives it up. False with the reason in `error` ("stopped" after a stop).
 bool gear_models_fetch(const char *dir, SDL_AtomicInt *stop, gear_fetch_progress *progress, void *user, char *error, size_t error_size);
 
+// The recognition model that writes words as they are said where the one in use runs on the CPU, when
+// it is in the models folder: it is not downloaded, as only a machine without a usable GPU needs it.
+#define GEAR_DRAFT_MODEL "parakeet-tdt_ctc-110m-Q4_K_M.gguf"
 // Recognition models: any Parakeet GGUF file in the models folder. Their file names, the default
 // first and the rest in order; how many.
 int gear_hear_models(const char *dir, char names[][128], int max);

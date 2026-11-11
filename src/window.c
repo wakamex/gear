@@ -472,6 +472,7 @@ typedef struct {
     char hear_slug[96], voice_slug[64];  // the model files in use, without their extensions
     gear_model voice_model;
     gear_transcript *transcript;  // the messages sent
+    gear_hear *drafter;           // a second recogniser for words as they are said, on the CPU, or NULL
     char to_name[96];             // the agent messages go to, or ""
     char hear_file[128];
     int hear_at, hear_count;  // its place among the recognition models in the folder, from 1
@@ -661,6 +662,22 @@ static void slug(char *out, size_t size, const char *file) {
 
 static void count_hear(app *a);
 
+// What writes words as they are said. On a GPU the recogniser in use does, between pieces. On the CPU
+// that would hold up each piece's own text by as long as a draft takes (about 3 s for 10 s of speech
+// with parakeet-ft-v1 on one thread), so a second, smaller recogniser does, on a thread of its own:
+// GEAR_DRAFT_MODEL, about 0.7 s for 10 s, when it is in the models folder; without it, none.
+static void choose_drafter(app *a) {
+    bool cpu = !SDL_strcasecmp(gear_hear_device(a->hear), "cpu");
+    if (cpu && !a->drafter) {
+        char path[1200], error[512];
+        SDL_PathInfo info;
+        SDL_snprintf(path, sizeof path, "%s/%s", a->o->models, GEAR_DRAFT_MODEL);
+        if (SDL_GetPathInfo(path, &info) && !(a->drafter = gear_hear_open(path, 1, error, sizeof error))) SDL_Log("gear: no words as they are said: %s", error);
+    }
+    gear_pipeline_set_drafter(a->pipe, cpu ? a->drafter : a->hear);
+    if (!cpu && a->drafter) gear_hear_close(a->drafter), a->drafter = NULL;
+}
+
 static bool open_loop(app *a, char *error, size_t error_size) {
     const gear_window_options *o = a->o;
     char path[1200], voice[1200];
@@ -709,9 +726,7 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     gear_listen_params lp = gear_listen_defaults();
     a->countdown = o->countdown >= 0 ? o->countdown : gear_countdown_remembered(o->models, 3);
     a->pipe = gear_pipeline_new(a->voice, a->vad, a->hear, a->say, &lp, a->countdown);
-    // Words show as they are said where the recogniser has a GPU; on the CPU a draft would hold up
-    // each piece's own text by as long as it takes.
-    gear_pipeline_set_drafts(a->pipe, SDL_strcasecmp(gear_hear_device(a->hear), "cpu") != 0);
+    choose_drafter(a);
     {
         char path[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
         SDL_snprintf(path, sizeof path, "%smessages.jsonl", pref ? pref : "");
@@ -747,7 +762,7 @@ static void switch_hear(app *a) {
     gear_hear *old = a->hear;
     a->hear = h;
     gear_pipeline_set_hear(a->pipe, h, next);
-    gear_pipeline_set_drafts(a->pipe, SDL_strcasecmp(gear_hear_device(h), "cpu") != 0);
+    choose_drafter(a);
     gear_hear_close(old);
     SDL_strlcpy(a->hear_file, next, sizeof a->hear_file);
     slug(a->hear_slug, sizeof a->hear_slug, next);
@@ -770,6 +785,7 @@ static void switch_voice(app *a) {
 static void close_loop(app *a) {
     if (a->mic) SDL_DestroyAudioStream(a->mic);
     gear_pipeline_free(a->pipe);
+    gear_hear_close(a->drafter);
     gear_transcript_close(a->transcript);
     gs_loopback_close(a->loopback);
     gear_vad_free(a->vad);
