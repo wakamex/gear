@@ -36,9 +36,8 @@ Not built yet: the reply's sentence being read shown bright, editing a misheard 
 
 ## Roadmap
 
-1. Words spelled alike but said differently, such as past-tense "read" and the verb "record": count how often alba and mary say them wrong in recent replies before deciding whether a trained tagger is worth building. Hand-written word lists are not the fix.
-2. Words as they are said on the CPU: drafts are off there because they hold up each piece's text. A smaller recognizer for drafts alone, such as the 110M model, could bring them back.
-3. macOS: build and test on a Mac, where the speakers cannot be recorded for the echo canceller yet.
+1. Words as they are said on the CPU: drafts are off there because they hold up each piece's text. A smaller recognizer for drafts alone, such as the 110M model, could bring them back.
+2. macOS: build and test on a Mac, where the speakers cannot be recorded for the echo canceller yet.
 
 ## Build and run
 
