@@ -24,6 +24,7 @@ gear_listen *gear_listen_new(const gear_listen_params *p);
 void gear_listen_free(gear_listen *l);
 // One frame of GEAR_FRAME samples and the detector's probability for it. START when a piece begins;
 // END when one is complete, its audio then readable with gear_listen_piece until the next frame.
+// Inside a piece, gear_listen_piece gives its audio so far.
 gear_listen_event gear_listen_frame(gear_listen *l, const float *frame, float speech);
 const float *gear_listen_piece(const gear_listen *l, int *samples);
 bool gear_listen_in_piece(const gear_listen *l);

@@ -13,6 +13,7 @@
 #include "say.h"
 #include "speakable.h"
 #include "speech.h"
+#include "transcript.h"
 #include "wav.h"
 
 static int failures;
@@ -186,6 +187,33 @@ static void test_end_to_end(const char *dir, const char *data) {
     }
     SDL_free(message);
     gear_pipeline_free(p);
+    // With drafts, played in real time: words show while the utterance is being said, the first of
+    // them as the message has it, and the draft is gone once the piece's own text is in.
+    p = gear_pipeline_new(voice, vad, hear, NULL, &lp, 1.0);
+    gear_pipeline_set_drafts(p, true);
+    message = NULL;
+    char last[256] = "";
+    int updates = 0;
+    Uint64 start = SDL_GetTicksNS();
+    for (int i = 0, step = 0; !message && i < n + GEAR_RATE * 10; i += GEAR_FRAME, step++) {
+        SDL_memset(frame, 0, sizeof frame);
+        if (i + GEAR_FRAME <= n) SDL_memcpy(frame, speech + i, sizeof frame);
+        gear_pipeline_frame(p, frame, NULL);
+        message = gear_pipeline_poll(p);
+        const char *draft = gear_pipeline_draft(p);
+        if (*draft && SDL_strcmp(draft, last)) updates++, SDL_strlcpy(last, draft, sizeof last);
+        Uint64 due = start + (Uint64)(step + 1) * 10000000;
+        if (SDL_GetTicksNS() < due) SDL_DelayNS(due - SDL_GetTicksNS());
+    }
+    printf("drafts: %d, the last \"%s\"\n", updates, last);
+    CHECK(message && updates >= 2 && !*gear_pipeline_draft(p));
+    if (message) {
+        lower_letters(message), lower_letters(last);
+        CHECK(!SDL_strcmp(message, utterance_text));
+        CHECK(!SDL_strncmp(last, "well now", 8));
+    }
+    SDL_free(message);
+    gear_pipeline_free(p);
     // Heard as it plays through the speakers, the utterance is the speakers' sound and makes no message;
     // said while the speakers play something else (the same audio backwards), it is still the message.
     float *backwards = SDL_malloc((size_t)n * sizeof(float));
@@ -340,6 +368,31 @@ static void test_voice_switch(const char *dir) {
     CHECK(gear_voice_remembered(tmp) == GEAR_MODEL_VOICE_ALBA);
 }
 
+// The messages sent outlast a restart, the newest kept, and a line cut short is passed over.
+static void test_transcript(const char *tmp) {
+    char path[1200];
+    SDL_snprintf(path, sizeof path, "%smessages-%llu.jsonl", tmp, (unsigned long long)SDL_GetTicksNS());
+    gear_transcript *t = gear_transcript_open(path, 2);
+    CHECK(gear_transcript_count(t) == 0);
+    gear_transcript_add(t, "first", "claude");
+    gear_transcript_add(t, "second, with \"quotes\"", "");
+    gear_transcript_close(t);
+    SDL_IOStream *io = SDL_IOFromFile(path, "ab");
+    SDL_WriteIO(io, "{\"at\":\"2026", 11);
+    SDL_CloseIO(io);
+    t = gear_transcript_open(path, 2);
+    CHECK(gear_transcript_count(t) == 2);
+    CHECK(!SDL_strcmp(gear_transcript_at(t, 0)->text, "first") && !SDL_strcmp(gear_transcript_at(t, 0)->to, "claude"));
+    CHECK(SDL_strlen(gear_transcript_at(t, 0)->at) == 16);
+    gear_transcript_add(t, "third", "codex");
+    CHECK(gear_transcript_count(t) == 2 && !SDL_strcmp(gear_transcript_at(t, 0)->text, "second, with \"quotes\""));
+    gear_transcript_close(t);
+    t = gear_transcript_open(path, 10);
+    CHECK(gear_transcript_count(t) == 3 && !SDL_strcmp(gear_transcript_at(t, 2)->text, "third"));
+    gear_transcript_close(t);
+    SDL_RemovePath(path);
+}
+
 // Against the real wakterm, with an agent that does not exist, so nothing is delivered: the refusal
 // (which wakterm reports with exit code 0) must come back as a failure with its reason.
 static void test_agent_refused(void) {
@@ -453,6 +506,7 @@ int main(int argc, char **argv) {
     test_speakable();
     test_speech();
     test_wav(tmp);
+    test_transcript(tmp);
     test_agent_refused();
     const char *agent = SDL_getenv("GEAR_AGENT");
     if (agent && *agent) test_agent_round_trip(agent);

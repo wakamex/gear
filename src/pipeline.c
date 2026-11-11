@@ -5,6 +5,7 @@
 #include "wav.h"
 
 enum { HOLD_FRAMES = 30 };  // 0.3 s of talking stops a reply
+enum { DRAFT_FRAMES = 25 };  // a draft of the piece being spoken every 0.25 s
 enum { PLAYED_KEPT = 32 * GEAR_RATE, LEAD = 3 * GEAR_RATE / 10 };  // a piece is 30 s at most; 0.3 s more before it
 // A piece whose loudest 100 ms is quieter than this is not sent to the recognizer, which writes words
 // into breathing and room noise. Of the 119 kept pieces it found words in, the 9 below it were "Yeah",
@@ -53,6 +54,12 @@ struct gear_pipeline {
     gear_speech_heard hearing, heard[64];
     float lately[8][2];
     int start;                    // the frames that start a piece
+    // Drafts (gear_pipeline_set_drafts): pieces are counted from 1 as they go to the recogniser, and as
+    // their text comes back; the draft shown belongs to piece draft_piece until that one's text is in.
+    bool drafts;
+    int submitted, finished, draft_piece;
+    long drafted_at;              // the frame of the last draft sent
+    char *draft;
     // Kept speech (gear_pipeline_keep): pieces saved as they end, their text written as it comes.
     char keep[1024], model[128];
     long message;            // the message the pieces belong to, counted from 1
@@ -83,8 +90,15 @@ void gear_pipeline_free(gear_pipeline *p) {
     SDL_free(p->text);
     SDL_free(p->played);
     SDL_free(p->waiting);
+    SDL_free(p->draft);
     SDL_free(p);
 }
+
+void gear_pipeline_set_drafts(gear_pipeline *p, bool on) { p->drafts = on; }
+
+const char *gear_pipeline_draft(const gear_pipeline *p) { return p->draft ? p->draft : ""; }
+
+static void clear_draft(gear_pipeline *p) { SDL_free(p->draft), p->draft = NULL, p->draft_piece = 0; }
 
 void gear_pipeline_keep(gear_pipeline *p, const char *dir, const char *model) {
     SDL_strlcpy(p->keep, dir ? dir : "", sizeof p->keep);
@@ -99,6 +113,8 @@ void gear_pipeline_set_hear(gear_pipeline *p, gear_hear *hear, const char *model
     p->pend_count = 0;  // pieces the old recogniser had not finished are not transcribed
     p->ref_count = 0;
     SDL_free(p->waiting), p->waiting = NULL;
+    p->finished = p->submitted;
+    clear_draft(p);
 }
 
 static void keep_line(gear_pipeline *p, gs_jval *o) {
@@ -199,9 +215,11 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
         const float *piece = gear_listen_piece(p->listen, &n);
         if (too_quiet(piece, n)) {
             if (SDL_getenv("GEAR_DEBUG")) SDL_Log("gear: a piece of %.2f s too quiet to be speech, dropped", (double)n / GEAR_RATE);
+            if (p->draft_piece == p->submitted + 1) clear_draft(p);
             break;
         }
         gear_hear_submit(p->hear, piece, n);
+        p->submitted++;
         keep_piece(p, piece, n);
         // The speakers over the same stretch, from a little before it, when they played anything:
         // their recording, or without one what gear itself played.
@@ -217,7 +235,14 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
         break;
     }
     case GEAR_LISTEN_NONE:
-        if (gear_listen_in_piece(p->listen)) gear_speech_frame(&p->hearing, speech, second);
+        if (!gear_listen_in_piece(p->listen)) break;
+        gear_speech_frame(&p->hearing, speech, second);
+        // The piece so far, for its words to show while it is being said.
+        if (p->drafts && p->frames - p->drafted_at >= DRAFT_FRAMES) {
+            int n;
+            const float *piece = gear_listen_piece(p->listen, &n);
+            if (!too_quiet(piece, n)) gear_hear_draft(p->hear, piece, n, p->submitted + 1), p->drafted_at = p->frames;
+        }
         break;
     }
 }
@@ -270,6 +295,10 @@ static bool mostly_in(const char *heard, const char *text) {
 }
 
 static void drain(gear_pipeline *p) {
+    int id;
+    char *draft = gear_hear_draft_take(p->hear, &id);
+    if (draft && id > p->finished) SDL_free(p->draft), p->draft = draft, p->draft_piece = id;
+    else SDL_free(draft);
     for (;;) {
         if (!p->waiting && !(p->waiting = gear_hear_take(p->hear, &p->scores))) return;
         bool refer = p->ref_count && p->referenced[p->ref_head];
@@ -283,6 +312,7 @@ static void drain(gear_pipeline *p) {
         if (scored) gear_speech_inputs(&p->heard[p->ref_head], &p->scores, in), score = gear_speech_score(in);
         bool other = score < gear_speech_cut();
         if (p->ref_count) p->ref_head = (p->ref_head + 1) % 64, p->ref_count--;
+        if (++p->finished >= p->draft_piece) clear_draft(p);
         bool played_back = played && mostly_in(t, played);
         if (SDL_getenv("GEAR_DEBUG"))
             SDL_Log("gear: heard \"%s\" (speech %.2f)%s%s%s%s", t, score, played ? ", the speakers \"" : "", played ? played : "", played ? "\"" : "",
@@ -321,6 +351,7 @@ int gear_pipeline_interruptions(const gear_pipeline *p) { return p->interruption
 
 void gear_pipeline_cancel(gear_pipeline *p) {
     drain(p);
+    clear_draft(p);
     keep_outcome(p, "dropped");
     reset(p);
 }

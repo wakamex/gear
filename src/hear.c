@@ -11,6 +11,11 @@ struct gear_hear {
     SDL_Condition *wake;
     piece *todo, *done;  // queues, oldest first
     int pending;
+    // A draft: the latest audio of a piece still being spoken, transcribed only when no piece waits,
+    // and its text once done. A newer draft replaces one not yet started.
+    float *draft;
+    int draft_n, draft_id, draft_done_id;
+    char *draft_text;
     double last_seconds;
     bool quit;
 };
@@ -37,8 +42,22 @@ static int run(void *user) {
     rp.language = "en";
     SDL_LockMutex(h->lock);
     for (;;) {
-        while (!h->todo && !h->quit) SDL_WaitCondition(h->wake, h->lock);
+        while (!h->todo && !h->draft && !h->quit) SDL_WaitCondition(h->wake, h->lock);
         if (h->quit) break;
+        if (!h->todo) {
+            float *samples = h->draft;
+            int n = h->draft_n, id = h->draft_id;
+            h->draft = NULL;
+            SDL_UnlockMutex(h->lock);
+            const char *text = transcribe_run(h->session, samples, n, &rp) == TRANSCRIBE_OK ? transcribe_full_text(h->session) : "";
+            while (*text == ' ') text++;
+            char *copy = SDL_strdup(text);
+            SDL_free(samples);
+            SDL_LockMutex(h->lock);
+            SDL_free(h->draft_text);
+            h->draft_text = copy, h->draft_done_id = id;
+            continue;
+        }
         piece *p = h->todo;
         h->todo = p->next;
         SDL_UnlockMutex(h->lock);
@@ -110,6 +129,8 @@ void gear_hear_close(gear_hear *h) {
     SDL_WaitThread(h->thread, NULL);
     free_list(h->todo);
     free_list(h->done);
+    SDL_free(h->draft);
+    SDL_free(h->draft_text);
     transcribe_close(h->session);
     SDL_DestroyCondition(h->wake);
     SDL_DestroyMutex(h->lock);
@@ -122,10 +143,30 @@ void gear_hear_submit(gear_hear *h, const float *samples, int n) {
     SDL_memcpy(p->samples, samples, (size_t)n * sizeof(float));
     p->n = n;
     SDL_LockMutex(h->lock);
+    SDL_free(h->draft), h->draft = NULL;  // (a draft not yet started is of this piece, now whole)
     push(&h->todo, p);
     h->pending++;
     SDL_SignalCondition(h->wake);
     SDL_UnlockMutex(h->lock);
+}
+
+void gear_hear_draft(gear_hear *h, const float *samples, int n, int id) {
+    float *copy = SDL_malloc((size_t)n * sizeof(float));
+    SDL_memcpy(copy, samples, (size_t)n * sizeof(float));
+    SDL_LockMutex(h->lock);
+    SDL_free(h->draft);
+    h->draft = copy, h->draft_n = n, h->draft_id = id;
+    SDL_SignalCondition(h->wake);
+    SDL_UnlockMutex(h->lock);
+}
+
+char *gear_hear_draft_take(gear_hear *h, int *id) {
+    SDL_LockMutex(h->lock);
+    char *text = h->draft_text;
+    h->draft_text = NULL;
+    *id = h->draft_done_id;
+    SDL_UnlockMutex(h->lock);
+    return text;
 }
 
 char *gear_hear_take(gear_hear *h, gear_hear_scores *scores) {

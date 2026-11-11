@@ -40,6 +40,12 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played);
 // and starts the next one; NULL otherwise.
 char *gear_pipeline_poll(gear_pipeline *p);
 const char *gear_pipeline_text(const gear_pipeline *p);  // the message so far
+// With drafts on, the piece being spoken is transcribed again every 0.25 s while it lasts, and its
+// words so far are gear_pipeline_draft until the piece's own text joins the message ("" when there
+// are none). A draft is not checked against the speakers or scored as speech, as a piece is. Off by
+// default; on the CPU a draft can hold up a piece's text by its own running time.
+void gear_pipeline_set_drafts(gear_pipeline *p, bool on);
+const char *gear_pipeline_draft(const gear_pipeline *p);
 double gear_pipeline_countdown(const gear_pipeline *p);  // seconds left before sending, < 0 when not counting
 void gear_pipeline_set_countdown(gear_pipeline *p, double seconds);  // from the next frame on
 bool gear_pipeline_hearing(const gear_pipeline *p);      // in a piece of speech now

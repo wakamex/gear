@@ -21,6 +21,12 @@ typedef struct { int tokens; float raw, blank, second, energy, pmax, conf; } gea
 // go to `scores` when that is not NULL.
 char *gear_hear_take(gear_hear *h, gear_hear_scores *scores);
 int gear_hear_pending(gear_hear *h);  // pieces queued or being transcribed
+// A draft of a piece still being spoken, for showing words as they are said: a copy of its audio so
+// far, transcribed only when no piece is waiting, so a piece's own text waits at most for one draft
+// already under way. A newer draft replaces one not yet started. `id` names the piece it belongs to.
+void gear_hear_draft(gear_hear *h, const float *samples, int n, int id);
+// The text of the last draft done, with its id, or NULL when none has finished since the last call.
+char *gear_hear_draft_take(gear_hear *h, int *id);
 double gear_hear_last_seconds(gear_hear *h);  // how long the last piece took to transcribe
 // The device the model runs on, as transcribe.cpp names it: "vulkan", "cpu", ...
 const char *gear_hear_device(gear_hear *h);

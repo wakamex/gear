@@ -17,6 +17,7 @@
 #include "relay.h"
 #include "say.h"
 #include "speakable.h"
+#include "transcript.h"
 #include "wav.h"
 
 enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6, KEPT = 4 * GEAR_RATE };  // KEPT: microphone audio kept for a report
@@ -43,6 +44,8 @@ typedef struct {
     float levels[LEVELS];   // the microphone's recent levels, 0 to 1, oldest first
     bool speech;            // the voice detector hears speech now
     const char *message;
+    const char *draft;      // the words of the piece being said, not yet in the message
+    const gear_transcript *transcript;  // the messages sent before, shown above it, or NULL
     bool pending;           // speech heard and not yet in the message
     double left, total;     // the countdown, left < 0 when not counting
     int countdown_setting;  // the countdown's length, shown with - and + to change it; -1 hides it (and the volume)
@@ -129,48 +132,85 @@ static void countdown(gs_ui *ui, gs_rect r, const view *v) {
     gs_ui_text(ui, (gs_rect){ r.x + cells * 11 + 10, r.y, r.w - cells * 11 - 10, r.h }, hint, small, DIM, -1);
 }
 
+// The message being said: its words, then the draft of the piece under way (or an ellipsis while a
+// piece waits for its text), the draft dimmed. Returns the length of the message's own part.
+static size_t message_text(const view *v, char *out, size_t size) {
+    const char *draft = v->draft ? v->draft : "";
+    SDL_snprintf(out, size, "%s%s%s", v->message, *v->message && (*draft || v->pending) ? " " : "", *draft ? draft : v->pending ? "…" : "");
+    return SDL_min(SDL_strlen(v->message), SDL_strlen(out));
+}
+
 static float message_height(gs_ui *ui, const view *v, float w) {
-    const char *t = *v->message ? v->message : "say something";
+    char text[4200];
+    message_text(v, text, sizeof text);
+    const char *t = *text ? text : "say something";
     return SDL_max(gs_ui_text_height(ui, t, px, w), gs_ui_line_height(ui, px) * 2) + countdown_height() + 4;
 }
 
-// The message panel, in `box`. A message taller than the panel shows its end, where new words come,
-// and the wheel over it scrolls back to the start; the title says how much is above. New words, or a
-// new message, bring it back to the end.
+// When a message was sent, for its heading: the time on the day it was sent, else the date as well.
+static void sent_heading(const gear_sent *s, char *out, size_t size) {
+    SDL_Time now;
+    SDL_DateTime d;
+    char today[16] = "";
+    if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(today, sizeof today, "%04d-%02d-%02d", d.year, d.month, d.day);
+    const char *at = SDL_strlen(s->at) > 11 && !SDL_strncmp(s->at, today, 10) ? s->at + 11 : s->at;
+    SDL_snprintf(out, size, "%s%s%s", at, *s->to ? " → " : "", s->to);
+}
+
+// The message panel, in `box`: the messages sent before (dim, each under the time it went and its
+// agent), then the one being said. The panel is sized for the one being said and shows the end, where
+// new words come; the wheel over it scrolls back through the earlier ones, and the title says how many
+// are above. New words, or a message sent, bring it back to the end.
 static gs_rect message_box;      // where the panel was drawn, for the wheel
 static float message_wheel;      // wheel steps over it since the last frame, up positive
 static float message_scroll;     // points scrolled back from the end
+static bool message_back;        // scrolled back by the user: the panel takes half the window
 static size_t message_length;    // of the message last drawn, to see it grow
+static int message_sent;         // messages sent when last drawn
+static int message_from, message_to;  // a selection in the message being said
 
 static void message(gs_ui *ui, gs_rect box, const view *v) {
-    char text[4200], title[64] = "MESSAGE";
-    SDL_snprintf(text, sizeof text, "%s%s", v->message, v->pending ? (*v->message ? " …" : "…") : "");
+    char text[4200], title[64] = "MESSAGE", heading[160];
+    size_t own = message_text(v, text, sizeof text);
     gs_rect inside = gs_inset(box, 10);
     gs_rect area = inside;
     if (v->left >= 0) area.h -= countdown_height();
-    float line = gs_ui_line_height(ui, px), full = *text ? gs_ui_text_height(ui, text, px, area.w) : 0;
-    if (full > area.h) {  // (whole lines only, so none is cut through)
-        float shown = SDL_floorf(area.h / line) * line;
-        area.y += area.h - shown, area.h = shown;
-    }
-    size_t n = SDL_strlen(v->message);
-    if (n != message_length) message_scroll = 0, message_length = n;
+    int sent = gear_transcript_count(v->transcript);
+    float line = gs_ui_line_height(ui, px), head = gs_ui_line_height(ui, small), gap = 8, earlier = 0;
+    for (int i = 0; i < sent; i++) earlier += head + gs_ui_text_height(ui, gear_transcript_at(v->transcript, i)->text, px, area.w) + gap;
+    const char *now = *text ? text : sent ? "" : "say something";
+    float full = earlier + (*now ? gs_ui_text_height(ui, now, px, area.w) : 0);
+    size_t n = SDL_strlen(text);
+    if (n != message_length || sent != message_sent) message_scroll = 0, message_back = false, message_length = n, message_sent = sent;
+    if (message_wheel > 0) message_back = true;
+    if (message_wheel < 0 && message_scroll + message_wheel * line * 3 <= 0) message_back = false;
     message_scroll = SDL_clamp(message_scroll + message_wheel * line * 3, 0, SDL_max(full - area.h, 0));
     message_wheel = 0;
-    float hidden = full - area.h - message_scroll;
-    int above = (int)SDL_ceilf(hidden / line - 0.01f);
-    if (above > 0) SDL_snprintf(title, sizeof title, "MESSAGE · %d more line%s above", above, above == 1 ? "" : "s");
+    float top = full > area.h ? area.y + area.h - full + message_scroll : area.y, y = top;
+    int above = 0;
+    for (int i = 0; i < sent; i++) {
+        if (y < area.y - 1) above++;
+        y += head + gs_ui_text_height(ui, gear_transcript_at(v->transcript, i)->text, px, area.w) + gap;
+    }
+    if (above) SDL_snprintf(title, sizeof title, "MESSAGE · %d earlier above", above);
+    else if (top < area.y - 1) SDL_snprintf(title, sizeof title, "MESSAGE · %d more line%s above", (int)SDL_ceilf((area.y - top) / line - 0.01f), (area.y - top) / line > 1.01f ? "s" : "");
     message_box = box;
     panel(ui, box, title);
-    if (!*text) gs_ui_text_wrapped(ui, area, "say something", px, DIM);
-    else if (full <= area.h) gs_ui_text_wrapped(ui, area, text, px, TEXT);
-    else {
-        // (clipped a little below the first line's top: the line above's descenders reach into it)
-        gs_rect clip = { area.x, area.y + SDL_ceilf(line * 0.12f), area.w, area.h - SDL_ceilf(line * 0.12f) };
-        gs_ui_clip(ui, &clip);
-        gs_ui_text_wrapped(ui, (gs_rect){ area.x, area.y - hidden, area.w, full }, text, px, TEXT);
-        gs_ui_clip(ui, NULL);
+    gs_ui_clip(ui, &area);
+    y = top;
+    for (int i = 0; i < sent; i++) {
+        const gear_sent *e = gear_transcript_at(v->transcript, i);
+        sent_heading(e, heading, sizeof heading);
+        gs_ui_text(ui, (gs_rect){ area.x, y, area.w, head }, heading, small, DIM, -1);
+        y += head;
+        y += gs_ui_text_wrapped(ui, (gs_rect){ area.x, y, area.w, 100000 }, e->text, px, DIM) + gap;
     }
+    if (*text) {
+        gs_ui_text_range draft = { (int)own, (int)n, DIM, false };
+        int clicked = -1;
+        gs_ui_text_select(ui, (gs_rect){ area.x, y, area.w, 100000 }, "message", text, px, TEXT, &draft, own < n, &message_from, &message_to, &clicked);
+    } else if (*now) gs_ui_text_wrapped(ui, (gs_rect){ area.x, y, area.w, 100000 }, now, px, DIM);
+    gs_ui_clip(ui, NULL);
     if (v->left >= 0) countdown(ui, (gs_rect){ inside.x, inside.y + inside.h - countdown_height(), inside.w, countdown_height() }, v);
 }
 
@@ -296,9 +336,10 @@ static void draw(gs_ui *ui, const view *v) {
     }
     if (second) gs_ui_text(ui, below, second + 1, small, DIM, -1);
     gs_cut_bottom(&r, 8);
-    // The message takes what it needs, up to half the room; the reply has the rest.
+    // The message takes what it needs, up to half the room, and the half while scrolled back through
+    // the earlier ones; the reply has the rest.
     float room = r.h - 16, least = gs_ui_line_height(ui, px) * 2 + countdown_height() + 24;
-    float mh = SDL_min(message_height(ui, v, r.w - 20) + 20, SDL_max(room / 2, least));
+    float mh = SDL_min(message_back ? room : message_height(ui, v, r.w - 20) + 20, SDL_max(room / 2, least));
     message(ui, gs_cut_top(&r, mh), v);
     gs_cut_top(&r, 16);
     gs_rect inside = panel(ui, r, "REPLY");
@@ -430,6 +471,8 @@ typedef struct {
     Uint64 speaking_since;  // when the current reading started to play, or 0
     char hear_slug[96], voice_slug[64];  // the model files in use, without their extensions
     gear_model voice_model;
+    gear_transcript *transcript;  // the messages sent
+    char to_name[96];             // the agent messages go to, or ""
     char hear_file[128];
     int hear_at, hear_count;  // its place among the recognition models in the folder, from 1
     gs_update *update;
@@ -468,6 +511,8 @@ static void fill(app *a, view *v) {
     SDL_memcpy(v->levels, a->levels, sizeof v->levels);
     v->speech = hearing;
     v->message = gear_pipeline_text(a->pipe);
+    v->draft = gear_pipeline_draft(a->pipe);
+    v->transcript = a->transcript;
     v->pending = hearing || pending;
     v->left = left;
     v->total = a->countdown;
@@ -498,7 +543,16 @@ static void demo(view *v) {
     v->countdown_setting = 3;
     float levels[LEVELS] = { 0.2f, 0.5f, 0.8f, 0.4f, 0.1f, 0.05f };
     SDL_memcpy(v->levels, levels, sizeof levels);
-    v->message = "Fix the countdown so a long pause doesn't send the message, and then run the tests.";
+    v->message = "Fix the countdown so a long pause doesn't send the message,";
+    v->draft = "and then run the tests";
+    // (a transcript with no file: what is added stays in memory)
+    static gear_transcript *sent;
+    if (!sent) {
+        sent = gear_transcript_open("", 10);
+        gear_transcript_add(sent, "What does the countdown do when I pause in the middle of a sentence?", "pockettts");
+        gear_transcript_add(sent, "Show me where it resets.", "pockettts");
+    }
+    v->transcript = sent;
     v->left = 1.6;
     v->total = 3;
     v->reply = "I found the bug. The countdown timer resets whenever the voice detector reports silence, so a long pause never sends the message. I moved the reset into the speech start handler in `src/listen.c`:\n\n```c\nif (l->below < l->p.pause_frames && l->piece_frames < l->p.max_frames)\n    return GEAR_LISTEN_NONE;\n```\n\nAll 14 tests pass. Want me to commit it?";
@@ -572,6 +626,7 @@ static void listen_frames(app *a) {
 static void deliver(app *a, char *message) {
     printf("> %s\n", message);
     fflush(stdout);
+    gear_transcript_add(a->transcript, message, a->to_name);
     if (a->relay) gear_relay_send(a->relay, message);
     else {  // no agent: the message is the reply, read back
         SDL_free(a->reply);
@@ -634,6 +689,7 @@ static bool open_loop(app *a, char *error, size_t error_size) {
         // (found, it is where a start without --to goes next time, on the same host)
         if (!o->shot) gear_target_remember(o->models, o->to, gear_agent_host());
         a->relay = gear_relay_new(agent.name);
+        SDL_strlcpy(a->to_name, agent.name, sizeof a->to_name);
         SDL_snprintf(a->target, sizeof a->target, "→ %s (%s)", agent.name, agent.harness);
     } else SDL_strlcpy(a->target, "→ nobody: each message is read back", sizeof a->target);
     const SDL_AudioSpec spec = { SDL_AUDIO_F32, 1, GEAR_RATE };
@@ -653,6 +709,15 @@ static bool open_loop(app *a, char *error, size_t error_size) {
     gear_listen_params lp = gear_listen_defaults();
     a->countdown = o->countdown >= 0 ? o->countdown : gear_countdown_remembered(o->models, 3);
     a->pipe = gear_pipeline_new(a->voice, a->vad, a->hear, a->say, &lp, a->countdown);
+    // Words show as they are said where the recogniser has a GPU; on the CPU a draft would hold up
+    // each piece's own text by as long as it takes.
+    gear_pipeline_set_drafts(a->pipe, SDL_strcasecmp(gear_hear_device(a->hear), "cpu") != 0);
+    {
+        char path[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
+        SDL_snprintf(path, sizeof path, "%smessages.jsonl", pref ? pref : "");
+        SDL_free(pref);
+        a->transcript = gear_transcript_open(path, 200);
+    }
     if (!o->no_keep) {
         char heard[1100], *pref = SDL_GetPrefPath("wakamex", "gear");
         SDL_snprintf(heard, sizeof heard, "%sheard", pref ? pref : "");
@@ -682,6 +747,7 @@ static void switch_hear(app *a) {
     gear_hear *old = a->hear;
     a->hear = h;
     gear_pipeline_set_hear(a->pipe, h, next);
+    gear_pipeline_set_drafts(a->pipe, SDL_strcasecmp(gear_hear_device(h), "cpu") != 0);
     gear_hear_close(old);
     SDL_strlcpy(a->hear_file, next, sizeof a->hear_file);
     slug(a->hear_slug, sizeof a->hear_slug, next);
@@ -704,6 +770,7 @@ static void switch_voice(app *a) {
 static void close_loop(app *a) {
     if (a->mic) SDL_DestroyAudioStream(a->mic);
     gear_pipeline_free(a->pipe);
+    gear_transcript_close(a->transcript);
     gs_loopback_close(a->loopback);
     gear_vad_free(a->vad);
     gear_relay_free(a->relay);
