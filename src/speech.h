@@ -1,8 +1,9 @@
 // Telling speech from the other sounds a voice makes. The voice detector starts a piece for a throat
 // clear, a cough, a sigh or a laugh as it does for a word, and the recognizer writes words into some of
 // them ("Okay", "um", "oh", "ha ha"), which would go to the agent as a message. A piece the recognizer
-// wrote words into is scored from what the two voice detectors and the recognizer made of it, and one
-// that scores under the cut is dropped.
+// wrote words into is scored from what the two voice detectors and the recognizer made of it. The score
+// is kept with each piece heard but drops none: fitted on close-microphone recordings, it dropped speech
+// over music and from across the room in real use.
 //
 // The score is a model (src/speech_model.h, written by tools/fit-speech-model) fitted on pieces cut by
 // gear's own listener from public recordings: single words (Speech Commands) and read sentences
