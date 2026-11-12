@@ -157,6 +157,21 @@ int gear_agents_list(gear_agent *out, int max, char *error, size_t error_size) {
     return n;
 }
 
+void gear_agent_tabs(gear_agent *agents, int n) {
+    for (int i = 0; i < n; i++) agents[i].tab[0] = 0;
+    const char *argv[] = { wakterm(), "cli", "--no-auto-start", "list", "--format", "json", NULL };
+    char ignored[256];
+    gs_json *panes = n > 0 ? run_json(argv, NULL, ignored, sizeof ignored) : NULL;
+    for (gs_jv p = panes ? gs_json_first(gs_json_root(panes)) : NULL; p; p = gs_json_next(p)) {
+        int pane = (int)gs_json_num(gs_json_get(p, "pane_id"), -2);
+        const char *title = gs_json_str(gs_json_get(p, "effective_title"), "");
+        if (!*title) title = gs_json_str(gs_json_get(p, "tab_title"), "");
+        for (int i = 0; i < n; i++)
+            if (agents[i].pane == pane) SDL_strlcpy(agents[i].tab, title, sizeof agents[i].tab);
+    }
+    gs_json_free(panes);
+}
+
 bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t error_size) {
     enum { MAX = 512 };
     gear_agent *all = SDL_malloc(MAX * sizeof *all);
@@ -165,16 +180,11 @@ bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t erro
     for (int i = 0; i < n && !found; i++)
         if (!SDL_strcasecmp(all[i].name, name)) { *out = all[i]; found = true; }
     // No agent by that name: the agent in the tab of that title, whichever harness it runs.
-    const char *argv[] = { wakterm(), "cli", "--no-auto-start", "list", "--format", "json", NULL };
-    char ignored[256];
-    gs_json *panes = found || n <= 0 ? NULL : run_json(argv, NULL, ignored, sizeof ignored);
-    for (gs_jv p = panes ? gs_json_first(gs_json_root(panes)) : NULL; p && !found; p = gs_json_next(p)) {
-        if (SDL_strcasecmp(gs_json_str(gs_json_get(p, "tab_title"), ""), name)) continue;
-        int pane = (int)gs_json_num(gs_json_get(p, "pane_id"), -2);
+    if (!found && n > 0) {
+        gear_agent_tabs(all, n);
         for (int i = 0; i < n && !found; i++)
-            if (all[i].pane == pane) { *out = all[i]; found = true; }
+            if (!SDL_strcasecmp(all[i].tab, name)) { *out = all[i]; found = true; }
     }
-    gs_json_free(panes);
     if (n >= 0 && !found) SDL_snprintf(error, error_size, "No live agent called %s, and none in a tab of that title", name);
     SDL_free(all);
     return found;

@@ -9,11 +9,15 @@
 
 typedef struct {
     char name[128], id[128], incarnation[160], harness[32], status[32];
+    char tab[128];  // the title of its tab as Wakterm shows it, once gear_agent_tabs has filled it
     int pane;
 } gear_agent;
 
 // The live agents, up to `max`; their count, or -1 with the reason in `error`.
 int gear_agents_list(gear_agent *out, int max, char *error, size_t error_size);
+// Fills in the title each agent's tab shows (Wakterm's effective title: the one set, else the one it
+// makes). Left empty where it cannot be read.
+void gear_agent_tabs(gear_agent *agents, int n);
 // The live agent called `name`, or else the one running in a tab titled `name`. False with the
 // reason in `error`.
 bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t error_size);

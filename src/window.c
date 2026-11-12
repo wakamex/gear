@@ -20,7 +20,7 @@
 #include "transcript.h"
 #include "wav.h"
 
-enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6, KEPT = 4 * GEAR_RATE };  // KEPT: microphone audio kept for a report
+enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6, KEPT = 4 * GEAR_RATE, PICK_ROWS = 10 };  // KEPT: microphone audio kept for a report
 
 // toolcore-native's palette.
 static SDL_FColor hex(Uint32 c) { return (SDL_FColor){ (float)(c >> 16 & 255) / 255, (float)(c >> 8 & 255) / 255, (float)(c & 255) / 255, 1 }; }
@@ -41,6 +41,11 @@ typedef struct {
     const char *state;      // LISTENING, HEARING, SENDING, WAITING, SPEAKING, MUTED
     SDL_FColor state_color;
     char target[200];
+    // The send-to picker's rows, best match first (the lister's agents by index), how many more match
+    // than are shown, and a note instead of rows while looking or when there are none.
+    const char *agents[PICK_ROWS];
+    int agent_index[PICK_ROWS], agents_count, agents_more;
+    const char *agents_note;
     float levels[LEVELS];   // the microphone's recent levels, 0 to 1, oldest first
     bool speech;            // the voice detector hears speech now
     const char *message;
@@ -61,6 +66,12 @@ typedef struct {
 
 static float px, small;  // the text size and the small size, in points
 static gs_rect status_line;  // where the status bar's first line was drawn, for a click on it
+static gs_rect target_label; // the target agent in the state line, which a click (or Tab) opens the picker on
+// The send-to picker: open, what is typed to narrow it, and the agent chosen this frame (an index
+// into the lister's agents), else -1.
+static bool picking, pick_opened;
+static char pick_filter[128];
+static int pick_choice = -1;
 static gs_rect voice_part;   // the part of it from "voice" on, where a click switches the voice
 static gs_rect countdown_less, countdown_more;  // the countdown control's - and +, for clicks on them
 static gs_rect volume_slider;  // where the volume slider was drawn, for the wheel
@@ -115,7 +126,39 @@ static void state_line(gs_ui *ui, gs_rect r, const view *v) {
         gs_ui_text(ui, value, secs, small, TEXT, 0);
         gs_ui_text(ui, countdown_less, "-", small, gs_ui_hovered(ui, countdown_less) ? ACCENT : DIM, 0);
     }
-    gs_ui_text(ui, r, v->target, small, TEXT, -1);
+    target_label = (gs_rect){ r.x, r.y, SDL_min(gs_ui_text_width(ui, v->target, small) + 4, r.w), r.h };
+    gs_ui_text(ui, r, v->target, small, gs_ui_hovered(ui, target_label) ? ACCENT : TEXT, -1);
+}
+
+// The send-to picker, over the window: a field to narrow the agents by their tab's title or their
+// name, and the matches below it, the agents sent to lately first. Enter takes the first, a click any;
+// Esc (on an empty field) closes it.
+static void picker(gs_ui *ui, const view *v) {
+    if (!picking) return;
+    float row = gs_ui_line_height(ui, px) + 8, field = row + 4;
+    int rows = v->agents_note ? 1 : v->agents_count + (v->agents_more > 0);
+    gs_rect m = gs_ui_modal_begin(ui, 460, 20 + small * 1.6f + field + 10 + row * (float)SDL_max(rows, 1) + 16);
+    gs_rect r = gs_inset(m, 12);
+    gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "Send to", small, DIM, -1);
+    gs_ui_field(ui, gs_cut_top(&r, field), "pick", pick_filter, sizeof pick_filter, "type a tab or agent name");
+    if (pick_opened) gs_ui_focus(ui, "pick"), pick_opened = false;
+    gs_cut_top(&r, 10);
+    if (v->agents_note) gs_ui_text(ui, gs_cut_top(&r, row), v->agents_note, px, DIM, -1);
+    for (int i = 0; i < v->agents_count; i++) {
+        gs_rect at = gs_cut_top(&r, row);
+        bool hot = gs_ui_hovered(ui, at);
+        if (hot) gs_ui_fill(ui, at, RAISED);
+        gs_ui_text(ui, gs_inset(at, 4), v->agents[i], px, hot || i == 0 ? BRIGHT : TEXT, -1);
+        if (gs_ui_clicked(ui, at)) pick_choice = v->agent_index[i];
+    }
+    if (v->agents_more > 0) {
+        char more[64];
+        SDL_snprintf(more, sizeof more, "%d more: type to narrow", v->agents_more);
+        gs_ui_text(ui, gs_inset(gs_cut_top(&r, row), 4), more, small, DIM, -1);
+    }
+    if (gs_ui_key(ui, SDLK_RETURN, 0) && v->agents_count) pick_choice = v->agent_index[0];
+    if (gs_ui_key(ui, SDLK_ESCAPE, 0) || pick_choice >= 0) picking = false;
+    gs_ui_modal_end(ui);
 }
 
 static float countdown_height(void) { return small * 1.6f; }
@@ -354,6 +397,7 @@ static void draw(gs_ui *ui, const view *v) {
         gs_ui_text_wrapped(ui, inside, "the agent's reply is read here", px, DIM);
     }
     gs_ui_clip(ui, NULL);
+    picker(ui, v);
     gs_ui_end(ui);
 }
 
@@ -444,6 +488,30 @@ static void fetch_status(fetcher *f, char *out, size_t size) {
 
 // ---- The live loop ----
 
+// The agents there are, asked of Wakterm on a thread of its own, since that runs a command (over ssh,
+// for agents on another machine).
+typedef struct {
+    SDL_Thread *thread;
+    SDL_AtomicInt done;
+    gear_agent agents[256];
+    int count;
+    char error[256];
+    char rows[256][200];
+} lister;
+
+static int list_run(void *user) {
+    lister *l = user;
+    l->count = gear_agents_list(l->agents, 256, l->error, sizeof l->error);
+    gear_agent_tabs(l->agents, l->count);
+    for (int i = 0; i < l->count; i++) {
+        const gear_agent *g = &l->agents[i];
+        if (*g->tab && SDL_strcasecmp(g->tab, g->name)) SDL_snprintf(l->rows[i], sizeof l->rows[i], "%s · %s, %s %s", g->tab, g->name, g->harness, g->status);
+        else SDL_snprintf(l->rows[i], sizeof l->rows[i], "%s · %s %s", g->name, g->harness, g->status);
+    }
+    SDL_SetAtomicInt(&l->done, 1);
+    return 0;
+}
+
 typedef struct {
     const gear_window_options *o;
     gs_voice *voice;
@@ -453,6 +521,8 @@ typedef struct {
     gear_hear *hear;
     gear_say *say;
     gear_relay *relay;
+    gear_relay *earlier[4];  // relays to agents sent to before, kept until the replies they owe are in
+    lister *list;            // the agents for the target menu, while it is asked for and after
     gear_pipeline *pipe;
     SDL_AudioStream *mic;
     bool muted;
@@ -495,6 +565,41 @@ static void build_view(app *a, view *v) {
 #endif
 }
 
+// How well agent i matches what is typed: 0 not at all, higher better. A title or name that starts
+// with it beats one that only has it inside; with nothing typed, the agents sent to lately come first,
+// newest first.
+static int pick_rank(app *a, int i) {
+    const gear_agent *g = &a->list->agents[i];
+    if (*pick_filter) {
+        size_t n = SDL_strlen(pick_filter);
+        if (!SDL_strncasecmp(g->tab, pick_filter, n) || !SDL_strncasecmp(g->name, pick_filter, n)) return 3;
+        return SDL_strcasestr(g->tab, pick_filter) || SDL_strcasestr(g->name, pick_filter) ? 2 : 0;
+    }
+    int sent = gear_transcript_count(a->transcript);
+    for (int k = sent - 1; k >= 0 && k >= sent - 50; k--)
+        if (!SDL_strcasecmp(gear_transcript_at(a->transcript, k)->to, g->name)) return 1000 - (sent - 1 - k);
+    return 1;
+}
+
+static void pick_rows(app *a, view *v) {
+    if (!a->list || !SDL_GetAtomicInt(&a->list->done)) { v->agents_note = "looking for agents…"; return; }
+    if (a->list->count < 0) { v->agents_note = a->list->error; return; }
+    int order[256], rank[256], n = 0;
+    for (int i = 0; i < a->list->count; i++) {
+        int r = pick_rank(a, i);
+        if (!r) continue;
+        // (best first, and alphabetical by what the row starts with among equals)
+        int at = n++;
+        for (; at > 0 && (rank[at - 1] < r || (rank[at - 1] == r && SDL_strcasecmp(a->list->rows[order[at - 1]], a->list->rows[i]) > 0)); at--)
+            order[at] = order[at - 1], rank[at] = rank[at - 1];
+        order[at] = i, rank[at] = r;
+    }
+    if (!n) { v->agents_note = a->list->count ? "no agent matches" : "no agents running"; return; }
+    v->agents_count = SDL_min(n, PICK_ROWS);
+    v->agents_more = n - v->agents_count;
+    for (int i = 0; i < v->agents_count; i++) v->agents[i] = a->list->rows[order[i]], v->agent_index[i] = order[i];
+}
+
 static void fill(app *a, view *v) {
     SDL_zerop(v);
     if (a->loopback && !a->loopback_why[0]) gs_loopback_error(a->loopback, a->loopback_why, sizeof a->loopback_why);
@@ -509,6 +614,7 @@ static void fill(app *a, view *v) {
     else if (waiting) v->state = "WAITING", v->state_color = ACCENT;
     else v->state = "LISTENING", v->state_color = OK;
     SDL_strlcpy(v->target, a->target, sizeof v->target);
+    if (picking) pick_rows(a, v);
     SDL_memcpy(v->levels, a->levels, sizeof v->levels);
     v->speech = hearing;
     v->message = gear_pipeline_text(a->pipe);
@@ -637,10 +743,10 @@ static void deliver(app *a, char *message) {
     SDL_free(message);
 }
 
-static void take_replies(app *a) {
+static void take_from(app *a, gear_relay *relay) {
     char error[512];
     bool failed;
-    for (char *r; a->relay && ((r = gear_relay_take(a->relay, &failed, error, sizeof error)) || failed);) {
+    for (char *r; relay && ((r = gear_relay_take(relay, &failed, error, sizeof error)) || failed);) {
         if (failed) { SDL_strlcpy(a->fault, error, sizeof a->fault); break; }
         a->fault[0] = 0;
         printf("%s\n", r);
@@ -651,6 +757,40 @@ static void take_replies(app *a) {
         gear_say_speak(a->say, spoken);
         SDL_free(spoken);
     }
+}
+
+// Replies from the agent sent to now, and from those sent to before that still owed one.
+static void take_replies(app *a) {
+    take_from(a, a->relay);
+    for (int i = 0; i < 4; i++) {
+        if (!a->earlier[i]) continue;
+        take_from(a, a->earlier[i]);
+        if (!gear_relay_waiting(a->earlier[i])) gear_relay_free(a->earlier[i]), a->earlier[i] = NULL;
+    }
+}
+
+// The agent chosen in the target menu: messages go to it from now on, and a start without --to comes
+// back to it. A reply the agent before still owes is read when it comes.
+static void switch_target(app *a, const gear_agent *agent) {
+    if (a->relay && gear_relay_waiting(a->relay)) {
+        int i = 0;
+        while (i < 4 && a->earlier[i]) i++;
+        if (i == 4) gear_relay_free(a->earlier[0]), SDL_memmove(a->earlier, a->earlier + 1, 3 * sizeof *a->earlier), i = 3;
+        a->earlier[i] = a->relay;
+    } else gear_relay_free(a->relay);
+    a->relay = gear_relay_new(agent->name);
+    SDL_strlcpy(a->to_name, agent->name, sizeof a->to_name);
+    if (*agent->tab && SDL_strcasecmp(agent->tab, agent->name)) SDL_snprintf(a->target, sizeof a->target, "→ %s (%s, %s)", agent->tab, agent->name, agent->harness);
+    else SDL_snprintf(a->target, sizeof a->target, "→ %s (%s)", agent->name, agent->harness);
+    gear_target_remember(a->o->models, agent->name, gear_agent_host());
+}
+
+// The target menu's agents asked for again, each time it opens, so a new tab shows up.
+static void list_agents(app *a) {
+    if (a->list && !SDL_GetAtomicInt(&a->list->done)) return;
+    if (a->list) SDL_WaitThread(a->list->thread, NULL), SDL_free(a->list);
+    a->list = SDL_calloc(1, sizeof *a->list);
+    a->list->thread = SDL_CreateThread(list_run, "gear-agents", a->list);
 }
 
 // A model file's name without its extension: parakeet-tdt_ctc-110m-Q4_K_M.gguf reads parakeet-tdt_ctc-110m-Q4_K_M.
@@ -790,6 +930,8 @@ static void close_loop(app *a) {
     gs_loopback_close(a->loopback);
     gear_vad_free(a->vad);
     gear_relay_free(a->relay);
+    for (int i = 0; i < 4; i++) gear_relay_free(a->earlier[i]);
+    if (a->list) SDL_WaitThread(a->list->thread, NULL), SDL_free(a->list);
     gear_say_close(a->say);
     if (a->say) gs_mix_close();
     gear_hear_close(a->hear);
@@ -913,19 +1055,27 @@ int gear_window(const gear_window_options *o) {
         } else fill(&a, &v);
         SDL_SetRenderDrawColorFloat(ren, BACKGROUND.r, BACKGROUND.g, BACKGROUND.b, 1);
         SDL_RenderClear(ren);
+        bool modal = picking;  // (the picker takes the frame's keys, including the Enter or Esc that closes it)
         draw(ui, &v);
         if (a.pipe) {  // the keys, after the frame has seen them
-            if (gs_ui_key(ui, SDLK_SPACE, 0)) {
+            if (!modal && gs_ui_key(ui, SDLK_SPACE, 0)) {
                 a.muted = !a.muted;
                 a.muted_at = SDL_GetTicks(), a.muted_frames = 0;
                 if (a.muted) SDL_PauseAudioStreamDevice(a.mic);
                 else SDL_ClearAudioStream(a.mic), SDL_ResumeAudioStreamDevice(a.mic);
             }
-            if (gs_ui_key(ui, SDLK_ESCAPE, 0)) {
+            if (!modal && gs_ui_key(ui, SDLK_ESCAPE, 0)) {
                 if (gear_say_busy(a.say)) gear_say_stop(a.say);
                 else gear_pipeline_cancel(a.pipe);
             }
             if (gs_ui_clicked(ui, status_line)) switch_hear(&a);
+            if (!modal && (gs_ui_clicked(ui, target_label) || gs_ui_key(ui, SDLK_TAB, 0))) {
+                list_agents(&a);
+                picking = pick_opened = true;
+                pick_filter[0] = 0;
+            }
+            if (pick_choice >= 0 && a.list && pick_choice < a.list->count) switch_target(&a, &a.list->agents[pick_choice]);
+            pick_choice = -1;
             if (gs_ui_clicked(ui, voice_part)) switch_voice(&a);
             if (gs_ui_clicked(ui, build_label)) {
                 if (gs_update_ready(a.update)) restart = true, running = false;  // restart now
@@ -943,13 +1093,14 @@ int gear_window(const gear_window_options *o) {
                 gear_pipeline_set_countdown(a.pipe, a.countdown);
                 gear_countdown_remember(o->models, a.countdown);
             }
-            if (gs_ui_key(ui, SDLK_RETURN, 0)) {
+            if (!modal && gs_ui_key(ui, SDLK_RETURN, 0)) {
                 char *message = gear_pipeline_take(a.pipe);
                 if (message) deliver(&a, message);
             }
         }
-        if (gs_ui_key(ui, SDLK_EQUALS, 0) || gs_ui_key(ui, SDLK_PLUS, 0) || gs_ui_key(ui, SDLK_KP_PLUS, 0)) px = SDL_min(px + 1, 28);
-        if (gs_ui_key(ui, SDLK_MINUS, 0) || gs_ui_key(ui, SDLK_KP_MINUS, 0)) px = SDL_max(px - 1, 10);
+        if (modal) {}
+        else if (gs_ui_key(ui, SDLK_EQUALS, 0) || gs_ui_key(ui, SDLK_PLUS, 0) || gs_ui_key(ui, SDLK_KP_PLUS, 0)) px = SDL_min(px + 1, 28);
+        if (!modal && (gs_ui_key(ui, SDLK_MINUS, 0) || gs_ui_key(ui, SDLK_KP_MINUS, 0))) px = SDL_max(px - 1, 10);
         if (o->shot && ++frames >= 3 && gs_ui_wait_ms(ui) != 0) {
             code = gs_draw_save_png(ren, o->shot) ? 0 : 1;
             running = false;
