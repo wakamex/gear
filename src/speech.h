@@ -1,14 +1,14 @@
 // Telling speech from the other sounds a voice makes. The voice detector starts a piece for a throat
 // clear, a cough, a sigh or a laugh as it does for a word, and the recognizer writes words into some of
 // them ("Okay", "um", "oh", "ha ha"), which would go to the agent as a message. A piece the recognizer
-// wrote words into is scored from what the two voice detectors and the recognizer made of it. The score
-// is kept with each piece heard but drops none: fitted on close-microphone recordings, it dropped speech
-// over music and from across the room in real use.
+// wrote words into is scored from what the two voice detectors and the recognizer made of it, and one
+// that scores under the cut is dropped.
 //
 // The score is a model (src/speech_model.h, written by tools/fit-speech-model) fitted on pieces cut by
 // gear's own listener from public recordings: single words (Speech Commands) and read sentences
 // (LibriSpeech) as speech, and coughs, throat clearing, sighs, sneezes, sniffs and laughter (VocalSound)
-// as the rest. No input grows with a piece's length, so a long sentence is not taken for a long sigh.
+// as the rest, each as recorded and again as heard in a room (tools/room-mix): with echo, quieter or
+// louder, and music or noise under it. No input grows with a piece's length, so a long sentence is not taken for a long sigh.
 #pragma once
 #include "hear.h"
 

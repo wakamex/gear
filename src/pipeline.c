@@ -311,9 +311,7 @@ static void drain(gear_pipeline *p) {
         if (refer && !played) return;  // (the speakers' text is still being made)
         char *t = p->waiting;
         p->waiting = NULL;
-        // Whether the piece is speech at all, by its score, kept for refitting the model; one with no words
-        // or no scores is not judged. A piece under the cut still joins the message: in real use the model
-        // dropped speech over music and from across the room (6 of 16 pieces, at least 4 of them speech).
+        // Whether the piece is speech at all, by its score; one with no words or no scores is not judged.
         float in[GEAR_SPEECH_INPUTS], score = 1;
         bool scored = p->ref_count && p->scores.tokens;
         if (scored) gear_speech_inputs(&p->heard[p->ref_head], &p->scores, in), score = gear_speech_score(in);
@@ -323,9 +321,9 @@ static void drain(gear_pipeline *p) {
         bool played_back = played && mostly_in(t, played);
         if (SDL_getenv("GEAR_DEBUG"))
             SDL_Log("gear: heard \"%s\" (speech %.2f)%s%s%s%s", t, score, played ? ", the speakers \"" : "", played ? played : "", played ? "\"" : "",
-                    played_back ? ": the speakers' sound, dropped" : other ? ": under the speech cut" : "");
+                    other ? ": not speech, dropped" : played_back ? ": the speakers' sound, dropped" : "");
         keep_text(p, t, scored ? in : NULL, score);
-        if (!played_back) append(p, t);
+        if (!other && !played_back) append(p, t);
         SDL_free(t);
         SDL_free(played);
     }

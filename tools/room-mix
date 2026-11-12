@@ -1,0 +1,186 @@
+#!/usr/bin/env -S uv run --no-project --with pyroomacoustics --with soundfile --with scipy --with numpy python3
+"""Speech and other sounds of the voice as heard in a room, for fitting the speech score (tools/fit-speech-model).
+
+    tools/room-mix mix OUT MUSAN SPEECH_COMMANDS LIBRISPEECH VOCALSOUND [--other 6000]
+    for f in OUT/*.wav; do gear --countdown 0 --keep KEEP/$(basename $f .wav) hear $f; done
+    tools/room-mix rows OUT KEEP > rows.jsonl
+
+`mix` takes each clip (Speech Commands words and LibriSpeech sentences as speech, VocalSound's coughs, throat
+clearing, sighs, sneezes, sniffs and laughter as the rest), puts it in a random room 0.5 to 4 m from the
+microphone with 70% chance, mixes instrumental music from MUSAN under it with 60% chance (at -5 to 15 dB under
+it) and MUSAN noise with 30% (5 to 20 dB), and sets its level between a distant talk and a shout. Both classes
+get the same treatment, so the mix says nothing of the label. Clips of one class are packed by whole speakers
+into long files with 1.5 s of silence between them, and OUT/files.jsonl names each file's class. `gear hear
+--keep` then cuts and scores them as gear does live; `rows` turns what it kept into rows for fitting, grouped
+by file so held-out speakers are wholly held out.
+
+The folders: MUSAN as unpacked (music/*/ANNOTATIONS, whose third column says whether a track is sung; sung
+tracks are left out, since their words would be taken for the clip's), Speech Commands' class folders,
+LibriSpeech utterances as 16 kHz WAV files named SPEAKER-CHAPTER-N.wav, and VocalSound's audio_16k folder.
+"""
+
+import argparse
+import glob
+import json
+import os
+import random
+import sys
+
+import numpy as np
+import soundfile as sf
+
+RATE = 16000
+
+
+def clips(commands, libri, vocalsound):
+    """(path, label, kind, speaker) for every clip."""
+    out = []
+    for p in glob.glob(os.path.join(commands, "*", "*.wav")):
+        if p.split("/")[-2] != "_silence_":
+            out.append((p, 1, "one word", "sc-" + os.path.basename(p).split("_")[0]))
+    for p in glob.glob(os.path.join(libri, "*.wav")):
+        out.append((p, 1, "sentence", "ls-" + os.path.basename(p).split("-")[0]))
+    for p in glob.glob(os.path.join(vocalsound, "*.wav")):
+        speaker, _, kind = os.path.basename(p)[:-4].split("_")
+        out.append((p, 0, kind, "vs-" + speaker))
+    return out
+
+
+def load(path):
+    x, r = sf.read(path, dtype="float32", always_2d=True)
+    x = x.mean(axis=1)
+    if r != RATE:
+        from scipy.signal import resample_poly
+        x = resample_poly(x, RATE, r).astype(np.float32)
+    return x
+
+
+def active_rms(x):
+    """The RMS over the loudest half of 20 ms frames, so the silence around a word does not lower it."""
+    f = x[: len(x) // 320 * 320].reshape(-1, 320)
+    e = np.sort((f ** 2).mean(axis=1))[::-1]
+    return float(np.sqrt(e[: max(1, len(e) // 2)].mean()) + 1e-9)
+
+
+def room(rng):
+    """A random room's impulse response, the talker 0.5 to 4 m from the microphone."""
+    import pyroomacoustics as pra
+    dims = np.array([rng.uniform(3, 8), rng.uniform(3, 6), rng.uniform(2.5, 3.5)])
+    absorption, order = pra.inverse_sabine(rng.uniform(0.2, 0.8), dims)
+    r = pra.ShoeBox(dims, fs=RATE, materials=pra.Material(absorption), max_order=min(order, 20))
+    mic = dims * np.array([rng.uniform(0.2, 0.8), rng.uniform(0.2, 0.8), 0]) + np.array([0, 0, rng.uniform(0.7, 1.2)])
+    src = dims / 2
+    for _ in range(50):
+        d, a = rng.uniform(0.5, 4.0), rng.uniform(0, 2 * np.pi)
+        s = mic + np.array([d * np.cos(a), d * np.sin(a), rng.uniform(0.3, 0.8)])
+        if np.all(s > 0.1) and np.all(s < dims - 0.1):
+            src = s
+            break
+    r.add_source(src)
+    r.add_microphone(mic)
+    r.compute_rir()
+    return np.array(r.rir[0][0], dtype=np.float32)
+
+
+def background(pool, n, rng):
+    x = load(rng.choice(pool))
+    if len(x) < n:
+        x = np.tile(x, n // len(x) + 1)
+    at = rng.randint(0, len(x) - n)
+    return x[at: at + n]
+
+
+def augment(x, music, noise, rng):
+    """The clip with 0.5 s either side as heard in a room, and what was done to it."""
+    from scipy.signal import fftconvolve
+    pad = np.zeros(RATE // 2, np.float32)
+    x = np.concatenate([pad, x, pad])
+    how = {}
+    if rng.random() < 0.7:
+        x = fftconvolve(x, room(rng))[: len(x)].astype(np.float32)
+        how["room"] = 1
+    level = active_rms(x)
+    for pool, chance, low, high, key in ((music, 0.6, -5, 15, "music_snr"), (noise, 0.3, 5, 20, "noise_snr")):
+        if rng.random() < chance:
+            snr = rng.uniform(low, high)
+            b = background(pool, len(x), rng)
+            x = x + b * (level / active_rms(b)) * 10 ** (-snr / 20)
+            how[key] = round(snr, 1)
+    x = x * (10 ** (rng.uniform(-40, -15) / 20) / active_rms(x))
+    peak = float(np.abs(x).max())
+    if peak > 0.98:
+        x = x * (0.98 / peak)
+    how["level_db"] = round(20 * np.log10(active_rms(x)), 1)
+    return x.astype(np.float32), how
+
+
+def mix(a):
+    rng = random.Random(1)
+    np.random.seed(1)
+    music = []
+    for ann in glob.glob(os.path.join(a.musan, "music", "*", "ANNOTATIONS")):
+        for line in open(ann):
+            parts = line.split()
+            if len(parts) >= 3 and parts[2] == "N":
+                music.append(os.path.join(os.path.dirname(ann), parts[0] + ".wav"))
+    noise = glob.glob(os.path.join(a.musan, "noise", "*", "*.wav"))
+    print(f"music without vocals: {len(music)} files; noise: {len(noise)} files", file=sys.stderr)
+    every = clips(a.commands, a.libri, a.vocalsound)
+    speech = [c for c in every if c[1] == 1]
+    other = [c for c in every if c[1] == 0]
+    rng.shuffle(other)
+    other = other[: a.other]
+    os.makedirs(a.out, exist_ok=True)
+    manifest = open(os.path.join(a.out, "files.jsonl"), "w")
+    gap = np.zeros(int(1.5 * RATE), np.float32)
+    for label, chosen in ((1, speech), (0, other)):
+        by = {}
+        for c in chosen:
+            by.setdefault(c[3], []).append(c)
+        speakers = sorted(by)
+        rng.shuffle(speakers)
+        files, cur = [], []
+        for s in speakers:
+            cur += by[s]
+            if len(cur) >= 60:
+                files.append(cur)
+                cur = []
+        if cur:
+            files.append(cur)
+        for i, group in enumerate(files):
+            name = f"{'speech' if label else 'other'}-{i:04d}"
+            parts, hows = [gap], []
+            for path, _, kind, speaker in group:
+                x, how = augment(load(path), music, noise, rng)
+                parts += [x, gap]
+                hows.append(dict(how, kind=kind, speaker=speaker))
+            sf.write(os.path.join(a.out, name + ".wav"), np.concatenate(parts), RATE, subtype="PCM_16")
+            manifest.write(json.dumps({"file": name, "y": label, "clips": hows}) + "\n")
+        print(f"{'speech' if label else 'other'}: {len(chosen)} clips in {len(files)} files", file=sys.stderr)
+
+
+def rows(a):
+    for line in open(os.path.join(a.out, "files.jsonl")):
+        f = json.loads(line)
+        kept = os.path.join(a.keep, f["file"], "heard.jsonl")
+        for piece in (json.loads(l) for l in open(kept)) if os.path.exists(kept) else []:
+            if "inputs" in piece:
+                print(json.dumps({"y": f["y"], "group": f["file"], "kind": "room speech" if f["y"] else "room other", "in": piece["inputs"]}))
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    m = sub.add_parser("mix")
+    for name in ("out", "musan", "commands", "libri", "vocalsound"):
+        m.add_argument(name)
+    m.add_argument("--other", type=int, default=6000, help="VocalSound clips to use (default 6000)")
+    r = sub.add_parser("rows")
+    r.add_argument("out")
+    r.add_argument("keep")
+    a = ap.parse_args()
+    mix(a) if a.cmd == "mix" else rows(a)
+
+
+if __name__ == "__main__":
+    main()

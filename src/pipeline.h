@@ -34,7 +34,7 @@ void gear_pipeline_set_hear(gear_pipeline *p, gear_hear *hear, const char *model
 // same stretch is transcribed after it, and the piece's text is dropped when at least three in four of
 // its words are in theirs: a reply, a video or a call heard through the speakers, which the echo
 // canceller let through, rather than the user. Its text joins the message only once both are in. A
-// piece's speech score (speech.h) is kept with what is heard, and does not drop it.
+// piece whose words score as another sound of the voice than speech (speech.h) is dropped as well.
 void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played);
 // Collects finished transcriptions. Returns the message when its countdown has run out (SDL_free it),
 // and starts the next one; NULL otherwise.
