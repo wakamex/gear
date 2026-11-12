@@ -1000,6 +1000,7 @@ int gear_window(const gear_window_options *o) {
     bool restart = false;
     for (bool running = true; running;) {
         SDL_Event e;
+        bool tab = false;
         if (SDL_WaitEventTimeout(&e, 10)) {
             do {
                 if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
@@ -1010,7 +1011,9 @@ int gear_window(const gear_window_options *o) {
                 if (e.type == SDL_EVENT_MOUSE_WHEEL && e.wheel.mouse_x >= volume_slider.x && e.wheel.mouse_x < volume_slider.x + volume_slider.w &&
                     e.wheel.mouse_y >= volume_slider.y - 6 && e.wheel.mouse_y < volume_slider.y + volume_slider.h + 6)
                     volume = SDL_clamp(volume + 0.05f * (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y), 0, 2);
-                gs_ui_event(ui, &e);
+                // Tab opens the picker, so the UI never sees it to move the keyboard to the volume slider.
+                if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_TAB && !(e.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_SHIFT)) && !picking) tab = true;
+                else gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
         bool busy = fetching;
@@ -1069,7 +1072,7 @@ int gear_window(const gear_window_options *o) {
                 else gear_pipeline_cancel(a.pipe);
             }
             if (gs_ui_clicked(ui, status_line)) switch_hear(&a);
-            if (!modal && (gs_ui_clicked(ui, target_label) || gs_ui_key(ui, SDLK_TAB, 0))) {
+            if (!modal && (gs_ui_clicked(ui, target_label) || tab)) {
                 list_agents(&a);
                 picking = pick_opened = true;
                 pick_filter[0] = 0;
