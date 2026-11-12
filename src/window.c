@@ -66,7 +66,7 @@ typedef struct {
 
 static float px, small;  // the text size and the small size, in points
 static gs_rect status_line;  // where the status bar's first line was drawn, for a click on it
-static gs_rect target_label; // the target agent in the state line, which a click (or Tab) opens the picker on
+static gs_rect target_label; // the target agent in the state line, which a click (or /) opens the picker on
 // The send-to picker: open, what is typed to narrow it, and the agent chosen this frame (an index
 // into the lister's agents), else -1.
 static bool picking, pick_opened;
@@ -135,6 +135,7 @@ static void state_line(gs_ui *ui, gs_rect r, const view *v) {
 // Esc (on an empty field) closes it.
 static void picker(gs_ui *ui, const view *v) {
     if (!picking) return;
+    if (pick_filter[0] == '/') SDL_memmove(pick_filter, pick_filter + 1, SDL_strlen(pick_filter));  // (the / that opened it)
     float row = gs_ui_line_height(ui, px) + 8, field = row + 4;
     int rows = v->agents_note ? 1 : v->agents_count + (v->agents_more > 0);
     gs_rect m = gs_ui_modal_begin(ui, 460, 20 + small * 1.6f + field + 10 + row * (float)SDL_max(rows, 1) + 16);
@@ -1000,7 +1001,6 @@ int gear_window(const gear_window_options *o) {
     bool restart = false;
     for (bool running = true; running;) {
         SDL_Event e;
-        bool tab = false;
         if (SDL_WaitEventTimeout(&e, 10)) {
             do {
                 if (e.type == SDL_EVENT_QUIT || e.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED) running = false;
@@ -1011,9 +1011,7 @@ int gear_window(const gear_window_options *o) {
                 if (e.type == SDL_EVENT_MOUSE_WHEEL && e.wheel.mouse_x >= volume_slider.x && e.wheel.mouse_x < volume_slider.x + volume_slider.w &&
                     e.wheel.mouse_y >= volume_slider.y - 6 && e.wheel.mouse_y < volume_slider.y + volume_slider.h + 6)
                     volume = SDL_clamp(volume + 0.05f * (e.wheel.direction == SDL_MOUSEWHEEL_FLIPPED ? -e.wheel.y : e.wheel.y), 0, 2);
-                // Tab opens the picker, so the UI never sees it to move the keyboard to the volume slider.
-                if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_TAB && !(e.key.mod & (SDL_KMOD_CTRL | SDL_KMOD_ALT | SDL_KMOD_SHIFT)) && !picking) tab = true;
-                else gs_ui_event(ui, &e);
+                gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
         bool busy = fetching;
@@ -1072,7 +1070,7 @@ int gear_window(const gear_window_options *o) {
                 else gear_pipeline_cancel(a.pipe);
             }
             if (gs_ui_clicked(ui, status_line)) switch_hear(&a);
-            if (!modal && (gs_ui_clicked(ui, target_label) || tab)) {
+            if (!modal && (gs_ui_clicked(ui, target_label) || gs_ui_key(ui, SDLK_SLASH, 0))) {
                 list_agents(&a);
                 picking = pick_opened = true;
                 pick_filter[0] = 0;

@@ -89,11 +89,11 @@ The window is to be drawn with gesso's `gs_ui` in the toolcore-native style: war
 └──────────────────────────────────────────────────────────┘
 ```
 
-- State line: a dot and one word, LISTENING (green), HEARING, SENDING or SPEAKING (amber), MUTED or an error (rust); the target agent, which a click on it or Tab changes: a picker lists the agents Wakterm knows by the title their tab shows, the ones sent to lately first, and typing narrows them to those whose tab or name has what is typed; Enter takes the first, a click any, and Esc closes it. Messages go to the agent picked from then on, a start without `--to` comes back to it, and a reply the agent before still owes is read when it comes; and a microphone level meter, so the user can see they are heard before the words arrive.
+- State line: a dot and one word, LISTENING (green), HEARING, SENDING or SPEAKING (amber), MUTED or an error (rust); the target agent, which a click on it or `/` changes: a picker lists the agents Wakterm knows by the title their tab shows, the ones sent to lately first, and typing narrows them to those whose tab or name has what is typed; Enter takes the first, a click any, and Esc closes it. Messages go to the agent picked from then on, a start without `--to` comes back to it, and a reply the agent before still owes is read when it comes; and a microphone level meter, so the user can see they are heard before the words arrive.
 - Message: the words appear as they are said, those of the piece still being spoken dim until its own transcription replaces them, and a piece waiting for its text shows as a dim ellipsis. The countdown is an amber bar draining under the text, with its keys printed beside it. Clicking into the text to fix a misheard word stops the countdown.
 - Reply: the sentence being read is bright, what was read is dim, what is to come is muted. Code and tables the reading skips stay visible in a box marked as not read. Esc or talking stops the reading.
 - Status bar: whether echo cancellation is on (or that headphones are needed), what is loaded, memory in use; a fault replaces it in rust.
-- Keys: Space mutes the microphone, Esc cancels the message or stops the reading, Enter sends now, Tab changes the target, `+` and `-` change the font size.
+- Keys: Space mutes the microphone, Esc cancels the message or stops the reading, Enter sends now, `/` changes the target, `+` and `-` change the font size.
 - Tray: gear can wait in the tray with its icon in the state's colour, and the window can collapse to the state line and message panel as a strip at the screen's edge.
 
 ### Speech recognition: parakeet-ft-v1 Q4_K_M on transcribe.cpp
