@@ -15,6 +15,7 @@
 #include "pipeline.h"
 #include "relay.h"
 #include "say.h"
+#include "serve.h"
 #include "speakable.h"
 #include "wav.h"
 #include "window.h"
@@ -35,6 +36,8 @@ static const char usage[] =
     "       gear listen --to AGENT             talk to AGENT; its replies are read aloud\n"
     "       gear listen [--speak-back]         talk; each message is printed, and read back with --speak-back\n"
     "       gear send --to AGENT TEXT          send TEXT to AGENT and print its reply\n"
+    "       gear serve                         for a client over SSH (the Android app): framed audio and text on\n"
+    "                                          standard input and output, as src/serve.h describes\n"
     "       gear read TEXT|-                   what would be read aloud of a reply (- reads standard input)\n"
     "       gear hear FILE.wav                 the pipeline on a recording, as if spoken\n"
     "       gear say TEXT OUT.wav              speak TEXT through the player, recorded to OUT.wav\n"
@@ -417,6 +420,7 @@ int main(int argc, char **argv) {
     else if (!SDL_strcmp(args[0], "read") && nargs == 2) rc = read_text(args[1]);
     else if (!SDL_strcmp(args[0], "listen") && nargs == 1) rc = listen_live();
     else if (!SDL_strcmp(args[0], "hear") && nargs == 2) rc = hear_file(args[1]);
+    else if (!SDL_strcmp(args[0], "serve") && nargs == 1) { const char *dir = models(); rc = dir ? gear_serve(dir, opt.hear_threads, opt.say_threads) : 1; }
     else if (!SDL_strcmp(args[0], "say") && nargs == 3) rc = say_file(args[1], args[2]);
     else if (!SDL_strcmp(args[0], "interrupt") && nargs == 4) rc = interrupt_file(args[1], args[2], args[3]);
     else fputs(usage, stderr);

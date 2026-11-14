@@ -34,6 +34,14 @@ The spoken loop runs end to end, from microphone to message and from reply text 
 
 Not built yet: the reply's sentence being read shown bright, editing a misheard word in the message, changing the target from the window, the tray, and sending to a terminal pane that runs no agent.
 
+## Phone app
+
+The phone app is a character to hold while talking. Held, it listens, and what is said goes as it is said to gear on the computer, over [Secure Shell (SSH)](https://www.openssh.com/); let go, it is transcribed there and sent to the agent, and the agent's reply comes back as text and as speech in alba or mary, played as it is made. Holding it again while it speaks stops the reply. The agent's name at the top picks another agent, by its tab's title, and the voice at the right switches voice. The computer does the recognition, the agent and the speech with the same models as the window, so the phone only records, plays and draws; the app is 3.5 MB.
+
+- Connection: the app makes its own [Elliptic Curve Digital Signature Algorithm (ECDSA)](https://en.wikipedia.org/wiki/Elliptic_Curve_Digital_Signature_Algorithm) P-256 key the first time, kept with gesso's `gs_secret` (sealed by an Android Keystore key), and signs in with it alone. Settings show the key as a line for the computer's `~/.ssh/authorized_keys`, `command="gear serve",restrict ecdsa-sha2-nistp256 ...`, so the key can run gear's server mode and nothing else: no shell, no forwarding. The computer's own key is pinned the first time it is seen, and a different one later stops the connection. SSH is [libssh2](https://libssh2.org/) over [Mbed TLS](https://www.trustedfirmware.org/projects/mbed-tls/), compiled from their sources by `build.zig`; the app signs with Mbed TLS itself, since libssh2's Mbed TLS code reads a private key from memory only when the byte after it is zero, which it never writes.
+- Server: `gear serve` reads and writes framed messages on standard input and output, as `src/serve.h` describes, with the computer's models folder, remembered agent and voice. Through SSH to this computer, a sentence held for 4.4 s came back transcribed 0.15 s after it was let go, and its reply finished speaking 0.24 s after that, on an RTX 3090 once the GPU had compiled its shaders; the first run took 5.9 s for them.
+- Build: `tools/android-apk arm64-v8a` builds `zig-out/android/gear.apk` with the Android SDK and Native Development Kit (NDK) and no Gradle, as gink does. `gear-phone`, built beside `gear` on Linux, is the same app on the computer: `gear-phone --say FILE.wav HOST USER` connects as the phone does, sends a recording and prints what comes back, and `gear-phone --shot FILE setup|talk` draws a screen to a picture.
+
 ## Roadmap
 
 1. macOS: build and test on a Mac, where the speakers cannot be recorded for the echo canceller yet.

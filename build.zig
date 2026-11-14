@@ -4,14 +4,60 @@
 //   zig build -Dgpu=none       CPU only; the default runs the models on the GPU where one is usable,
 //                              and needs the glslc shader compiler to build (-Dglslc=PATH)
 //   zig build test             run the tests (the end-to-end ones need the models; see README)
+//   zig build -Dtarget=aarch64-linux-android.29 -Dandroid_ndk=PATH   the phone app's libmain.so (tools/android-apk packs it)
 const std = @import("std");
+const gesso_build = @import("gesso");
 
 const flags: []const []const u8 = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-missing-field-initializers" };
-const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "record.c", "speakable.c", "speech.c", "transcript.c", "vad.c", "window.c" };
+const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "serve.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "record.c", "speakable.c", "speech.c", "transcript.c", "vad.c", "window.c" };
+
+// The phone app's own sources (src/phone), and what it needs of mbedTLS: its cryptography, for libssh2
+// and the phone's key, without TLS and certificates.
+const phone_sources: []const []const u8 = &.{ "main.c", "key.c", "link.c" };
+const mbedtls_sources: []const []const u8 = &.{ "aes.c", "aesce.c", "aesni.c", "aria.c", "asn1parse.c", "asn1write.c", "base64.c", "bignum.c", "bignum_core.c", "bignum_mod.c", "bignum_mod_raw.c", "block_cipher.c", "camellia.c", "ccm.c", "chacha20.c", "chachapoly.c", "cipher.c", "cipher_wrap.c", "cmac.c", "constant_time.c", "ctr_drbg.c", "des.c", "dhm.c", "ecdh.c", "ecdsa.c", "ecjpake.c", "ecp.c", "ecp_curves.c", "ecp_curves_new.c", "entropy.c", "entropy_poll.c", "error.c", "gcm.c", "hkdf.c", "hmac_drbg.c", "lmots.c", "lms.c", "md5.c", "md.c", "memory_buffer_alloc.c", "nist_kw.c", "oid.c", "padlock.c", "pem.c", "pk.c", "pkcs12.c", "pkcs5.c", "pk_ecc.c", "pkparse.c", "pk_wrap.c", "pkwrite.c", "platform.c", "platform_util.c", "poly1305.c", "psa_crypto_aead.c", "psa_crypto.c", "psa_crypto_cipher.c", "psa_crypto_client.c", "psa_crypto_driver_wrappers_no_static.c", "psa_crypto_ecp.c", "psa_crypto_ffdh.c", "psa_crypto_hash.c", "psa_crypto_mac.c", "psa_crypto_pake.c", "psa_crypto_rsa.c", "psa_crypto_se.c", "psa_crypto_slot_management.c", "psa_crypto_storage.c", "psa_its_file.c", "psa_util.c", "ripemd160.c", "rsa_alt_helpers.c", "rsa.c", "sha1.c", "sha256.c", "sha3.c", "sha512.c", "threading.c", "timing.c", "version.c", "version_features.c" };
+const libssh2_sources: []const []const u8 = &.{ "agent.c", "bcrypt_pbkdf.c", "blowfish.c", "chacha.c", "channel.c", "cipher-chachapoly.c", "comp.c", "crypt.c", "crypto.c", "global.c", "hostkey.c", "keepalive.c", "kex.c", "knownhost.c", "mac.c", "misc.c", "packet.c", "pem.c", "poly1305.c", "publickey.c", "scp.c", "session.c", "sftp.c", "transport.c", "userauth.c", "userauth_kbd_packet.c", "version.c" };
+
+// libssh2 over mbedTLS, as one static library, with their headers for the app.
+fn sshLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.builtin.OptimizeMode) *std.Build.Step.Compile {
+    const mbedtls = b.dependency("mbedtls", .{});
+    const libssh2 = b.dependency("libssh2", .{});
+    const mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .pic = true });
+    mod.addIncludePath(mbedtls.path("include"));
+    mod.addIncludePath(mbedtls.path("library"));
+    mod.addCSourceFiles(.{ .root = mbedtls.path("library"), .files = mbedtls_sources, .flags = &.{ "-std=c99", "-w" } });
+    mod.addIncludePath(libssh2.path("include"));
+    mod.addIncludePath(libssh2.path("src"));
+    mod.addCSourceFiles(.{ .root = libssh2.path("src"), .files = libssh2_sources, .flags = &.{
+        "-std=c99", "-w", "-D_POSIX_C_SOURCE=200809L", "-D_DEFAULT_SOURCE", "-DLIBSSH2_MBEDTLS", "-DHAVE_UNISTD_H", "-DHAVE_INTTYPES_H", "-DHAVE_SYS_SELECT_H",
+        "-DHAVE_SYS_UIO_H", "-DHAVE_SYS_SOCKET_H", "-DHAVE_SYS_IOCTL_H", "-DHAVE_SYS_TIME_H", "-DHAVE_SYS_UN_H", "-DHAVE_SYS_PARAM_H", "-DHAVE_ARPA_INET_H",
+        "-DHAVE_NETINET_IN_H", "-DHAVE_O_NONBLOCK", "-DHAVE_POLL", "-DHAVE_GETTIMEOFDAY", "-DHAVE_STRTOLL", "-DHAVE_SNPRINTF",
+    } });
+    const lib = b.addLibrary(.{ .linkage = .static, .name = "ssh", .root_module = mod });
+    lib.installHeadersDirectory(libssh2.path("include"), "", .{});
+    lib.installHeadersDirectory(mbedtls.path("include"), "", .{});
+    return lib;
+}
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    // On Android only the phone app: libmain.so, which SDL's activity loads and runs main() from.
+    if (target.result.abi.isAndroid()) {
+        const android_ndk = b.option([]const u8, "android_ndk", "Android NDK root, for building for Android") orelse @panic("-Dandroid_ndk=PATH is needed to build for Android");
+        const gesso_dep = b.dependency("gesso", .{ .target = target, .optimize = optimize, .android_ndk = android_ndk });
+        const mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .strip = optimize != .debug, .pic = true });
+        mod.addCSourceFiles(.{ .root = b.path("src/phone"), .files = phone_sources, .flags = flags });
+        mod.linkLibrary(gesso_dep.artifact("gesso"));
+        const ssh = sshLibrary(b, target, optimize);
+        gesso_build.useNdk(ssh, gesso_dep);  // (the NDK's C library, which libssh2 and mbedTLS need as SDL does)
+        mod.linkLibrary(ssh);
+        for ([_][]const u8{ "log", "dl", "m" }) |lib| mod.linkSystemLibrary(lib, .{});
+        const lib = b.addLibrary(.{ .linkage = .dynamic, .name = "main", .root_module = mod });
+        gesso_build.useNdk(lib, gesso_dep);
+        b.installArtifact(lib);
+        b.installDirectory(.{ .source_dir = gesso_dep.namedLazyPath("android_java"), .install_dir = .prefix, .install_subdir = "java" });
+        return;
+    }
     const echo = b.option(bool, "echo", "Give gs_voice WebRTC's echo canceller, for playing replies through loudspeakers") orelse false;
     const gesso = b.dependency("gesso", .{ .target = target, .optimize = optimize, .echo = echo }).artifact("gesso");
     const gpu = b.option(enum { none, vulkan }, "gpu", "Run the models on a GPU where one is usable, else on the CPU (default vulkan)") orelse .vulkan;
@@ -37,6 +83,15 @@ pub fn build(b: *std.Build) void {
     // The window's font, Clanker Mono (D2Coding's glyphs, under the SIL Open Font License), beside the program.
     b.installBinFile("assets/ClankerMono-Regular.ttf", "ClankerMono-Regular.ttf");
     b.installBinFile("assets/ClankerMono-LICENSE.txt", "ClankerMono-LICENSE.txt");
+
+    // The phone app built for this computer too, to try it against a server without a phone.
+    if (target.result.os.tag != .windows) {
+        const phone = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .strip = optimize != .debug });
+        phone.addCSourceFiles(.{ .root = b.path("src/phone"), .files = phone_sources, .flags = flags });
+        phone.linkLibrary(gesso);
+        phone.linkLibrary(sshLibrary(b, target, optimize));
+        b.installArtifact(b.addExecutable(.{ .name = "gear-phone", .root_module = phone }));
+    }
 
     const tests = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true });
     tests.addCSourceFiles(.{ .root = b.path("src"), .files = sources, .flags = flags });
