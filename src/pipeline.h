@@ -17,9 +17,14 @@
 
 typedef struct gear_pipeline gear_pipeline;
 
-// `say` may be NULL (nothing to interrupt). The pipeline does not own its parts.
+// `say` may be NULL (nothing to interrupt, or a player set with gear_pipeline_set_speaker). The
+// pipeline does not own its parts.
 gear_pipeline *gear_pipeline_new(gs_voice *voice, gear_vad *vad, gear_hear *hear, gear_say *say, const gear_listen_params *listen, double countdown);
 void gear_pipeline_free(gear_pipeline *p);
+// A player of replies that is not a gear_say, for gear serve, whose replies play on the phone: whether
+// one is being spoken, and stopping it, for talking over it as over gear_say's.
+typedef struct { bool (*busy)(void *user); void (*stop)(void *user); void *user; } gear_speaker;
+void gear_pipeline_set_speaker(gear_pipeline *p, const gear_speaker *s);
 // Keeps what is heard in `dir`, for training a recogniser on the user's own speech later: each piece
 // as a 16 kHz WAV file in a folder for the day, and in dir/heard.jsonl a line per piece (its file,
 // the text `model` heard in it, the seconds that took, its message, and for a piece with words the

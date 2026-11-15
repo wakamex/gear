@@ -30,6 +30,7 @@ struct gear_pipeline {
     gear_vad *vad;
     gear_hear *hear;
     gear_say *say;
+    gear_speaker speaker;  // another player of replies, where `say` is NULL (gear_pipeline_set_speaker)
     gear_listen *listen;
     double countdown;
     long frames;           // microphone frames so far
@@ -95,6 +96,8 @@ void gear_pipeline_free(gear_pipeline *p) {
 }
 
 static void clear_draft(gear_pipeline *p);
+
+void gear_pipeline_set_speaker(gear_pipeline *p, const gear_speaker *s) { p->speaker = *s; }
 
 void gear_pipeline_set_drafter(gear_pipeline *p, gear_hear *drafter) {
     p->drafter = drafter;
@@ -200,9 +203,11 @@ void gear_pipeline_frame(gear_pipeline *p, float *frame, const float *played) {
     // A reply stops for talking held 0.3 s. Through loudspeakers a low vowel of the reply can reach the
     // microphone in a way the echo canceller does not model, a burst of 0.15 s that the voice detector
     // takes for speech; stopping at the first 50 ms of speech cut replies off a sentence in.
-    p->held = p->say && gear_say_busy(p->say) && speech >= p->on ? p->held + 1 : 0;
+    bool speaking = p->say ? gear_say_busy(p->say) : p->speaker.busy && p->speaker.busy(p->speaker.user);
+    p->held = speaking && speech >= p->on ? p->held + 1 : 0;
     if (p->held == HOLD_FRAMES) {
-        gear_say_stop(p->say);
+        if (p->say) gear_say_stop(p->say);
+        else p->speaker.stop(p->speaker.user);
         p->interruptions++;
     }
     float second = gs_voice_speech(p->voice);

@@ -36,6 +36,16 @@ typedef struct {
     SDL_AtomicInt generation;  // advanced by a stop; a synthesis of an older one gives up
     struct pt_context *pocket;
     struct pt_voice *voice;
+    bool synthesizing;
+    // The reply being spoken, at the microphone's 16 kHz, for the echo canceller and the check against
+    // the speakers' words: what the phone plays, as far as its reports ('Q') say it has.
+    SDL_AudioStream *to16;
+    float *reply16;
+    int reply16_len, reply16_cap;
+    bool phone_playing;
+    bool stopping;     // a stop was sent: reports of playing are old until the phone says it is quiet
+    double phone_at;   // seconds of the reply played, as last reported
+    long since_at;     // microphone samples since that report
 } server;
 
 static FILE *frames_out;  // the client's end; what the engines print goes to standard error instead
@@ -81,6 +91,16 @@ static bool on_chunk(const float *samples, int n, void *user) {
     if (SDL_GetAtomicInt(&j->s->generation) != j->generation) return false;
     Sint16 *pcm = SDL_malloc((size_t)n * sizeof *pcm);
     for (int i = 0; i < n; i++) pcm[i] = (Sint16)SDL_clamp(samples[i] * 32767.0f, -32768.0f, 32767.0f);
+    // (kept at 16 kHz too, as the reference for what the phone plays)
+    SDL_LockMutex(j->s->lock);
+    SDL_PutAudioStreamData(j->s->to16, samples, n * (int)sizeof(float));
+    int got = SDL_GetAudioStreamAvailable(j->s->to16) / (int)sizeof(float);
+    if (j->s->reply16_len + got > j->s->reply16_cap) {
+        j->s->reply16_cap = (j->s->reply16_len + got) * 2;
+        j->s->reply16 = SDL_realloc(j->s->reply16, (size_t)j->s->reply16_cap * sizeof(float));
+    }
+    j->s->reply16_len += SDL_GetAudioStreamData(j->s->to16, j->s->reply16 + j->s->reply16_len, got * (int)sizeof(float)) / (int)sizeof(float);
+    SDL_UnlockMutex(j->s->lock);
     send_frame(j->s, 'P', pcm, (Uint32)n * 2);
     SDL_free(pcm);
     return SDL_GetAtomicInt(&j->s->generation) == j->generation;
@@ -103,6 +123,9 @@ static int synthesize(void *user) {
             SDL_free(voice);
         }
         if (text) {
+            SDL_LockMutex(s->lock);
+            s->synthesizing = true;
+            SDL_UnlockMutex(s->lock);
             struct pt_tts_params p;
             pt_tts_default_params(&p);
             p.text = text;
@@ -112,6 +135,9 @@ static int synthesize(void *user) {
             pt_synthesize(s->pocket, &p, NULL);
             if (SDL_GetAtomicInt(&s->generation) == j.generation) send_frame(s, 'D', NULL, 0);
             SDL_free(text);
+            SDL_LockMutex(s->lock);
+            s->synthesizing = false;
+            SDL_UnlockMutex(s->lock);
         }
         SDL_LockMutex(s->lock);
     }
@@ -122,10 +148,41 @@ static int synthesize(void *user) {
 static void speak(server *s, const char *reply) {
     char *spoken = gear_speakable(reply, READ_LIMIT);
     SDL_LockMutex(s->lock);
+    // A new reply: its reference starts empty, as the phone's count of what it has played does.
+    s->reply16_len = 0, s->phone_at = 0, s->since_at = 0;
+    SDL_ClearAudioStream(s->to16);
     SDL_free(s->speak);
     s->speak = spoken;
     SDL_SignalCondition(s->wake);
     SDL_UnlockMutex(s->lock);
+}
+
+// What the phone's speaker plays over the next GEAR_FRAME samples of its microphone, by its last report.
+static void phone_played(server *s, float *out) {
+    SDL_LockMutex(s->lock);
+    long at = (long)(s->phone_at * GEAR_RATE) + s->since_at;
+    for (int i = 0; i < GEAR_FRAME; i++) out[i] = s->phone_playing && at + i >= 0 && at + i < s->reply16_len ? s->reply16[at + i] : 0;
+    s->since_at += GEAR_FRAME;
+    SDL_UnlockMutex(s->lock);
+}
+
+// The phone as the player of replies, for the pipeline's rule that talking over a reply stops it.
+static bool phone_busy(void *user) {
+    server *s = user;
+    SDL_LockMutex(s->lock);
+    bool busy = s->synthesizing || s->speak || s->phone_playing;
+    SDL_UnlockMutex(s->lock);
+    return busy;
+}
+
+static void phone_stop(void *user) {
+    server *s = user;
+    SDL_LockMutex(s->lock);
+    SDL_AddAtomicInt(&s->generation, 1);
+    SDL_free(s->speak), s->speak = NULL;
+    s->phone_playing = false, s->stopping = true;
+    SDL_UnlockMutex(s->lock);
+    send_frame(s, 'I', NULL, 0);
 }
 
 static void list_agents(server *s) {
@@ -203,6 +260,8 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
     gear_hear *hear = gear_hear_open(path, hear_threads, error, sizeof error);
     server s = { 0 };
     s.lock = SDL_CreateMutex(), s.out = SDL_CreateMutex(), s.wake = SDL_CreateCondition();
+    const SDL_AudioSpec speech = { SDL_AUDIO_F32, 1, SPEECH_RATE }, mic = { SDL_AUDIO_F32, 1, GEAR_RATE };
+    s.to16 = SDL_CreateAudioStream(&speech, &mic);
     if (!hear) { send_text(&s, 'F', error); return 1; }
     char threads[16];
     SDL_snprintf(threads, sizeof threads, "%d", say_threads);
@@ -252,7 +311,14 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
                     float x = (float)(Sint16)((Uint8)f->data[i] | (Uint8)f->data[i + 1] << 8) / 32768.0f;
                     if (!always) { if (samples < MAX_AUDIO) audio[samples++] = x; continue; }
                     pending[pending_n++] = x;
-                    if (pending_n == GEAR_FRAME) gear_pipeline_frame(pipe, pending, NULL), pending_n = 0;
+                    if (pending_n == GEAR_FRAME) {
+                        // What the phone played meanwhile, for the echo canceller and the speakers' words.
+                        float played[GEAR_FRAME];
+                        phone_played(&s, played);
+                        gs_voice_played(voice_dsp, played);
+                        gear_pipeline_frame(pipe, pending, played);
+                        pending_n = 0;
+                    }
                 }
                 break;
             case 'O':  // always-on, "1" or "0"
@@ -260,15 +326,26 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
                 if (always && !pipe) {
                     gear_model_path(models, GEAR_MODEL_VAD, path, sizeof path);
                     if (!(vad = gear_vad_open(path, error, sizeof error))) { send_text(&s, 'F', error); always = false; break; }
-                    voice_dsp = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH);
+                    // (with WebRTC's echo canceller where this build has it, given what the phone plays)
+                    voice_dsp = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (gs_voice_has_echo() ? GS_VOICE_ECHO : 0));
                     gear_listen_params lp = gear_listen_defaults();
                     pipe = gear_pipeline_new(voice_dsp, vad, hear, NULL, &lp, gear_countdown_remembered(models, 3));
+                    gear_pipeline_set_speaker(pipe, &(gear_speaker){ phone_busy, phone_stop, &s });
                     // Words as they are said, where the recogniser has a GPU (as the window's).
                     if (SDL_strcasecmp(gear_hear_device(hear), "cpu")) gear_pipeline_set_drafter(pipe, hear);
                 }
                 if (!always && pipe) gear_pipeline_cancel(pipe);
                 pending_n = 0, samples = 0, last_words[0] = 0;
                 break;
+            case 'Q': {  // the phone's playback: "1 SECONDS" while it plays the reply, that far in; "0" when not
+                SDL_LockMutex(s.lock);
+                if (f->data[0] != '1') s.stopping = false;
+                s.phone_playing = f->data[0] == '1' && !s.stopping;
+                s.phone_at = f->len > 2 ? SDL_atof(f->data + 2) : 0;
+                s.since_at = 0;
+                SDL_UnlockMutex(s.lock);
+                break;
+            }
             case 'N':  // always-on: send what has been said now
                 if (pipe) {
                     char *now = gear_pipeline_take(pipe);
@@ -353,6 +430,8 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
     if (voice_dsp) gs_voice_free(voice_dsp);
     gear_hear_close(hear);
     pt_voice_free(s.voice);
+    SDL_DestroyAudioStream(s.to16);
+    SDL_free(s.reply16);
     pt_free(s.pocket);
     SDL_free(audio);
     return 0;

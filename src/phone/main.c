@@ -55,6 +55,7 @@ typedef struct {
     SDL_AudioStream *conv;
     gs_stream *play;
     bool reply_done;
+    double reply_base;    // where the reply being played starts in the player's count of seconds
     // The agents to pick from.
     bool picking;
     char agents[MAX_AGENTS][2][128];  // name, and the tab's title
@@ -176,7 +177,11 @@ static void take_frames(app *a) {
             break;
         }
         case 'M': set_text(&a->said, data), a->note[0] = 0, a->left = -1; if (a->always) a->mood = THINKING; break;
-        case 'R': set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0; break;
+        case 'R':
+            set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0;
+            a->reply_base = gs_stream_position(a->play) + gs_stream_buffered(a->play);
+            break;
+        case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
         case 'S': SDL_strlcpy(a->note, data, sizeof a->note); break;
         case 'F': SDL_strlcpy(a->note, data, sizeof a->note), a->mood = IDLE; break;
         case 'G': parse_agents(a, data); break;
@@ -257,11 +262,20 @@ static bool open_mic(app *a) {
 
 static void always_listen(app *a) {
     bool open = a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN && a->always_sent;
-    bool listen = a->always && open && a->mood != SPEAKING && open_mic(a);
+    // (while a reply plays too: the computer cancels its echo, by the playback reported with each piece,
+    // and stops the reply when the user talks over it, as the window does)
+    bool listen = a->always && open && open_mic(a);
     if (!a->mic) return;
     if (listen && SDL_AudioStreamDevicePaused(a->mic)) SDL_ClearAudioStream(a->mic), SDL_ResumeAudioStreamDevice(a->mic);
     if (!listen && !a->holding && !a->pressing && !SDL_AudioStreamDevicePaused(a->mic)) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic), a->level = 0;
-    if (listen) send_audio(a);
+    if (listen) {
+        char at[48];
+        bool playing = a->mood == SPEAKING && gs_stream_buffered(a->play) > 0;
+        if (playing) SDL_snprintf(at, sizeof at, "1 %.3f", gs_stream_position(a->play) - a->reply_base);
+        else SDL_strlcpy(at, "0", sizeof at);
+        gp_link_send(a->link, 'Q', at, (uint32_t)SDL_strlen(at));
+        send_audio(a);
+    }
 }
 
 static void set_always(app *a, bool on) {
@@ -344,7 +358,7 @@ static const char *hint(app *a, char *buf, size_t size) {
     if (st == GP_CONNECTING) return SDL_snprintf(buf, size, "%s…", why), buf;
     if (st == GP_FAILED) return SDL_snprintf(buf, size, "%s", why), buf;
     if (a->always) {
-        if (a->mood == SPEAKING) return "speaking: tap to stop";
+        if (a->mood == SPEAKING) return "speaking: talk or tap to stop";
         if (a->mood == THINKING) return a->note[0] ? a->note : "sent";
         if (a->left >= 0) return SDL_snprintf(buf, size, "sending in %.0f s: tap to send now", SDL_ceil(a->left)), buf;
         return a->note[0] ? a->note : "listening";
@@ -600,6 +614,9 @@ int main(int argc, char **argv) {
     }
 #ifdef SDL_PLATFORM_ANDROID
     SDL_RequestAndroidPermission("android.permission.RECORD_AUDIO", NULL, NULL);
+    // The microphone as for a call (AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION): with the phone's own echo
+    // cancelling, before the computer's.
+    SDL_SetHint(SDL_HINT_ANDROID_AAUDIO_INPUT_PRESET, "7");
 #endif
     SDL_PropertiesID p = SDL_CreateProperties();
     SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "gear");
