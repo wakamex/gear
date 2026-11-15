@@ -407,56 +407,52 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
 static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     gs_ui_fill(ui, area, BACKGROUND);
     gs_rect r = gs_inset(area, 14);
-    // The agent at the top, which a tap changes; the voice at the right, which a tap switches.
+    // The top line: the agent, which a tap changes; the voice, which a tap switches; and settings.
     gs_rect top = gs_cut_top(&r, px * 2.2f);
     char why[8];
     gp_link_state st = a->link ? gp_link_status(a->link, why, sizeof why) : GP_FAILED;
     gs_ui_circle(ui, top.x + 6, top.y + top.h / 2, 5, st == GP_OPEN ? OK : st == GP_CONNECTING ? ACCENT : OVER);
-    gs_rect voice = gs_cut_right(&top, gs_ui_text_width(ui, "voice: alba", small) + 16);
-    char label[160];
-    SDL_snprintf(label, sizeof label, "voice: %s", a->voice[0] ? a->voice : "alba");
-    gs_ui_text(ui, voice, label, small, gs_ui_hovered(ui, voice) ? ACCENT : DIM, 1);
+    gs_rect settings = gs_cut_right(&top, gs_ui_text_width(ui, "settings", small) + 8);
+    gs_ui_text(ui, settings, "settings", small, gs_ui_hovered(ui, settings) ? ACCENT : DIM, 1);
+    if (gs_ui_clicked(ui, settings)) a->setup = true;
+    gs_cut_right(&top, 16);
+    gs_rect voice = gs_cut_right(&top, gs_ui_text_width(ui, "mary", small) + 8);
+    gs_ui_text(ui, voice, a->voice[0] ? a->voice : "alba", small, gs_ui_hovered(ui, voice) ? ACCENT : DIM, 1);
     if (gs_ui_clicked(ui, voice) && st == GP_OPEN) gp_link_send(a->link, 'V', !SDL_strcmp(a->voice, "mary") ? "alba" : "mary", 4);
     gs_rect who = { top.x + 18, top.y, top.w - 18, top.h };
+    char label[160];
     SDL_snprintf(label, sizeof label, "→ %s", a->target[0] ? a->target : "nobody: read back");
     gs_ui_text(ui, who, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
     if (gs_ui_clicked(ui, who) && st == GP_OPEN) a->picking = true, a->agent_count = 0, gp_link_send(a->link, 'L', NULL, 0);
-    // Settings at the bottom.
-    gs_rect bottom = gs_cut_bottom(&r, small * 2.4f);
-    gs_rect gear_link = gs_cut_right(&bottom, gs_ui_text_width(ui, "settings", small) + 8);
-    gs_ui_text(ui, gear_link, "settings", small, gs_ui_hovered(ui, gear_link) ? ACCENT : DIM, 1);
-    if (gs_ui_clicked(ui, gear_link)) a->setup = true;
-    // What was said and the reply, under the character.
-    float chat_h = r.h * 0.38f;
-    gs_rect chat = gs_cut_bottom(&r, chat_h);
-    gs_ui_clip(ui, &chat);
-    float y = chat.y;
-    if (a->said) {
-        y += gs_ui_text_wrapped(ui, (gs_rect){ chat.x, y, chat.w, 100000 }, a->said, small, DIM) + 10;
-    }
-    if (a->reply) {
-        float h = gs_ui_text_height(ui, a->reply, px, chat.w);
-        float room = chat.y + chat.h - y;
-        gs_ui_text_wrapped(ui, (gs_rect){ chat.x, h > room ? chat.y + chat.h - h : y, chat.w, h }, a->reply, px, a->mood == SPEAKING ? BRIGHT : TEXT);
-    }
-    gs_ui_clip(ui, NULL);
-    // The character, in the middle of what is left, and what it is doing under it.
-    // Always-on's switch, under what the character is doing.
-    gs_rect toggle = gs_cut_bottom(&r, px * 2.2f);
+    // The character, a third of the screen at most, with what it is doing and always-on's switch under it.
+    gs_cut_top(&r, 8);
+    float block = SDL_min(r.w * 0.62f, r.h * 0.3f), radius = block * 0.4f;
+    gs_rect stage = gs_cut_top(&r, block);
+    float cx = stage.x + stage.w / 2, cy = stage.y + stage.h / 2;
+    character(ui, cx, cy, radius, a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood, t, a->level);
+    character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
+    char buf[300];
+    bool listening = a->mood == LISTENING || (a->always && a->mood == IDLE);
+    gs_ui_text(ui, gs_cut_top(&r, px * 1.8f), hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
+    gs_rect toggle = gs_cut_top(&r, px * 2);
     const char *always_label = a->always ? "always on: on" : "always on: off";
     float tw = gs_ui_text_width(ui, always_label, small) + 24;
     gs_rect sw = { toggle.x + (toggle.w - tw) / 2, toggle.y, tw, toggle.h };
     gs_ui_outline(ui, sw, sw.h / 2, 1, a->always ? ACCENT : BORDER);
     gs_ui_text(ui, sw, always_label, small, a->always ? ACCENT : gs_ui_hovered(ui, sw) ? TEXT : DIM, 0);
     if (gs_ui_clicked(ui, sw)) set_always(a, !a->always);
-    gs_rect line = gs_cut_bottom(&r, px * 2);
-    char buf[300];
-    bool listening = a->mood == LISTENING || (a->always && a->mood == IDLE);
-    gs_ui_text(ui, line, hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
-    float radius = SDL_min(r.w, r.h) * 0.3f;
-    float cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-    character(ui, cx, cy, radius, a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood, t, a->level);
-    character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
+    // What was said and the reply: the rest of the screen, a page a finger scrolls, back at its top for each
+    // new reply so it reads from the start.
+    gs_cut_top(&r, 12);
+    gs_ui_fill(ui, (gs_rect){ r.x, r.y, r.w, 1 }, BORDER);
+    gs_cut_top(&r, 10);
+    static const char *shown_reply;
+    if (a->reply != shown_reply) shown_reply = a->reply, gs_ui_page_scroll_to(ui, "chat", 0, false);
+    gs_rect page = gs_ui_page_begin(ui, r, "chat");
+    float y = page.y;
+    if (a->said) y += gs_ui_text_wrapped(ui, (gs_rect){ page.x, y, page.w, 100000 }, a->said, small, DIM) + 12;
+    if (a->reply) y += gs_ui_text_wrapped(ui, (gs_rect){ page.x, y, page.w, 100000 }, a->reply, px, a->mood == SPEAKING ? BRIGHT : TEXT) + 12;
+    gs_ui_page_end(ui, y);
     gs_ui_wake(ui, 16);
     // The agents to pick from, over everything.
     if (a->picking) picker(ui, a, area);
@@ -565,7 +561,7 @@ int main(int argc, char **argv) {
         SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
         SDL_strlcpy(a.target, "voice", sizeof a.target), SDL_strlcpy(a.voice, "alba", sizeof a.voice);
         a.said = SDL_strdup("Can you check whether the build finished?");
-        a.reply = SDL_strdup("The build finished at 4:12 and all 31 tests passed. I published it and restarted gear on your PC.");
+        a.reply = SDL_strdup("The build finished at 4:12 and all 31 tests passed. I published it and restarted gear on your PC.\n\nThe transcribe agent found that the production model drifts into English on every long Spanish and French recording it tested, and switching back to base Parakeet fixes it. Trading3's walk-forward test came back positive for large non-vault accounts but failed for vaults.\n\nYou also started prep for something with nine days left, with the progcomp agent planning around Python basics. The fellows agent built a study site, and gear's Android app got a scrollable agent picker with search.");
         if (!SDL_strcmp(argv[3], "pick")) {
             static const char *names[][2] = { { "voice", "voice" }, { "personal_claude", "personal" }, { "gear_claude", "gear" }, { "gesso", "gesso" },
                                               { "hearsay_claude", "hearsay" }, { "gink_claude", "gink" }, { "aeroplan_claude", "aeroplan" } };
