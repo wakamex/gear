@@ -56,6 +56,7 @@ typedef struct {
     unread unread[CONVERSATIONS];
     long long seen;       // the newest message's number in the computer's log, kept in seen.txt
     int unread_count;
+    char typed[4000];     // the message being typed
     char *said, *reply;   // what is being said now (always-on's live words), and the reply being spoken
     entry history[HISTORY];
     int count;
@@ -849,7 +850,19 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
 }
 
 // The talk screen of the conversation `key`: the open one, or with `preview` set, the one beside it.
-static gs_rect chat_area;  // where the open conversation's page was drawn, which a swipe does not start on
+static gs_rect chat_area;  // where the open conversation's page and the box to type in were, which a swipe does not start on
+
+// The typed message, to the agent of the open conversation: shown when the computer sends it back ('M').
+static void send_typed(gs_ui *ui, app *a) {
+    char *s = a->typed, *e = s + SDL_strlen(s);
+    while (*s == ' ' || *s == '\n') s++;
+    while (e > s && (e[-1] == ' ' || e[-1] == '\n')) e--;
+    if (s == e) return;
+    if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) { SDL_strlcpy(a->note, "not connected: the message waits here", sizeof a->note); return; }
+    gp_link_send(a->link, 'M', s, (uint32_t)(e - s));
+    a->typed[0] = 0;
+    gs_ui_edited(ui, "compose", a->typed, 0);
+}
 
 static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *key) {
     gs_ui_fill(ui, area, BACKGROUND);
@@ -884,30 +897,58 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         a->picking = true;
         if (st == GP_OPEN) gp_link_send(a->link, 'L', NULL, 0);
     }
+    // The box to type in, at the bottom, growing to five lines, with its send button. While it has the
+    // keyboard the character and what is under it fold away, for the conversation to have the room.
+    bool typing = !preview && gs_ui_focused(ui, "compose");
+    {
+        float send_w = gs_ui_text_width(ui, "send", px) + 24;
+        float h = gs_ui_textarea_height(ui, a->typed, r.w - send_w - 8, 5) + 12;
+        gs_rect box = gs_cut_bottom(&r, h);
+        gs_rect send = gs_cut_right(&box, send_w);
+        gs_cut_right(&box, 8);
+        if (preview) {
+            gs_ui_outline(ui, box, 4, 1, BORDER);
+            gs_ui_text(ui, gs_inset(box, 8), "type a message", small, DIM, -1);
+        } else {
+            gs_ui_textarea(ui, box, "compose", a->typed, sizeof a->typed, "type a message");
+            bool any = a->typed[0] != 0;
+            gs_ui_round(ui, send, 6, any ? ACCENT : RAISED);
+            gs_ui_text(ui, send, "send", px, any ? BACKGROUND : DIM, 0);
+            if ((gs_ui_clicked(ui, send) || (typing && gs_ui_key(ui, SDLK_RETURN, 0))) && any) send_typed(ui, a);
+        }
+        gs_cut_bottom(&r, 8);
+        if (!preview) chat_area = (gs_rect){ r.x, r.y, r.w, box.y + box.h - r.y };  // (amended below, once the page's top is known)
+    }
     // The character, a third of the screen at most, with what it is doing and always-on's switch under it.
-    gs_cut_top(&r, 8);
-    float block = SDL_min(r.w * 0.62f, r.h * 0.3f), radius = block * 0.4f;
-    gs_rect stage = gs_cut_top(&r, block);
-    float cx = stage.x + stage.w / 2, cy = stage.y + stage.h / 2;
-    mood shown = preview ? IDLE : a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood;
-    if (!avatar(ui, avatar_index(a->avatar), cx, cy, radius * 1.25f, shown, t, a->level)) character(ui, cx, cy, radius, shown, t, a->level);
-    if (!preview) character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
-    char buf[300];
-    bool listening = !preview && (a->mood == LISTENING || (a->always && a->mood == IDLE));
-    gs_ui_text(ui, gs_cut_top(&r, px * 1.8f), preview ? "" : hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
-    gs_rect toggle = gs_cut_top(&r, px * 2);
-    const char *always_label = a->always ? "always on: on" : "always on: off";
-    float tw = gs_ui_text_width(ui, always_label, small) + 24;
-    gs_rect sw = { toggle.x + (toggle.w - tw) / 2, toggle.y, tw, toggle.h };
-    gs_ui_outline(ui, sw, sw.h / 2, 1, a->always ? ACCENT : BORDER);
-    gs_ui_text(ui, sw, always_label, small, a->always ? ACCENT : gs_ui_hovered(ui, sw) ? TEXT : DIM, 0);
-    if (!preview && gs_ui_clicked(ui, sw)) set_always(a, !a->always);
+    if (!typing) {
+        gs_cut_top(&r, 8);
+        float block = SDL_min(r.w * 0.62f, r.h * 0.3f), radius = block * 0.4f;
+        gs_rect stage = gs_cut_top(&r, block);
+        float cx = stage.x + stage.w / 2, cy = stage.y + stage.h / 2;
+        mood shown = preview ? IDLE : a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood;
+        if (!avatar(ui, avatar_index(a->avatar), cx, cy, radius * 1.25f, shown, t, a->level)) character(ui, cx, cy, radius, shown, t, a->level);
+        if (!preview) character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
+        char buf[300];
+        bool listening = !preview && (a->mood == LISTENING || (a->always && a->mood == IDLE));
+        gs_ui_text(ui, gs_cut_top(&r, px * 1.8f), preview ? "" : hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
+        gs_rect toggle = gs_cut_top(&r, px * 2);
+        const char *always_label = a->always ? "always on: on" : "always on: off";
+        float tw = gs_ui_text_width(ui, always_label, small) + 24;
+        gs_rect sw = { toggle.x + (toggle.w - tw) / 2, toggle.y, tw, toggle.h };
+        gs_ui_outline(ui, sw, sw.h / 2, 1, a->always ? ACCENT : BORDER);
+        gs_ui_text(ui, sw, always_label, small, a->always ? ACCENT : gs_ui_hovered(ui, sw) ? TEXT : DIM, 0);
+        if (!preview && gs_ui_clicked(ui, sw)) set_always(a, !a->always);
+    } else {
+        char buf[300];
+        character_area = (gs_rect){ 0 };
+        gs_ui_text(ui, gs_cut_top(&r, px * 1.6f), hint(a, buf, sizeof buf), small, DIM, 0);
+    }
     // What was said and the reply: the rest of the screen, a page a finger scrolls, back at its top for each
     // new reply so it reads from the start.
     gs_cut_top(&r, 12);
     gs_ui_fill(ui, (gs_rect){ r.x, r.y, r.w, 1 }, BORDER);
     gs_cut_top(&r, 10);
-    if (!preview) chat_area = r;
+    if (!preview) chat_area = (gs_rect){ r.x, r.y, r.w, chat_area.y + chat_area.h - r.y };
     conversation(ui, a, r, key);
     gs_ui_wake(ui, 16);
     // The agents to pick from, over everything.
@@ -1130,7 +1171,7 @@ static void window_points(SDL_Window *win, gs_ui *ui, float x, float y, float *p
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|pick|table|swipe`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|pick|table|swipe|type`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -1226,6 +1267,7 @@ int main(int argc, char **argv) {
     bool down = false, went_down = false, went_up = false, moved = false;
     static swipe sw;
     gs_rect last_area = { 0, 0, 400, 760 };
+    if (shot && !SDL_strcmp(argv[3], "type")) SDL_strlcpy(a.typed, "Can you check whether the phone build passed, and if it did, install it on the PC too?", sizeof a.typed), gs_ui_focus(ui, "compose");
     if (shot && !SDL_strcmp(argv[3], "swipe")) sw.axis = 1, sw.size = 400, sw.off = -170;  // (40% of the way to the next)
     for (bool running = true; running;) {
         SDL_Event e;

@@ -678,6 +678,9 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'X':
                 SDL_AddAtomicInt(&s.generation, 1);
                 break;
+            case 'M':  // a message typed: sent as one said
+                if (*f->data) deliver_text(&s, f->data);
+                break;
             case 'U':  // a message to speak, in place of what is being spoken
                 SDL_AddAtomicInt(&s.generation, 1);
                 speak(&s, f->data);

@@ -5,6 +5,7 @@
 // From the client:
 //   'A' audio being said: 16-bit little-endian samples, 16 kHz mono
 //   'E' the end of what was said: it is transcribed and sent to the agent
+//   'M' a message typed (UTF-8): sent to the agent as one said, and answered the same way
 //   'X' stop: what is being spoken stops, and nothing more of it comes
 //   'U' a message to speak (UTF-8), in place of what is being spoken: its speech comes as a reply's
 //   'L' the agents there are, answered with 'G'
