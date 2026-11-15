@@ -20,7 +20,7 @@
 #include "transcript.h"
 #include "wav.h"
 
-enum { MIX_RATE = 48000, READ_LIMIT = 1200, LEVELS = 6, KEPT = 4 * GEAR_RATE, PICK_ROWS = 10 };  // KEPT: microphone audio kept for a report
+enum { MIX_RATE = 48000, LEVELS = 6, KEPT = 4 * GEAR_RATE, PICK_ROWS = 10 };  // KEPT: microphone audio kept for a report
 
 // toolcore-native's palette.
 static SDL_FColor hex(Uint32 c) { return (SDL_FColor){ (float)(c >> 16 & 255) / 255, (float)(c >> 8 & 255) / 255, (float)(c & 255) / 255, 1 }; }
@@ -754,7 +754,7 @@ static void take_from(app *a, gear_relay *relay) {
         fflush(stdout);
         SDL_free(a->reply);
         a->reply = r;
-        char *spoken = gear_speakable(r, READ_LIMIT);
+        char *spoken = gear_speakable(r);
         gear_say_speak(a->say, spoken);
         SDL_free(spoken);
     }

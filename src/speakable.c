@@ -517,7 +517,7 @@ static void counted(buf *b, const char *what, int n, const char *unit) {
     end_sentence(b);
 }
 
-char *gear_speakable(const char *reply, size_t limit) {
+char *gear_speakable(const char *reply) {
     buf b = { 0 };
     puts_(&b, "");
     char *copy = SDL_strdup(reply ? reply : "");
@@ -586,16 +586,5 @@ char *gear_speakable(const char *reply, size_t limit) {
     for (size_t i = 0; i < b.len; i++)
         if (!(b.s[i] == '.' && i && (b.s[i - 1] == '!' || b.s[i - 1] == '?'))) b.s[o++] = b.s[i];
     if (b.s) b.s[b.len = o] = 0;
-    // Too long to listen to: cut at the last sentence that fits.
-    if (limit && b.len > limit) {
-        size_t cut = 0;
-        for (size_t i = 0; i + 1 < limit && i + 1 < b.len; i++)
-            if (SDL_strchr(".!?", b.s[i]) && b.s[i + 1] == ' ') cut = i + 1;
-        if (!cut) cut = limit;
-        b.len = cut;
-        b.s[cut] = 0;
-        trim_end(&b);
-        puts_(&b, " The rest is not read aloud.");
-    }
     return b.s;
 }

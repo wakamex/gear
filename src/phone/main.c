@@ -308,6 +308,18 @@ static void parse_agents(app *a, const char *json) {
     gs_json_free(doc);
 }
 
+// The reply's speech comes far faster than it plays (a minute of it in two seconds), and with no end
+// to how long a reply is read: it waits as it came, 16-bit at 24 kHz, and goes to the player a few
+// seconds ahead of what is heard.
+static void feed_speech(app *a) {
+    float buf[4096];
+    for (int got; gs_stream_buffered(a->play) < 4 && (got = SDL_GetAudioStreamData(a->conv, buf, sizeof buf)) > 0;)
+        gs_stream_write(a->play, buf, got / (int)(2 * sizeof(float)));
+}
+
+// Seconds of the reply's speech still to be heard.
+static double speech_left(app *a) { return gs_stream_buffered(a->play) + SDL_GetAudioStreamQueued(a->conv) / (2.0 * SPEECH_RATE); }
+
 static void stop_speaking(app *a) {
     gs_stream_flush(a->play);
     SDL_ClearAudioStream(a->conv);
@@ -322,7 +334,7 @@ static void say_again(app *a, const entry *e) {
     if (same) return;
     gp_link_send(a->link, 'U', e->text, (uint32_t)SDL_strlen(e->text));
     a->saying = e->text, a->reply_done = false;
-    a->reply_base = gs_stream_position(a->play) + gs_stream_buffered(a->play);
+    a->reply_base = gs_stream_position(a->play) + speech_left(a);
 }
 
 static void take_frames(app *a) {
@@ -397,7 +409,7 @@ static void take_frames(app *a) {
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0;
             add_message(a, data, here(a), false);
             if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text;  // (spoken as it comes)
-            a->reply_base = gs_stream_position(a->play) + gs_stream_buffered(a->play);
+            a->reply_base = gs_stream_position(a->play) + speech_left(a);
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
         case 'S': SDL_strlcpy(a->note, data, sizeof a->note); break;
@@ -405,20 +417,15 @@ static void take_frames(app *a) {
         case 'G': parse_agents(a, data); break;
         case 'D': a->reply_done = true; break;
         case 'P': {
-            int n = (int)len / 2;
-            float *f = SDL_malloc((size_t)n * sizeof *f);
-            for (int i = 0; i < n; i++) f[i] = (float)(Sint16)((Uint8)data[2 * i] | (Uint8)data[2 * i + 1] << 8) / 32768.0f;
-            SDL_PutAudioStreamData(a->conv, f, n * (int)sizeof *f);
-            SDL_free(f);
-            float buf[4096];
-            for (int got; (got = SDL_GetAudioStreamData(a->conv, buf, sizeof buf)) > 0;) gs_stream_write(a->play, buf, got / (int)(2 * sizeof(float)));
+            SDL_PutAudioStreamData(a->conv, data, (int)len);  // (handed to the player as it plays: feed_speech)
             if (!a->holding) a->mood = SPEAKING;
             break;
         }
         }
         SDL_free(data);
     }
-    if (a->reply_done && gs_stream_buffered(a->play) <= 0) {
+    feed_speech(a);
+    if (a->reply_done && speech_left(a) <= 0) {
         if (a->mood == SPEAKING) a->mood = IDLE;
         a->saying = NULL;
     }
@@ -491,7 +498,7 @@ static void always_listen(app *a) {
     if (!listen && !a->holding && !a->pressing && !SDL_AudioStreamDevicePaused(a->mic)) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic), a->level = 0;
     if (listen) {
         char at[48];
-        bool playing = a->mood == SPEAKING && gs_stream_buffered(a->play) > 0;
+        bool playing = a->mood == SPEAKING && speech_left(a) > 0;
         if (playing) SDL_snprintf(at, sizeof at, "1 %.3f", gs_stream_position(a->play) - a->reply_base);
         else SDL_strlcpy(at, "0", sizeof at);
         gp_link_send(a->link, 'Q', at, (uint32_t)SDL_strlen(at));
@@ -828,9 +835,9 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
     int *last_count = &last_counts[preview];
     const char *id = preview ? "chat-beside" : "chat";
     if (SDL_strcmp(last_keys[preview], key)) SDL_strlcpy(last_keys[preview], key, 128), *last_count = -1;
-    int last = -1, shown = 0;
+    int shown = 0;
     for (int i = 0; i < a->count; i++)
-        if (!SDL_strcmp(a->history[i].who, key)) last = i, shown++;
+        if (!SDL_strcmp(a->history[i].who, key)) shown++;
     gs_rect page = gs_ui_page_begin(ui, r, id);
     float y = page.y, newest = page.y;
     for (int i = 0; i < a->count; i++) {
@@ -1258,9 +1265,9 @@ int main(int argc, char **argv) {
     if (!shot) gs_notify_init("gear", "org.wakamex.gear", NULL, notification_clicked);
 
     gs_mix_open(MIX_RATE);
-    a.play = gs_stream_new(MIX_RATE, 300.0, 0.08);
+    a.play = gs_stream_new(MIX_RATE, 8.0, 0.08);
     gs_mix_add(gs_stream_render, a.play);
-    const SDL_AudioSpec speech = { SDL_AUDIO_F32, 1, SPEECH_RATE }, mix = { SDL_AUDIO_F32, 2, MIX_RATE };
+    const SDL_AudioSpec speech = { SDL_AUDIO_S16, 1, SPEECH_RATE }, mix = { SDL_AUDIO_F32, 2, MIX_RATE };
     a.conv = SDL_CreateAudioStream(&speech, &mix);
     const SDL_AudioSpec mic = { SDL_AUDIO_S16, 1, MIC_RATE };
     a.mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &mic, NULL, NULL);
@@ -1284,7 +1291,7 @@ int main(int argc, char **argv) {
     for (bool running = true; running;) {
         SDL_Event e;
         int wait = a.holding || a.mood != IDLE || sw.settling || sw.axis ? 5 : 30;
-        if (SDL_GetAtomicInt(&behind)) wait = gs_stream_buffered(a.play) > 0 || a.saying ? 20 : 500;
+        if (SDL_GetAtomicInt(&behind)) wait = speech_left(&a) > 0 || a.saying ? 20 : 500;
         if (SDL_WaitEventTimeout(&e, wait)) {
             do {
                 if (e.type == SDL_EVENT_QUIT) running = false;

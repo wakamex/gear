@@ -22,7 +22,7 @@
 #include "transcript.h"
 #include "vad.h"
 
-enum { READ_LIMIT = 1200, SPEECH_RATE = 24000, MAX_AUDIO = 60 * 16000 };
+enum { SPEECH_RATE = 24000, MAX_AUDIO = 60 * 16000 };
 
 typedef struct frame { struct frame *next; char type; Uint32 len; char *data; } frame;
 
@@ -158,7 +158,7 @@ static int synthesize(void *user) {
 }
 
 static void speak(server *s, const char *reply) {
-    char *spoken = gear_speakable(reply, READ_LIMIT);
+    char *spoken = gear_speakable(reply);
     SDL_LockMutex(s->lock);
     // A new reply: its reference starts empty, as the phone's count of what it has played does.
     s->reply16_len = 0, s->phone_at = 0, s->since_at = 0;

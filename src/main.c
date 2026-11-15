@@ -23,9 +23,7 @@
 #include <windows.h>
 #endif
 
-enum { MIX_RATE = 48000, MIX_STEP = MIX_RATE / 100 };
-// The most of a reply read aloud, in characters of speakable text: about a minute and a quarter.
-enum { READ_LIMIT = 1200 };  // the mix, rendered 10 ms at a time offline
+enum { MIX_RATE = 48000, MIX_STEP = MIX_RATE / 100 };  // the mix, rendered 10 ms at a time offline
 
 static const char usage[] =
     "usage: gear fetch                         download the models\n"
@@ -156,7 +154,7 @@ static int read_text(const char *text) {
         }
         input[len] = 0;
     }
-    char *spoken = gear_speakable(input ? input : text, READ_LIMIT);
+    char *spoken = gear_speakable(input ? input : text);
     printf("%s\n", spoken);
     SDL_free(spoken);
     SDL_free(input);
@@ -224,7 +222,7 @@ static int listen_live(void) {
             if (failed) { fprintf(stderr, "gear: %s\n", error); break; }
             printf("%s\n", reply);
             fflush(stdout);
-            char *spoken = gear_speakable(reply, READ_LIMIT);
+            char *spoken = gear_speakable(reply);
             gear_say_speak(say, spoken);
             SDL_free(spoken);
             SDL_free(reply);
