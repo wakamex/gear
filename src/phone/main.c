@@ -345,6 +345,65 @@ static const char *hint(app *a, char *buf, size_t size) {
 static float px = 18, small = 14;
 static gs_rect character_area;  // where the character was drawn, which holding down on starts listening
 
+// How well agent i matches what is typed: 0 not at all, higher better; with nothing typed, the agent
+// sent to now first.
+static int pick_rank(app *a, int i, const char *typed) {
+    const char *name = a->agents[i][0], *tab = a->agents[i][1];
+    if (!*typed) return !SDL_strcmp(name, a->target) ? 2 : 1;
+    size_t n = SDL_strlen(typed);
+    if (!SDL_strncasecmp(tab, typed, n) || !SDL_strncasecmp(name, typed, n)) return 3;
+    return SDL_strcasestr(tab, typed) || SDL_strcasestr(name, typed) ? 2 : 0;
+}
+
+static const char *agent_title(app *a, int i) { return a->agents[i][1][0] ? a->agents[i][1] : a->agents[i][0]; }
+
+// The agents, narrowed by what is typed in the field above them and scrolled with a finger; a tap on
+// one sends to it from now on, Enter takes the first, and back or "close" leaves it.
+static void picker(gs_ui *ui, app *a, gs_rect area) {
+    static char typed[64];
+    static int selected;
+    int order[MAX_AGENTS], rank[MAX_AGENTS], n = 0;
+    for (int i = 0; i < a->agent_count; i++) {
+        int r = pick_rank(a, i, typed);
+        if (!r) continue;
+        int at = n++;
+        for (; at > 0 && (rank[at - 1] < r || (rank[at - 1] == r && SDL_strcasecmp(agent_title(a, order[at - 1]), agent_title(a, i)) > 0)); at--)
+            order[at] = order[at - 1], rank[at] = rank[at - 1];
+        order[at] = i, rank[at] = r;
+    }
+    gs_rect m = gs_ui_modal_begin(ui, area.w - 24, area.h * 0.8f);
+    gs_rect in = gs_inset(m, 12);
+    gs_rect head = gs_cut_top(&in, px * 2);
+    gs_rect close = gs_cut_right(&head, gs_ui_text_width(ui, "close", px) + 16);
+    gs_ui_text(ui, close, "close", px, gs_ui_hovered(ui, close) ? ACCENT : TEXT, 1);
+    gs_ui_text(ui, head, "Send to", px, DIM, -1);
+    gs_ui_field(ui, gs_cut_top(&in, px * 2.4f), "pick", typed, sizeof typed, "search tabs and agents");
+    gs_cut_top(&in, 8);
+    bool done = gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0);
+    const char *chosen = NULL;
+    if (!a->agent_count) gs_ui_text(ui, gs_cut_top(&in, px * 2), "looking for agents…", px, DIM, -1);
+    else if (!n) gs_ui_text(ui, gs_cut_top(&in, px * 2), "no agent matches", px, DIM, -1);
+    else {
+        float row_h = px * 2.4f;
+        selected = SDL_clamp(selected, 0, n - 1);
+        gs_ui_rows rows = gs_ui_list(ui, in, "agents", n, row_h, &selected);
+        for (int k = rows.first; k < rows.end; k++) {
+            int i = order[k];
+            gs_rect row = { in.x, rows.y + k * row_h, in.w, row_h };
+            if (k == selected && rows.activated) chosen = a->agents[i][0];
+            bool now = !SDL_strcmp(a->agents[i][0], a->target);
+            gs_rect text = gs_inset(row, 8);
+            gs_ui_text(ui, text, agent_title(a, i), px, now ? ACCENT : TEXT, -1);
+            if (SDL_strcmp(agent_title(a, i), a->agents[i][0])) gs_ui_text(ui, text, a->agents[i][0], small, DIM, 1);
+        }
+        gs_ui_list_end(ui);
+        if (gs_ui_key(ui, SDLK_RETURN, 0)) chosen = a->agents[order[0]][0];
+    }
+    if (chosen) gp_link_send(a->link, 'T', chosen, (uint32_t)SDL_strlen(chosen)), done = true;
+    if (done) a->picking = false, typed[0] = 0, selected = 0;
+    gs_ui_modal_end(ui);
+}
+
 static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     gs_ui_fill(ui, area, BACKGROUND);
     gs_rect r = gs_inset(area, 14);
@@ -400,22 +459,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
     gs_ui_wake(ui, 16);
     // The agents to pick from, over everything.
-    if (a->picking) {
-        gs_rect m = gs_ui_modal_begin(ui, area.w - 40, area.h * 0.7f);
-        gs_rect in = gs_inset(m, 12);
-        gs_ui_text(ui, gs_cut_top(&in, small * 1.8f), "Send to", small, DIM, -1);
-        if (!a->agent_count) gs_ui_text(ui, gs_cut_top(&in, px * 2), "looking for agents…", px, DIM, -1);
-        float row = px * 2.2f;
-        for (int i = 0; i < a->agent_count && in.h >= row; i++) {
-            gs_rect at = gs_cut_top(&in, row);
-            const char *tab = a->agents[i][1][0] ? a->agents[i][1] : a->agents[i][0];
-            if (gs_ui_hovered(ui, at)) gs_ui_fill(ui, at, RAISED);
-            gs_ui_text(ui, gs_inset(at, 6), tab, px, !SDL_strcmp(a->agents[i][0], a->target) ? ACCENT : TEXT, -1);
-            if (gs_ui_clicked(ui, at)) gp_link_send(a->link, 'T', a->agents[i][0], (uint32_t)SDL_strlen(a->agents[i][0])), a->picking = false;
-        }
-        if (gs_ui_key(ui, SDLK_ESCAPE, 0) || gs_ui_key(ui, SDLK_AC_BACK, 0)) a->picking = false;
-        gs_ui_modal_end(ui);
-    }
+    if (a->picking) picker(ui, a, area);
 }
 
 static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
@@ -515,13 +559,19 @@ int main(int argc, char **argv) {
     SDL_free(pref);
     load_settings(&a);
     bool keyed = load_key(&a);
-    // `gear-phone --shot FILE setup|talk`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|pick`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) {
         SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
         SDL_strlcpy(a.target, "voice", sizeof a.target), SDL_strlcpy(a.voice, "alba", sizeof a.voice);
         a.said = SDL_strdup("Can you check whether the build finished?");
         a.reply = SDL_strdup("The build finished at 4:12 and all 31 tests passed. I published it and restarted gear on your PC.");
+        if (!SDL_strcmp(argv[3], "pick")) {
+            static const char *names[][2] = { { "voice", "voice" }, { "personal_claude", "personal" }, { "gear_claude", "gear" }, { "gesso", "gesso" },
+                                              { "hearsay_claude", "hearsay" }, { "gink_claude", "gink" }, { "aeroplan_claude", "aeroplan" } };
+            for (int i = 0; i < 7; i++) SDL_strlcpy(a.agents[i][0], names[i][0], 128), SDL_strlcpy(a.agents[i][1], names[i][1], 128);
+            a.agent_count = 7, a.picking = true;
+        }
     }
     if (argc >= 3 && !SDL_strcmp(argv[1], "--say")) {
         if (argc >= 5) SDL_strlcpy(a.host, argv[3], sizeof a.host), SDL_strlcpy(a.user, argv[4], sizeof a.user);
