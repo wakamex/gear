@@ -743,11 +743,12 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
                     gs_ui_circle(ui, cx, cy, px * 0.18f, ACCENT);
                 } else gs_ui_circle(ui, cx, cy, px * 0.18f, OK);
             }
-            if (c->agent >= 0 && SDL_strcmp(c->who, a->agents[c->agent][0])) {
-                gs_rect name = gs_cut_right(&top, gs_ui_text_width(ui, a->agents[c->agent][0], small) + 8);
-                gs_ui_text(ui, name, a->agents[c->agent][0], small, DIM, 1);
-            }
-            gs_ui_text(ui, top, c->who, px, !SDL_strcmp(c->who, a->open) ? ACCENT : unseen && *unseen ? BRIGHT : TEXT, -1);
+            // The conversation's name first; its agent's, dim, in what is left of the line (cut short to
+            // fit, and left out with less than a few letters' room).
+            float title_w = gs_ui_text(ui, top, c->who, px, !SDL_strcmp(c->who, a->open) ? ACCENT : unseen && *unseen ? BRIGHT : TEXT, -1);
+            gs_rect rest = { top.x + title_w + 12, top.y, top.w - title_w - 12, top.h };
+            if (c->agent >= 0 && SDL_strcmp(c->who, a->agents[c->agent][0]) && rest.w >= small * 5)
+                gs_ui_text(ui, rest, a->agents[c->agent][0], small, DIM, 1);
             char preview[200];
             if (c->last >= 0) {
                 const entry *e = &a->history[c->last];
@@ -1173,7 +1174,7 @@ int main(int argc, char **argv) {
         remember(&a, "The build finished at 4:12 and all 31 tests passed. I published it and restarted gear on your PC.\n\nThe transcribe agent found that the production model drifts into English on every long Spanish and French recording it tested, and switching back to base Parakeet fixes it. Trading3's walk-forward test came back positive for large non-vault accounts but failed for vaults.\n\nYou also started prep for something with nine days left, with the progcomp agent planning around Python basics. The fellows agent built a study site, and gear's Android app got a scrollable agent picker with search.", "voice", "10:41", false);
         if (!SDL_strcmp(argv[3], "pick")) {
             static const char *names[][2] = { { "voice", "voice" }, { "personal_claude", "personal" }, { "gear_claude", "gear" }, { "gesso", "gesso" },
-                                              { "hearsay_claude", "hearsay" }, { "gink_claude", "gink" }, { "aeroplan_claude", "aeroplan" } };
+                                              { "hearsay_claude", "hearsay" }, { "hyperliquid_participant_feed_re_claude", "re-opus" }, { "aeroplan_claude", "aeroplan" } };
             for (int i = 0; i < 7; i++) SDL_strlcpy(a.agents[i][0], names[i][0], 128), SDL_strlcpy(a.agents[i][1], names[i][1], 128);
             a.agent_count = 7, a.picking = true, a.busy[2] = a.busy[4] = true;
         }
