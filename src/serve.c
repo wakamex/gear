@@ -29,7 +29,7 @@ typedef struct frame { struct frame *next; char type; Uint32 len; char *data; } 
 
 // A message shown to the phone, numbered and kept (in hub-log.jsonl, so a restart keeps it too), for
 // giving again to a phone that missed it.
-typedef struct { long long seq; char *text; char who[128]; char at[8]; bool mine; } logged;
+typedef struct { long long seq; char *text; char who[128]; char at[8]; bool mine; bool quiet; } logged;
 enum { LOG = 1000 };
 
 typedef struct {
@@ -293,19 +293,19 @@ static void hello(server *s, const char *target, const char *voice) {
 typedef struct { gear_relay **relay; const char *target; gear_transcript *transcript; } delivery;
 static delivery out_to;
 
-static void log_message(server *s, const char *who, const char *at, bool mine, const char *text, bool shown);
+static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, bool shown);
 static const char *conversation_of(const char *tab) { return *tab ? tab : "read back"; }
 
 static void deliver_text(server *s, const char *text) {
     char status[200];
     send_text(s, 'M', text);
-    log_message(s, conversation_of(target_tab), "", true, text, false);
+    log_message(s, conversation_of(target_tab), "", true, false, text, false);
     gear_transcript_add(out_to.transcript, text, out_to.target);
     if (*out_to.relay) {
         gear_relay_send(*out_to.relay, text);
         SDL_snprintf(status, sizeof status, "waiting for %s", out_to.target);
         send_text(s, 'S', status);
-    } else send_text(s, 'R', text), log_message(s, "read back", "", false, text, false), speak(s, text);
+    } else send_text(s, 'R', text), log_message(s, "read back", "", false, false, text, false), speak(s, text);
 }
 
 // ---- What waits for the phone ----
@@ -328,16 +328,17 @@ static char *log_line(const logged *l) {
     gs_jval_set(o, "who", gs_jval_str(l->who));
     gs_jval_set(o, "at", gs_jval_str(l->at));
     if (l->mine) gs_jval_set(o, "mine", gs_jval_bool(true));
+    if (l->quiet) gs_jval_set(o, "quiet", gs_jval_bool(true));
     gs_jval_set(o, "text", gs_jval_str(l->text));
     char *json = gs_jval_write(o, false);
     gs_jval_free(o);
     return json;
 }
 
-static logged *log_add(long long seq, const char *who, const char *at, bool mine, const char *text) {
+static logged *log_add(long long seq, const char *who, const char *at, bool mine, bool quiet, const char *text) {
     if (log_count == LOG) SDL_free(log_of[0].text), SDL_memmove(log_of, log_of + 1, (LOG - 1) * sizeof *log_of), log_count--;
     logged *l = &log_of[log_count++];
-    l->seq = seq, l->mine = mine, l->text = SDL_strdup(text);
+    l->seq = seq, l->mine = mine, l->quiet = quiet, l->text = SDL_strdup(text);
     SDL_strlcpy(l->who, who, sizeof l->who), SDL_strlcpy(l->at, at, sizeof l->at);
     if (seq > log_seq) log_seq = seq;
     return l;
@@ -357,7 +358,7 @@ static void load_log(void) {
         const char *text = gs_json_str(gs_json_get(o, "text"), NULL);
         if (text)
             log_add((long long)gs_json_num(gs_json_get(o, "seq"), 0), gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""),
-                    gs_json_bool(gs_json_get(o, "mine"), false), text), lines++;
+                    gs_json_bool(gs_json_get(o, "mine"), false), gs_json_bool(gs_json_get(o, "quiet"), false), text), lines++;
         gs_json_free(doc);
     }
     SDL_free(all);
@@ -379,10 +380,10 @@ static void send_seq(server *s, long long seq) {
 // A message for the phone's conversation `who`, logged, and sent as 'Z' when a phone is connected
 // and `shown`, followed by its number ('K'). (A reply also goes as 'R', and the user's message as 'M',
 // before their numbers.)
-static void log_message(server *s, const char *who, const char *at, bool mine, const char *text, bool shown) {
+static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, bool shown) {
     char now[8];
     if (!*at) stamp(now), at = now;
-    logged *l = log_add(log_seq + 1, who, at, mine, text);
+    logged *l = log_add(log_seq + 1, who, at, mine, quiet, text);
     char *line = log_line(l);
     SDL_IOStream *io = SDL_IOFromFile(log_path, "ab");
     if (io) SDL_WriteIO(io, line, SDL_strlen(line)), SDL_WriteIO(io, "\n", 1), SDL_CloseIO(io);
@@ -409,7 +410,7 @@ static void replay(server *s, long long seen) {
 // Everything Panetone posts to Mihai's own channels (`panetone watch`, one JSON line a post), read on a
 // thread of its own and shown on the phone as an agent's message ('Z'), as Telegram shows it. The last
 // position handled is kept in hub-feed-seq, so a restart repeats and skips nothing.
-typedef struct post { struct post *next; char *text; char who[128]; char at[8]; long long seq; Uint64 came; } post;
+typedef struct post { struct post *next; char *text; char who[128]; char at[8]; char kind[16]; long long seq; Uint64 came; } post;
 static SDL_Mutex *posts_lock;
 static post *posts;
 static char seq_path[1100];
@@ -449,6 +450,9 @@ static int watch_feed(void *user) {
         p->seq = (long long)gs_json_num(gs_json_get(o, "seq"), 0);
         const char *route = gs_json_str(gs_json_get(o, "route"), NULL);
         SDL_strlcpy(p->who, route ? route : "panetone", sizeof p->who);
+        // (what Panetone says the post is: an agent's message or question, or its own receipt for a
+        // send ("request") or notice, which the phone shows quietly)
+        SDL_strlcpy(p->kind, gs_json_str(gs_json_get(o, "kind"), ""), sizeof p->kind);
         // The text, and each attachment by name (the file stays on the computer).
         const char *text = gs_json_str(gs_json_get(o, "text"), "");
         size_t cap = SDL_strlen(text) + 1;
@@ -803,7 +807,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             SDL_UnlockMutex(posts_lock);
             if (!p) break;
             if (!already_given(p->text)) {
-                log_message(&s, p->who, p->at, false, p->text, true);
+                log_message(&s, p->who, p->at, false, !SDL_strcmp(p->kind, "request") || !SDL_strcmp(p->kind, "notice"), p->text, true);
             }
             char seq[32];
             SDL_snprintf(seq, sizeof seq, "%lld", p->seq);
@@ -816,7 +820,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             while ((reply = gear_relay_take(earlier[i].relay, &failed, error, sizeof error)) || failed) {
                 if (failed) { send_text(&s, 'F', error); continue; }
                 remember_reply(reply);
-                log_message(&s, earlier[i].tab, "", false, reply, true);
+                log_message(&s, earlier[i].tab, "", false, false, reply, true);
                 SDL_free(reply);
             }
             if (!gear_relay_waiting(earlier[i].relay)) gear_relay_free(earlier[i].relay), earlier[i--] = earlier[--earlier_count];
@@ -826,7 +830,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             // (logged for a phone that misses it; sent as text alone to one in the background)
             remember_reply(reply);
             send_text(&s, 'R', reply);
-            log_message(&s, conversation_of(target_tab), "", false, reply, false);
+            log_message(&s, conversation_of(target_tab), "", false, false, reply, false);
             if (frames_out && !s.background) speak(&s, reply);
             SDL_free(reply);
         }

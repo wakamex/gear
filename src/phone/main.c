@@ -41,7 +41,7 @@ static const char *const read_names[] = { "replies to me", "this conversation", 
 // The conversations, both sides, kept on the phone in history.jsonl so they outlast a restart: what was
 // sent and what each agent replied, with when, newest last. A conversation is one agent's, named by
 // the title of its tab (`who`), as Telegram has one topic for each.
-typedef struct { char *text; char who[128]; char at[8]; bool mine; } entry;
+typedef struct { char *text; char who[128]; char at[8]; bool mine, quiet; } entry;  // quiet: Panetone's own receipt or notice
 enum { HISTORY = 2000, CONVERSATIONS = 64 };
 typedef struct { char who[128]; int n; } unread;  // the replies in a conversation not yet seen
 
@@ -161,7 +161,10 @@ static void load_history(app *a) {
         if (!doc) continue;
         gs_jv o = gs_json_root(doc);
         const char *text = gs_json_str(gs_json_get(o, "text"), NULL);
-        if (text) remember(a, text, gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""), gs_json_bool(gs_json_get(o, "mine"), false));
+        if (text) {
+            remember(a, text, gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""), gs_json_bool(gs_json_get(o, "mine"), false));
+            a->history[a->count - 1].quiet = gs_json_bool(gs_json_get(o, "quiet"), false);
+        }
         gs_json_free(doc);
     }
     SDL_free(all);
@@ -217,10 +220,12 @@ static void open_conversation(app *a, const char *who) {
 
 // A message of a conversation, kept and shown: what the user sent (to `who`), or an agent's reply,
 // counted unseen when its conversation is not the one open.
-static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine) {
+// A quiet one (Panetone's receipt for a send, or its notice) is shown but not counted unseen.
+static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine, bool quiet) {
     remember(a, text, who, at, mine);
+    a->history[a->count - 1].quiet = quiet;
     if (!SDL_strcmp(who, a->open)) a->fresh = true;
-    else if (!mine) {
+    else if (!mine && !quiet) {
         int *n = unread_of(a, who, true);
         if (n) ++*n, save_unread(a);
     }
@@ -228,6 +233,7 @@ static void add_message_at(app *a, const char *text, const char *who, const char
     gs_jval_set(o, "at", gs_jval_str(at));
     gs_jval_set(o, "who", gs_jval_str(who));
     gs_jval_set(o, "mine", gs_jval_bool(mine));
+    if (quiet) gs_jval_set(o, "quiet", gs_jval_bool(true));
     gs_jval_set(o, "text", gs_jval_str(text));
     char *line = gs_jval_write(o, false), path[1100];
     gs_jval_free(o);
@@ -242,7 +248,7 @@ static void add_message(app *a, const char *text, const char *who, bool mine) {
     SDL_DateTime d;
     char at[8] = "";
     if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(at, sizeof at, "%02d:%02d", d.hour, d.minute);
-    add_message_at(a, text, who, at, mine);
+    add_message_at(a, text, who, at, mine, false);
 }
 
 // ---- Notifications ----
@@ -392,16 +398,16 @@ static void take_frames(app *a) {
             if (doc) {
                 gs_jv o = gs_json_root(doc);
                 const char *text = gs_json_str(gs_json_get(o, "text"), ""), *who = gs_json_str(gs_json_get(o, "who"), "");
-                bool mine = gs_json_bool(gs_json_get(o, "mine"), false);
+                bool mine = gs_json_bool(gs_json_get(o, "mine"), false), quiet = gs_json_bool(gs_json_get(o, "quiet"), false);
                 // (one shown already, its number lost with a connection that broke before it came or come
                 // before the phone kept numbers, is not shown twice)
                 bool had = false;
                 for (int i = a->count - 1; i >= 0 && i >= a->count - 200; i--)
                     if (a->history[i].mine == mine && !SDL_strcmp(a->history[i].who, who) && !SDL_strcmp(a->history[i].text, text)) had = true;
-                if (!had) add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine);
+                if (!had) add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine, quiet);
                 // (read aloud when new, as the setting asks: not one given again on connecting)
                 bool wanted = a->read == READ_ALL || (a->read == READ_OPEN && !SDL_strcmp(who, a->open));
-                if (!had && !mine && wanted && !gs_json_bool(gs_json_get(o, "again"), false) && !SDL_GetAtomicInt(&behind) &&
+                if (!had && !mine && !quiet && wanted && !gs_json_bool(gs_json_get(o, "again"), false) && !SDL_GetAtomicInt(&behind) &&
                     a->to_read_count < (int)SDL_arraysize(a->to_read))
                     a->to_read[a->to_read_count++] = a->history[a->count - 1].text;
             }
@@ -889,6 +895,17 @@ static bool preview;
 static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool live, bool draw) {
     float head = small * 1.7f, pad = 8, w = at.w - pad - 4;
     const char *text = e->text;
+    // Panetone's receipt or notice: small and dim, without a mark, a header or a speaker.
+    if (e->quiet) {
+        float time_w = gs_ui_text_width(ui, e->at, small * 0.9f) + 8;
+        gp_rich_style q = { small, 10, DIM, DIM, BORDER, (SDL_FColor){ 1, 1, 1, 0.03f }, DIM, (SDL_FColor){ 0, 0, 0, 0 } };
+        float h = gp_rich(ui, (gs_rect){ 0, 0, w - time_w, 0 }, text, &q, false) + 6;
+        if (!draw) return h;
+        gs_ui_fill(ui, (gs_rect){ at.x, at.y, 2, h - 4 }, BORDER);
+        gp_rich(ui, (gs_rect){ at.x + pad, at.y, w - time_w, 0 }, text, &q, true);
+        gs_ui_text(ui, (gs_rect){ at.x + pad + w - time_w, at.y, time_w, small * 1.3f }, e->at, small * 0.9f, DIM, 1);
+        return h;
+    }
     gp_rich_style style = { e->mine ? small + 1 : px, 11, e->mine ? DIM : (live ? BRIGHT : TEXT), ACCENT, BORDER, (SDL_FColor){ 1, 1, 1, 0.04f },
                             BRIGHT, (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.22f } };
     float h = head + gp_rich(ui, (gs_rect){ at.x + pad, 0, w, 0 }, text, &style, false) + 8;
@@ -1474,6 +1491,8 @@ int main(int argc, char **argv) {
                  "transcribe", "12:53", false);
         if (!SDL_strcmp(argv[3], "table")) SDL_strlcpy(a.open, "transcribe", sizeof a.open);
         remember(&a, "What did the agents get done this morning?", "voice", "09:12", true);
+        remember(&a, "[submitted] agent-job -> voice\nRequest ID: 2abb5edd-119b-52e0-b14e-4d9a7a9881c7\nprompt accepted by Wakterm", "voice", "09:12", false);
+        a.history[a.count - 1].quiet = true;
         remember(&a, "Three things. The transcribe agent fixed the Spanish drift, gear's phone app got a searchable agent picker, and the fellows site is up.", "voice", "09:12", false);
         remember(&a, "Can you check whether the build finished?", "voice", "10:40", true);
         a.reply = NULL;
