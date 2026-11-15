@@ -34,6 +34,7 @@ typedef struct {
     // Where gear runs, kept in settings.txt; the phone's key, kept with gs_secret.
     char host[256], user[64], port[8], host_key[128];
     bool always;          // always on: listening without holding, the computer finding the messages
+    char avatar[16];      // the character drawn: fox, tomato, girl or robot
     char pem[1024], key_line[400];
     char dir[1024];
     gp_link *link;
@@ -71,6 +72,7 @@ static void load_settings(app *a) {
     settings_path(a, path, sizeof path, "settings.txt");
     char *text = SDL_LoadFile(path, NULL);
     SDL_strlcpy(a->port, "22", sizeof a->port);
+    SDL_strlcpy(a->avatar, "tomato", sizeof a->avatar);
     char *save = NULL;
     for (char *line = text ? SDL_strtok_r(text, "\n", &save) : NULL; line; line = SDL_strtok_r(NULL, "\n", &save)) {
         char *eq = SDL_strchr(line, '=');
@@ -82,14 +84,15 @@ static void load_settings(app *a) {
         else if (!SDL_strcmp(line, "port")) SDL_strlcpy(a->port, v, sizeof a->port);
         else if (!SDL_strcmp(line, "host_key")) SDL_strlcpy(a->host_key, v, sizeof a->host_key);
         else if (!SDL_strcmp(line, "always")) a->always = *v == '1';
+        else if (!SDL_strcmp(line, "avatar")) SDL_strlcpy(a->avatar, v, sizeof a->avatar);
     }
     SDL_free(text);
 }
 
 static void save_settings(app *a) {
-    char path[1100], text[700];
+    char path[1100], text[760];
     settings_path(a, path, sizeof path, "settings.txt");
-    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\n", a->host, a->user, a->port, a->host_key, a->always);
+    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar);
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
@@ -351,6 +354,66 @@ static void character(gs_ui *ui, float cx, float cy, float r, mood m, float t, f
     }
 }
 
+// ---- The characters ----
+
+// Four drawn characters (assets/avatars, generated with Codex's image tool), each four frames of the
+// same size and place: at rest, blinking, speaking and listening.
+static const char *const avatars[] = { "tomato", "fox", "girl", "robot" };
+enum { AVATARS = 4, REST = 0, BLINK, SPEAK, LISTEN };
+static SDL_Texture *frames[AVATARS][4];
+
+static void load_avatars(SDL_Renderer *ren) {
+    static const char *const states[] = { "rest", "blink", "speak", "listen" };
+    for (int i = 0; i < AVATARS; i++)
+        for (int k = 0; k < 4; k++) {
+            char path[1100];
+            SDL_snprintf(path, sizeof path, "%savatars/%s-%s.png", SDL_GetBasePath(), avatars[i], states[k]);
+            SDL_Surface *img = SDL_LoadPNG(path);
+            if (!img) { SDL_Log("gear: no %s: %s", path, SDL_GetError()); continue; }
+            frames[i][k] = SDL_CreateTextureFromSurface(ren, img);
+            SDL_SetTextureScaleMode(frames[i][k], SDL_SCALEMODE_LINEAR);
+            SDL_DestroySurface(img);
+        }
+}
+
+static int avatar_index(const char *name) {
+    for (int i = 0; i < AVATARS; i++) if (!SDL_strcmp(avatars[i], name)) return i;
+    return 0;
+}
+
+// The chosen character in its frame for the mood: listening while it listens, the mouth opening and
+// closing while it speaks, blinking every few seconds otherwise; rings out from it while listening,
+// dots round it while thinking, and breathing all the time. False when its frames are not there, for
+// the drawn face instead.
+static bool avatar(gs_ui *ui, int which, float cx, float cy, float r, mood m, float t, float level) {
+    SDL_Texture **f = frames[which];
+    if (!f[REST] || !f[BLINK] || !f[SPEAK] || !f[LISTEN]) return false;
+    float breathe = 1 + 0.02f * SDL_sinf(t * 2.2f);
+    if (m == LISTENING) {
+        for (int i = 0; i < 3; i++) {
+            float phase = SDL_fmodf(t * 1.2f + (float)i / 3, 1);
+            gs_ui_opacity(ui, (1 - phase) * 0.45f);
+            gs_ui_circle(ui, cx, cy, r * (0.95f + phase * (0.45f + level * 0.5f)), ACCENT);
+            gs_ui_circle(ui, cx, cy, r * (0.93f + phase * (0.45f + level * 0.5f)), BACKGROUND);
+        }
+        gs_ui_opacity(ui, 1);
+        breathe = 1 + 0.05f * level + 0.015f * SDL_sinf(t * 9);
+    }
+    bool blinking = SDL_fmodf(t, 4.1f) < 0.14f;
+    int k = REST;
+    if (m == LISTENING) k = LISTEN;
+    else if (m == SPEAKING && SDL_sinf(t * 13) * SDL_sinf(t * 5.3f) > 0.05f) k = SPEAK;
+    else if (blinking) k = BLINK;
+    float bob = m == THINKING ? r * 0.03f * SDL_sinf(t * 3) : 0, size = 2 * r * breathe;
+    gs_ui_texture(ui, (gs_rect){ cx - size / 2, cy - size / 2 + bob, size, size }, f[k], NULL);
+    if (m == THINKING)
+        for (int i = 0; i < 3; i++) {
+            float ang = t * 3 + (float)i * 2.094f;
+            gs_ui_circle(ui, cx + SDL_cosf(ang) * r * 1.15f, cy + SDL_sinf(ang) * r * 1.15f, r * 0.05f, DIM);
+        }
+    return true;
+}
+
 static const char *hint(app *a, char *buf, size_t size) {
     char why[256] = "";
     gp_link_state st = a->link ? gp_link_status(a->link, why, sizeof why) : GP_FAILED;
@@ -458,7 +521,8 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     float block = SDL_min(r.w * 0.62f, r.h * 0.3f), radius = block * 0.4f;
     gs_rect stage = gs_cut_top(&r, block);
     float cx = stage.x + stage.w / 2, cy = stage.y + stage.h / 2;
-    character(ui, cx, cy, radius, a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood, t, a->level);
+    mood shown = a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood;
+    if (!avatar(ui, avatar_index(a->avatar), cx, cy, radius * 1.25f, shown, t, a->level)) character(ui, cx, cy, radius, shown, t, a->level);
     character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
     char buf[300];
     bool listening = a->mood == LISTENING || (a->always && a->mood == IDLE);
@@ -511,6 +575,20 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
     gs_cut_right(&two, 8);
     gs_ui_field(ui, two, "user", a->user, sizeof a->user, "user");
     gs_ui_field(ui, port, "port", a->port, sizeof a->port, "22");
+    // The character: the four side by side, a tap choosing one.
+    gs_cut_top(&r, 14);
+    gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "character", small, DIM, -1);
+    float cell = SDL_min(r.w / AVATARS, 96);
+    gs_rect choices = gs_cut_top(&r, cell);
+    for (int i = 0; i < AVATARS; i++) {
+        gs_rect c = { choices.x + (float)i * cell, choices.y, cell, cell };
+        bool chosen = !SDL_strcmp(a->avatar, avatars[i]);
+        if (chosen || gs_ui_hovered(ui, c)) gs_ui_round(ui, gs_inset(c, 2), 10, chosen ? RAISED : PANEL);
+        if (chosen) gs_ui_outline(ui, gs_inset(c, 2), 10, 1, ACCENT);
+        if (frames[i][REST]) gs_ui_texture(ui, gs_inset(c, 8), frames[i][REST], NULL);
+        else gs_ui_text(ui, c, avatars[i], small, TEXT, 0);
+        if (gs_ui_clicked(ui, c)) SDL_strlcpy(a->avatar, avatars[i], sizeof a->avatar), save_settings(a);
+    }
     gs_cut_top(&r, 14);
     gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "this phone's key, for ~/.ssh/authorized_keys there:", small, DIM, -1);
     float kh = gs_ui_text_height(ui, a->key_line, small, r.w);
@@ -632,6 +710,7 @@ int main(int argc, char **argv) {
     SDL_snprintf(font, sizeof font, "%sClankerMono-Regular.ttf", SDL_GetBasePath());
     gs_fontset_prepend(fonts, font);
     gs_ui *ui = gs_ui_new(win, ren, fonts);
+    load_avatars(ren);
 
     gs_mix_open(MIX_RATE);
     a.play = gs_stream_new(MIX_RATE, 300.0, 0.08);

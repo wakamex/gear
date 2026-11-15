@@ -40,6 +40,7 @@ magick -background none -density 384 "$root/assets/icon/gear-icon.svg" -resize 1
 "$tools/aapt2" compile --dir "$work/res" -o "$work/res.zip"
 mkdir -p "$work/assets"
 cp "$root"/assets/*.ttf "$root/LICENSE" "$root"/assets/*-LICENSE.txt "$work/assets/"
+cp -r "$root/assets/avatars" "$work/assets/"
 "$tools/aapt2" link --debug-mode -I "$platform" --manifest "$root/android/AndroidManifest.xml" -A "$work/assets" \
     -o "$work/unsigned.apk" "$work/res.zip"
 (cd "$work/apk" && zip -q -r "$work/unsigned.apk" classes.dex lib)

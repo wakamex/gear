@@ -91,6 +91,8 @@ pub fn build(b: *std.Build) void {
         phone.linkLibrary(gesso);
         phone.linkLibrary(sshLibrary(b, target, optimize));
         b.installArtifact(b.addExecutable(.{ .name = "gear-phone", .root_module = phone }));
+        // (its characters' frames, beside it, where it looks for them as the Android app does in its assets)
+        b.installDirectory(.{ .source_dir = b.path("assets/avatars"), .install_dir = .bin, .install_subdir = "avatars" });
     }
 
     const tests = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .link_libcpp = true });
