@@ -182,9 +182,10 @@ static int synthesize(void *user) {
     return 0;
 }
 
-static void speak(server *s, const char *reply) {
+// What is said of `reply` spoken: with the words taught their way, or with `as_written` without them.
+static void speak_as(server *s, const char *reply, bool as_written) {
     int *from = NULL;
-    char *spoken = gear_pronounce_reply_map(reply, &from);
+    char *spoken = as_written ? gear_speakable_map(reply, &from) : gear_pronounce_reply_map(reply, &from);
     SDL_LockMutex(s->lock);
     // A new reply: its reference starts empty, as the phone's count of what it has played does.
     s->reply16_len = 0, s->phone_at = 0, s->since_at = 0;
@@ -194,6 +195,8 @@ static void speak(server *s, const char *reply) {
     SDL_SignalCondition(s->wake);
     SDL_UnlockMutex(s->lock);
 }
+
+static void speak(server *s, const char *reply) { speak_as(s, reply, false); }
 
 // What the phone's speaker plays over the next GEAR_FRAME samples of its microphone, by its last report.
 static void phone_played(server *s, float *out) {
@@ -737,8 +740,9 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 break;
             }
             case 'U':  // a message to speak, in place of what is being spoken
+            case 'W':  // the same, without the words taught: the speech's own way, to compare
                 SDL_AddAtomicInt(&s.generation, 1);
-                speak(&s, f->data);
+                speak_as(&s, f->data, f->type == 'W');
                 break;
             case 'L':
                 list_agents(&s);

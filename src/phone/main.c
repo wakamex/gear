@@ -1199,11 +1199,12 @@ static gs_rect shifted(gs_rect r, int axis, float by) {
 
 // ---- Pronunciation ----
 
-// `text` spoken, in place of what is being spoken, for hearing how a spelling sounds.
-static void sound_out(app *a, const char *text) {
+// `text` spoken, in place of what is being spoken, for hearing how a spelling sounds: with the words
+// taught, or with `as_written` the speech's own way.
+static void sound_out(app *a, const char *text, bool as_written) {
     if (!*text || !a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
     if (a->saying || a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a), a->mood = IDLE;
-    gp_link_send(a->link, 'U', text, (uint32_t)SDL_strlen(text));
+    gp_link_send(a->link, as_written ? 'W' : 'U', text, (uint32_t)SDL_strlen(text));
     a->reply_done = false, a->audio_at = SDL_GetTicks(), a->line_count = 0;
     a->reply_base = gs_stream_position(a->play) + speech_left(a);
 }
@@ -1245,8 +1246,12 @@ static void pronunciation_panel(gs_ui *ui, app *a, gs_rect area) {
     float row = px * 2.4f;
     char before[64];
     SDL_strlcpy(before, a->word, sizeof before);
-    gs_ui_text(ui, gs_cut_top(&in, small * 1.6f), "word", small, DIM, -1);
-    gs_ui_field(ui, gs_cut_top(&in, row), "word", a->word, sizeof a->word, "proton");
+    gs_ui_text(ui, gs_cut_top(&in, small * 1.6f), "word, and how the speech says it by itself", small, DIM, -1);
+    gs_rect word = gs_cut_top(&in, row);
+    gs_rect as_is = gs_cut_right(&word, row);
+    gs_cut_right(&word, 6);
+    gs_ui_field(ui, word, "word", a->word, sizeof a->word, "proton");
+    if (play_button(ui, as_is)) sound_out(a, a->word, true);
     // (looked up on the computer once typing pauses)
     if (SDL_strcmp(before, a->word)) a->word_typed = SDL_GetTicks(), a->dictionary[0] = 0;
     if (*a->word && SDL_strcmp(a->looked_up, a->word) && SDL_GetTicks() - a->word_typed > 400 && a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN)
@@ -1257,7 +1262,7 @@ static void pronunciation_panel(gs_ui *ui, app *a, gs_rect area) {
         gs_rect hear = gs_cut_right(&line, row);
         gs_cut_right(&line, 6);
         gs_rect use = gs_cut_right(&line, gs_ui_text_width(ui, "use", px) + 24);
-        if (play_button(ui, hear)) sound_out(a, a->dictionary);
+        if (play_button(ui, hear)) sound_out(a, a->dictionary, true);
         if (gs_ui_button(ui, use, "use")) SDL_strlcpy(a->say_as, a->dictionary, sizeof a->say_as), gs_ui_edited(ui, "say as", a->say_as, (int)SDL_strlen(a->say_as));
         char label[200];
         SDL_snprintf(label, sizeof label, "dictionary: %s", a->dictionary);
@@ -1273,7 +1278,7 @@ static void pronunciation_panel(gs_ui *ui, app *a, gs_rect area) {
     gs_rect hear = gs_cut_right(&say, row);
     gs_cut_right(&say, 6);
     gs_ui_field(ui, say, "say as", a->say_as, sizeof a->say_as, "Pro-tawn");
-    if (play_button(ui, hear)) sound_out(a, a->say_as);
+    if (play_button(ui, hear)) sound_out(a, a->say_as, true);
     if (gs_ui_button_primary(ui, save, "keep") && *a->word && *a->say_as) teach(a, a->word, a->say_as), a->word[0] = a->say_as[0] = a->dictionary[0] = a->looked_up[0] = 0;
     // The words kept.
     gs_cut_top(&in, 14);
@@ -1291,7 +1296,7 @@ static void pronunciation_panel(gs_ui *ui, app *a, gs_rect area) {
             char label[300];
             SDL_snprintf(label, sizeof label, "%s  \u2192  %s", a->taught[k][0], a->taught[k][1]);
             gs_ui_text(ui, r, label, small, TEXT, -1);
-            if (play_button(ui, hear_it)) sound_out(a, a->taught[k][1]);
+            if (play_button(ui, hear_it)) sound_out(a, a->taught[k][1], true);
             gs_ui_text(ui, forget, "\u00d7", px, gs_ui_hovered(ui, forget) ? OVER : DIM, 0);
             if (gs_ui_clicked(ui, forget)) teach(a, a->taught[k][0], "");
             else if (k == selected && rows.activated) {

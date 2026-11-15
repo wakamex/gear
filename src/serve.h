@@ -8,6 +8,7 @@
 //   'M' a message typed (UTF-8): sent to the agent as one said, and answered the same way
 //   'X' stop: what is being spoken stops, and nothing more of it comes
 //   'U' a message to speak (UTF-8), in place of what is being spoken: its speech comes as a reply's
+//   'W' the same as 'U' without the words taught ('Y'): how the speech says it by itself
 //   'J' a word, to ask how it is said: answered with 'J'
 //   'Y' {"word", "say"}: the word taught to be said so from now on (an empty "say" forgets it), or ""
 //       to ask for the list; answered with 'Y'
