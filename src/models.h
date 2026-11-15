@@ -7,7 +7,7 @@
 #include <stddef.h>
 
 // The speech model has two voices, both downloaded, and the window switches between them.
-typedef enum { GEAR_MODEL_HEAR, GEAR_MODEL_SAY, GEAR_MODEL_VOICE_ALBA, GEAR_MODEL_VOICE_MARY, GEAR_MODEL_VAD, GEAR_MODEL_COUNT } gear_model;
+typedef enum { GEAR_MODEL_HEAR, GEAR_MODEL_SAY, GEAR_MODEL_VOICE_ALBA, GEAR_MODEL_VOICE_MARY, GEAR_MODEL_VAD, GEAR_MODEL_DICT, GEAR_MODEL_COUNT } gear_model;
 
 typedef struct {
     const char *name;    // the file's name in the models folder

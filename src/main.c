@@ -16,6 +16,7 @@
 #include "relay.h"
 #include "say.h"
 #include "serve.h"
+#include "pronounce.h"
 #include "speakable.h"
 #include "wav.h"
 #include "window.h"
@@ -154,7 +155,7 @@ static int read_text(const char *text) {
         }
         input[len] = 0;
     }
-    char *spoken = gear_speakable(input ? input : text);
+    char *spoken = gear_pronounce_reply(input ? input : text);
     printf("%s\n", spoken);
     SDL_free(spoken);
     SDL_free(input);
@@ -222,7 +223,7 @@ static int listen_live(void) {
             if (failed) { fprintf(stderr, "gear: %s\n", error); break; }
             printf("%s\n", reply);
             fflush(stdout);
-            char *spoken = gear_speakable(reply);
+            char *spoken = gear_pronounce_reply(reply);
             gear_say_speak(say, spoken);
             SDL_free(spoken);
             SDL_free(reply);

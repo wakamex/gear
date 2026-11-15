@@ -18,6 +18,7 @@
 #include "pipeline.h"
 #include "pocket.h"
 #include "relay.h"
+#include "pronounce.h"
 #include "speakable.h"
 #include "transcript.h"
 #include "vad.h"
@@ -158,7 +159,7 @@ static int synthesize(void *user) {
 }
 
 static void speak(server *s, const char *reply) {
-    char *spoken = gear_speakable(reply);
+    char *spoken = gear_pronounce_reply(reply);
     SDL_LockMutex(s->lock);
     // A new reply: its reference starts empty, as the phone's count of what it has played does.
     s->reply16_len = 0, s->phone_at = 0, s->since_at = 0;
@@ -681,6 +682,32 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'M':  // a message typed: sent as one said
                 if (*f->data) deliver_text(&s, f->data);
                 break;
+            case 'J': {  // a word to say rightly: how it is taught to be said, and CMUdict's way
+                char said[128] = "", suggested[128] = "";
+                gear_pronounce_get(f->data, said, sizeof said);
+                gear_pronounce_suggest(models, f->data, suggested, sizeof suggested);
+                gs_jval *o = gs_jval_object();
+                gs_jval_set(o, "word", gs_jval_str(f->data));
+                gs_jval_set(o, "say", gs_jval_str(said));
+                gs_jval_set(o, "dictionary", gs_jval_str(suggested));
+                char *json = gs_jval_write(o, false);
+                send_text(&s, 'J', json);
+                SDL_free(json), gs_jval_free(o);
+                break;
+            }
+            case 'Y': {  // {"word", "say"} taught (an empty "say" forgets it), or "" for the list alone
+                gs_json *doc = *f->data ? gs_json_parse(f->data, f->len) : NULL;
+                if (doc) {
+                    gs_jv o = gs_json_root(doc);
+                    if (!gear_pronounce_set(gs_json_str(gs_json_get(o, "word"), ""), gs_json_str(gs_json_get(o, "say"), "")))
+                        send_text(&s, 'F', "could not keep that pronunciation");
+                    gs_json_free(doc);
+                }
+                char *list = gear_pronounce_list();
+                send_text(&s, 'Y', list);
+                SDL_free(list);
+                break;
+            }
             case 'U':  // a message to speak, in place of what is being spoken
                 SDL_AddAtomicInt(&s.generation, 1);
                 speak(&s, f->data);

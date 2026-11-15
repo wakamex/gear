@@ -11,6 +11,7 @@
 #include "relay.h"
 #include "pipeline.h"
 #include "say.h"
+#include "pronounce.h"
 #include "speakable.h"
 #include "speech.h"
 #include "transcript.h"
@@ -507,12 +508,42 @@ static void test_speech(void) {
     CHECK(score >= 0 && score <= 1);
 }
 
+// Pronunciations: CMUdict's phones respelled in syllables, and taught words said so in a reply, with
+// plurals and capitals kept. The list is written under `tmp`, the user's own left alone.
+static void respells(const char *phones, const char *expected) {
+    char got[128];
+    gear_pronounce_respell(phones, got, sizeof got);
+    if (SDL_strcmp(got, expected)) fprintf(stderr, "respell %s: expected %s, got %s\n", phones, expected, got), failures++;
+}
+
+static void test_pronounce(const char *tmp) {
+    respells("P R OW1 T AA2 N", "proh-tahn");
+    respells("M EY1 Z AA2 N", "may-zahn");
+    respells("K W AA1 R K", "kwahrk");
+    respells("IH2 L EH1 K T R AA0 N", "ih-lehk-trahn");
+    char data[1100];
+    SDL_snprintf(data, sizeof data, "%spronounce", tmp);
+    SDL_CreateDirectory(data);
+    SDL_setenv_unsafe("XDG_DATA_HOME", data, 1);
+    CHECK(gear_pronounce_set("Proton", "Pro-tawn") && gear_pronounce_set("meson", "May-zawn"));
+    char *said = gear_pronounce("Protons and mesons; the proton's meson. Pro is not proton-like.");
+    CHECK(!SDL_strcmp(said, "Pro-tawns and May-zawns; the Pro-tawn's May-zawn. Pro is not Pro-tawn-like."));
+    if (SDL_strcmp(said, "Pro-tawns and May-zawns; the Pro-tawn's May-zawn. Pro is not Pro-tawn-like.")) fprintf(stderr, "pronounce: %s\n", said);
+    SDL_free(said);
+    CHECK(gear_pronounce_set("meson", ""));
+    said = gear_pronounce("a meson");
+    CHECK(!SDL_strcmp(said, "a meson"));
+    SDL_free(said);
+    SDL_unsetenv_unsafe("XDG_DATA_HOME");
+}
+
 int main(int argc, char **argv) {
     const char *data = argc > 1 ? argv[1] : "tests";
     SDL_Init(SDL_INIT_AUDIO);
     char *tmp = SDL_GetPrefPath("wakamex", "gear-tests");
     test_listen();
     test_speakable();
+    test_pronounce(tmp);
     test_speech();
     test_wav(tmp);
     test_transcript(tmp);

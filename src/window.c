@@ -16,6 +16,7 @@
 #include "pipeline.h"
 #include "relay.h"
 #include "say.h"
+#include "pronounce.h"
 #include "speakable.h"
 #include "transcript.h"
 #include "wav.h"
@@ -754,7 +755,7 @@ static void take_from(app *a, gear_relay *relay) {
         fflush(stdout);
         SDL_free(a->reply);
         a->reply = r;
-        char *spoken = gear_speakable(r);
+        char *spoken = gear_pronounce_reply(r);
         gear_say_speak(a->say, spoken);
         SDL_free(spoken);
     }

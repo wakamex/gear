@@ -35,6 +35,12 @@ static const gear_model_file files[GEAR_MODEL_COUNT] = {
         1241056, "0d871a800c420fdd5d1b17a3aea4296d1c39608f0ff4a9295eb76457eb1c88e6",
         "Silero VAD v6.2, telling speech from other sound (MIT)",
     },
+    [GEAR_MODEL_DICT] = {
+        "cmudict.dict",
+        "https://raw.githubusercontent.com/cmusphinx/cmudict/74790861f652b15e4ac49015a90074ad62a27690/cmudict.dict",
+        3618488, "81917843c7f44ce2b094ac63873c2c7a4cf802040792c455ba3ca406891c3d22",
+        "CMUdict, the Carnegie Mellon pronouncing dictionary, for suggesting how a word is said (BSD 2-clause)",
+    },
 };
 
 const gear_model_file *gear_model_info(gear_model m) { return &files[m]; }

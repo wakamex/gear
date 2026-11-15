@@ -76,6 +76,14 @@ typedef struct {
     Uint64 audio_at;      // when the last of the reply's speech came
     const char *saying;   // the text of the message being spoken (a history entry's), or NULL
     double reply_base;    // where the reply being played starts in the player's count of seconds
+    // Words taught to be said rightly (pronunciation_panel): the word, as it is said, CMUdict's way, and the
+    // words taught, from the computer.
+    bool teaching;
+    char word[64], say_as[128], dictionary[128], looked_up[64];
+    Uint64 word_typed;
+    bool say_as_came;     // the computer filled "say it as" in: the field told so when it is next drawn
+    char taught[200][2][128];
+    int taught_count;
     // The agents to pick from.
     bool picking;
     char agents[MAX_AGENTS][2][128];  // name, and the tab's title
@@ -416,6 +424,27 @@ static void take_frames(app *a) {
         case 'S': SDL_strlcpy(a->note, data, sizeof a->note); break;
         case 'F': SDL_strlcpy(a->note, data, sizeof a->note), a->mood = IDLE; break;
         case 'G': parse_agents(a, data); break;
+        case 'J': {  // how a word is said: as taught, and CMUdict's way
+            gs_json *doc = gs_json_parse(data, len);
+            if (doc && !SDL_strcasecmp(gs_json_str(gs_json_get(gs_json_root(doc), "word"), ""), a->word)) {
+                gs_jv o = gs_json_root(doc);
+                SDL_strlcpy(a->dictionary, gs_json_str(gs_json_get(o, "dictionary"), ""), sizeof a->dictionary);
+                const char *said = gs_json_str(gs_json_get(o, "say"), "");
+                if (*said) SDL_strlcpy(a->say_as, said, sizeof a->say_as), a->say_as_came = true;
+            }
+            gs_json_free(doc);
+            break;
+        }
+        case 'Y': {  // the words taught
+            gs_json *doc = gs_json_parse(data, len);
+            a->taught_count = 0;
+            for (gs_jv x = doc ? gs_json_first(gs_json_root(doc)) : NULL; x && a->taught_count < 200; x = gs_json_next(x), a->taught_count++) {
+                SDL_strlcpy(a->taught[a->taught_count][0], gs_json_str(gs_json_get(x, "word"), ""), 128);
+                SDL_strlcpy(a->taught[a->taught_count][1], gs_json_str(gs_json_get(x, "say"), ""), 128);
+            }
+            gs_json_free(doc);
+            break;
+        }
         case 'D': a->reply_done = true; break;
         case 'P': {
             SDL_PutAudioStreamData(a->conv, data, (int)len);  // (handed to the player as it plays: feed_speech)
@@ -1078,6 +1107,114 @@ static gs_rect shifted(gs_rect r, int axis, float by) {
     return r;
 }
 
+// ---- Pronunciation ----
+
+// `text` spoken, in place of what is being spoken, for hearing how a spelling sounds.
+static void sound_out(app *a, const char *text) {
+    if (!*text || !a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
+    if (a->saying || a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a), a->mood = IDLE;
+    gp_link_send(a->link, 'U', text, (uint32_t)SDL_strlen(text));
+    a->reply_done = false, a->audio_at = SDL_GetTicks();
+    a->reply_base = gs_stream_position(a->play) + speech_left(a);
+}
+
+static void teach(app *a, const char *word, const char *say) {
+    if (!a->link) return;
+    gs_jval *o = gs_jval_object();
+    gs_jval_set(o, "word", gs_jval_str(word));
+    gs_jval_set(o, "say", gs_jval_str(say));
+    char *json = gs_jval_write(o, false);
+    gp_link_send(a->link, 'Y', json, (uint32_t)SDL_strlen(json));
+    SDL_free(json), gs_jval_free(o);
+}
+
+// A small button with a play mark, to hear `text`.
+static bool play_button(gs_ui *ui, gs_rect r) {
+    bool hot = gs_ui_hovered(ui, r);
+    gs_ui_round(ui, gs_inset(r, 2), 6, hot ? RAISED : PANEL);
+    float s = r.h * 0.32f, cx = r.x + r.w / 2, cy = r.y + r.h / 2;
+    static const float bars[3] = { 0.45f, 1.0f, 0.7f };
+    for (int k = 0; k < 3; k++) {
+        float bh = s * 2 * bars[k], bw = s * 0.35f;
+        gs_ui_round(ui, (gs_rect){ cx - s + k * s * 0.8f, cy - bh / 2, bw, bh }, bw / 2, hot ? ACCENT : TEXT);
+    }
+    return gs_ui_clicked(ui, r);
+}
+
+// The words the speech says wrongly, taught how to say them: a word typed, CMUdict's way to use with
+// a tap, or a spelling of one's own, each to be heard before it is kept; the words kept below, a tap
+// on one to change it.
+static void pronunciation_panel(gs_ui *ui, app *a, gs_rect area) {
+    gs_rect m = gs_ui_modal_begin(ui, area.w - 24, area.h * 0.85f);
+    gs_rect in = gs_inset(m, 12);
+    gs_rect head = gs_cut_top(&in, px * 2);
+    gs_rect close = gs_cut_right(&head, gs_ui_text_width(ui, "close", px) + 16);
+    gs_ui_text(ui, close, "close", px, gs_ui_hovered(ui, close) ? ACCENT : TEXT, 1);
+    gs_ui_text(ui, head, "Pronunciation", px, DIM, -1);
+    bool done = gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0);
+    float row = px * 2.4f;
+    char before[64];
+    SDL_strlcpy(before, a->word, sizeof before);
+    gs_ui_text(ui, gs_cut_top(&in, small * 1.6f), "word", small, DIM, -1);
+    gs_ui_field(ui, gs_cut_top(&in, row), "word", a->word, sizeof a->word, "proton");
+    // (looked up on the computer once typing pauses)
+    if (SDL_strcmp(before, a->word)) a->word_typed = SDL_GetTicks(), a->dictionary[0] = 0;
+    if (*a->word && SDL_strcmp(a->looked_up, a->word) && SDL_GetTicks() - a->word_typed > 400 && a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN)
+        gp_link_send(a->link, 'J', a->word, (uint32_t)SDL_strlen(a->word)), SDL_strlcpy(a->looked_up, a->word, sizeof a->looked_up);
+    gs_cut_top(&in, 8);
+    if (*a->dictionary) {
+        gs_rect line = gs_cut_top(&in, row);
+        gs_rect hear = gs_cut_right(&line, row);
+        gs_cut_right(&line, 6);
+        gs_rect use = gs_cut_right(&line, gs_ui_text_width(ui, "use", px) + 24);
+        if (play_button(ui, hear)) sound_out(a, a->dictionary);
+        if (gs_ui_button(ui, use, "use")) SDL_strlcpy(a->say_as, a->dictionary, sizeof a->say_as), gs_ui_edited(ui, "say as", a->say_as, (int)SDL_strlen(a->say_as));
+        char label[200];
+        SDL_snprintf(label, sizeof label, "dictionary: %s", a->dictionary);
+        gs_ui_text(ui, line, label, small, TEXT, -1);
+    } else if (*a->word && !SDL_strcmp(a->looked_up, a->word))
+        gs_ui_text(ui, gs_cut_top(&in, row), "not in the dictionary: spell it as it sounds", small, DIM, -1);
+    gs_cut_top(&in, 6);
+    gs_ui_text(ui, gs_cut_top(&in, small * 1.6f), "say it as", small, DIM, -1);
+    if (a->say_as_came) gs_ui_edited(ui, "say as", a->say_as, (int)SDL_strlen(a->say_as)), a->say_as_came = false;
+    gs_rect say = gs_cut_top(&in, row);
+    gs_rect save = gs_cut_right(&say, gs_ui_text_width(ui, "keep", px) + 28);
+    gs_cut_right(&say, 6);
+    gs_rect hear = gs_cut_right(&say, row);
+    gs_cut_right(&say, 6);
+    gs_ui_field(ui, say, "say as", a->say_as, sizeof a->say_as, "Pro-tawn");
+    if (play_button(ui, hear)) sound_out(a, a->say_as);
+    if (gs_ui_button_primary(ui, save, "keep") && *a->word && *a->say_as) teach(a, a->word, a->say_as), a->word[0] = a->say_as[0] = a->dictionary[0] = a->looked_up[0] = 0;
+    // The words kept.
+    gs_cut_top(&in, 14);
+    gs_ui_fill(ui, (gs_rect){ in.x, in.y, in.w, 1 }, BORDER);
+    gs_cut_top(&in, 8);
+    if (!a->taught_count) gs_ui_text(ui, gs_cut_top(&in, row), "no words taught yet", small, DIM, -1);
+    else {
+        static int selected;
+        float h = px * 2.2f;
+        gs_ui_rows rows = gs_ui_list(ui, in, "taught", a->taught_count, h, &selected);
+        for (int k = rows.first; k < rows.end; k++) {
+            gs_rect r = gs_inset((gs_rect){ in.x, rows.y + k * h, in.w, h }, 4);
+            gs_rect forget = gs_cut_right(&r, h);
+            gs_rect hear_it = gs_cut_right(&r, h);
+            char label[300];
+            SDL_snprintf(label, sizeof label, "%s  \u2192  %s", a->taught[k][0], a->taught[k][1]);
+            gs_ui_text(ui, r, label, small, TEXT, -1);
+            if (play_button(ui, hear_it)) sound_out(a, a->taught[k][1]);
+            gs_ui_text(ui, forget, "\u00d7", px, gs_ui_hovered(ui, forget) ? OVER : DIM, 0);
+            if (gs_ui_clicked(ui, forget)) teach(a, a->taught[k][0], "");
+            else if (k == selected && rows.activated) {
+                SDL_strlcpy(a->word, a->taught[k][0], sizeof a->word), SDL_strlcpy(a->say_as, a->taught[k][1], sizeof a->say_as);
+                gs_ui_edited(ui, "word", a->word, (int)SDL_strlen(a->word)), gs_ui_edited(ui, "say as", a->say_as, (int)SDL_strlen(a->say_as));
+            }
+        }
+        gs_ui_list_end(ui);
+    }
+    if (done) a->teaching = false;
+    gs_ui_modal_end(ui);
+}
+
 static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
     gs_ui_fill(ui, area, BACKGROUND);
     gs_rect r = gs_inset(area, 16);
@@ -1086,7 +1223,7 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
     if (a->host[0] && a->user[0]) {
         gs_rect back = gs_cut_right(&head, gs_ui_text_width(ui, "back", px) + 16);
         gs_ui_text(ui, back, "back", px, gs_ui_hovered(ui, back) ? ACCENT : TEXT, 1);
-        if (gs_ui_clicked(ui, back) || gs_ui_key(ui, SDLK_AC_BACK, 0)) {
+        if (gs_ui_clicked(ui, back) || (!a->teaching && gs_ui_key(ui, SDLK_AC_BACK, 0))) {
             a->setup = false;
             if (!a->link) save_settings(a), connect_link(a);
         }
@@ -1116,6 +1253,12 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
         else gs_ui_text(ui, c, avatars[i], small, TEXT, 0);
         if (gs_ui_clicked(ui, c)) SDL_strlcpy(a->avatar, avatars[i], sizeof a->avatar), save_settings(a);
     }
+    // Words said wrongly, taught on the computer.
+    gs_cut_top(&r, 14);
+    if (gs_ui_button(ui, gs_cut_top(&r, row), "pronunciation: words said wrongly") && a->link) {
+        a->teaching = true;
+        gp_link_send(a->link, 'Y', "", 0);
+    }
     gs_cut_top(&r, 14);
     gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "this phone's key, for ~/.ssh/authorized_keys there:", small, DIM, -1);
     float kh = gs_ui_text_height(ui, a->key_line, small, r.w);
@@ -1143,6 +1286,7 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
         gs_cut_top(&r, 10);
         gs_ui_text_wrapped(ui, r, why, small, OVER);
     }
+    if (a->teaching) pronunciation_panel(ui, a, area);
 }
 
 // `gear-phone --say FILE.wav [HOST USER]`: the app's connection without its window, for trying the
@@ -1192,7 +1336,7 @@ static void window_points(SDL_Window *win, gs_ui *ui, float x, float y, float *p
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|pick|table|swipe|type|speaking`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|pick|table|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -1278,7 +1422,14 @@ int main(int argc, char **argv) {
     a.mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &mic, NULL, NULL);
     if (a.mic) SDL_PauseAudioStreamDevice(a.mic);
 
-    a.setup = shot ? !SDL_strcmp(argv[3], "setup") : !a.host[0] || !a.user[0];
+    a.setup = shot ? !SDL_strcmp(argv[3], "setup") || !SDL_strcmp(argv[3], "pronounce") : !a.host[0] || !a.user[0];
+    if (shot && !SDL_strcmp(argv[3], "pronounce")) {
+        a.teaching = true, a.taught_count = 2;
+        SDL_strlcpy(a.word, "lepton", sizeof a.word), SDL_strlcpy(a.looked_up, "lepton", sizeof a.looked_up);
+        SDL_strlcpy(a.dictionary, "lehp-tahn", sizeof a.dictionary), SDL_strlcpy(a.say_as, "Lep-tawn", sizeof a.say_as);
+        SDL_strlcpy(a.taught[0][0], "proton", 128), SDL_strlcpy(a.taught[0][1], "Pro-tawn", 128);
+        SDL_strlcpy(a.taught[1][0], "meson", 128), SDL_strlcpy(a.taught[1][1], "May-zawn", 128);
+    }
     if (!keyed) SDL_strlcpy(a.key_line, "could not make a key for this phone", sizeof a.key_line);
     if (!a.setup && !shot) connect_link(&a);
     int frames = 0;
@@ -1335,7 +1486,7 @@ int main(int argc, char **argv) {
         if (a.holding) send_audio(&a);
         else always_listen(&a);
         // Android's back leaves the app from the character, and goes back from settings and the agents.
-        SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, a.setup || a.picking ? "1" : "0");
+        SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, a.setup || a.picking || a.teaching ? "1" : "0");
         // The computer's key, pinned once it is first seen.
         char seen[128];
         if (a.link && !a.host_key[0] && gp_link_status(a.link, NULL, 0) == GP_OPEN && gp_link_host_key(a.link, seen, sizeof seen))

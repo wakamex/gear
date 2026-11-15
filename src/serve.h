@@ -8,6 +8,9 @@
 //   'M' a message typed (UTF-8): sent to the agent as one said, and answered the same way
 //   'X' stop: what is being spoken stops, and nothing more of it comes
 //   'U' a message to speak (UTF-8), in place of what is being spoken: its speech comes as a reply's
+//   'J' a word, to ask how it is said: answered with 'J'
+//   'Y' {"word", "say"}: the word taught to be said so from now on (an empty "say" forgets it), or ""
+//       to ask for the list; answered with 'Y'
 //   'L' the agents there are, answered with 'G'
 //   'K' the number of the newest message the phone has (from 'K' below), sent on connecting: the
 //       messages after it come again as 'Z', so none sent to a connection that had died is lost
@@ -37,6 +40,8 @@
 //   'G' the agents: [{"name", "tab", "harness", "status"}]
 //   'W' always-on, what is being said: {"text": the message so far, "draft": the piece being said,
 //       "left": seconds before it is sent, or -1}
+//   'J' {"word", "say": as taught or "", "dictionary": CMUdict's way respelled ("proh-tahn") or ""}
+//   'Y' the words taught: [{"word", "say"}]
 //   'S' what is happening, for the client to show ("hearing", "waiting for NAME")
 //   'F' what went wrong, for the client to show
 #pragma once
