@@ -9,11 +9,14 @@
 #include "env.h"
 #include "gs_json.h"
 #include "hear.h"
+#include "gs_voice.h"
 #include "models.h"
+#include "pipeline.h"
 #include "pocket.h"
 #include "relay.h"
 #include "speakable.h"
 #include "transcript.h"
+#include "vad.h"
 
 enum { READ_LIMIT = 1200, SPEECH_RATE = 24000, MAX_AUDIO = 60 * 16000 };
 
@@ -147,6 +150,19 @@ static void list_agents(server *s) {
     SDL_free(all);
 }
 
+// What is being said in always-on mode, for the phone to show as it comes: the message so far, the
+// piece being said, and the seconds before it is sent (-1 when not counting).
+static void words(server *s, gear_pipeline *p) {
+    gs_jval *o = gs_jval_object();
+    gs_jval_set(o, "text", gs_jval_str(gear_pipeline_text(p)));
+    gs_jval_set(o, "draft", gs_jval_str(gear_pipeline_draft(p)));
+    gs_jval_set(o, "left", gs_jval_num(SDL_round(gear_pipeline_countdown(p) * 10) / 10));
+    char *json = gs_jval_write(o, false);
+    send_text(s, 'W', json);
+    SDL_free(json);
+    gs_jval_free(o);
+}
+
 static void hello(server *s, const char *target, const char *voice) {
     gs_jval *o = gs_jval_object();
     gs_jval_set(o, "target", gs_jval_str(target));
@@ -155,6 +171,22 @@ static void hello(server *s, const char *target, const char *voice) {
     send_text(s, 'H', json);
     SDL_free(json);
     gs_jval_free(o);
+}
+
+// A message to the agent: shown to the phone, kept in the transcript, and sent, or read back when no
+// agent is chosen.
+typedef struct { gear_relay **relay; const char *target; gear_transcript *transcript; } delivery;
+static delivery out_to;
+
+static void deliver_text(server *s, const char *text) {
+    char status[200];
+    send_text(s, 'M', text);
+    gear_transcript_add(out_to.transcript, text, out_to.target);
+    if (*out_to.relay) {
+        gear_relay_send(*out_to.relay, text);
+        SDL_snprintf(status, sizeof status, "waiting for %s", out_to.target);
+        send_text(s, 'S', status);
+    } else send_text(s, 'R', text), speak(s, text);
 }
 
 int gear_serve(const char *models, int hear_threads, int say_threads) {
@@ -191,12 +223,22 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
     SDL_snprintf(path, sizeof path, "%smessages.jsonl", pref ? pref : "");
     SDL_free(pref);
     gear_transcript *transcript = gear_transcript_open(path, 1);
+    out_to = (delivery){ &relay, target, transcript };
     SDL_Thread *reader = SDL_CreateThread(read_frames, "gear-serve-in", &s);
     SDL_Thread *speaker = SDL_CreateThread(synthesize, "gear-serve-say", &s);
     hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
 
     float *audio = SDL_malloc(MAX_AUDIO * sizeof(float));
     int samples = 0;
+    // Always-on: the phone's audio through gear's own listener, as the window's, which finds the
+    // messages itself; opened the first time it is asked for.
+    gs_voice *voice_dsp = NULL;
+    gear_vad *vad = NULL;
+    gear_pipeline *pipe = NULL;
+    bool always = false;
+    char last_words[2400] = "";
+    float pending[160];
+    int pending_n = 0;
     for (bool open = true; open;) {
         SDL_LockMutex(s.lock);
         frame *f = s.in;
@@ -206,10 +248,35 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
         if (f) {
             switch (f->type) {
             case 'A':
-                for (Uint32 i = 0; i + 1 < f->len && samples < MAX_AUDIO; i += 2)
-                    audio[samples++] = (float)(Sint16)((Uint8)f->data[i] | (Uint8)f->data[i + 1] << 8) / 32768.0f;
+                for (Uint32 i = 0; i + 1 < f->len; i += 2) {
+                    float x = (float)(Sint16)((Uint8)f->data[i] | (Uint8)f->data[i + 1] << 8) / 32768.0f;
+                    if (!always) { if (samples < MAX_AUDIO) audio[samples++] = x; continue; }
+                    pending[pending_n++] = x;
+                    if (pending_n == GEAR_FRAME) gear_pipeline_frame(pipe, pending, NULL), pending_n = 0;
+                }
+                break;
+            case 'O':  // always-on, "1" or "0"
+                always = f->data[0] == '1';
+                if (always && !pipe) {
+                    gear_model_path(models, GEAR_MODEL_VAD, path, sizeof path);
+                    if (!(vad = gear_vad_open(path, error, sizeof error))) { send_text(&s, 'F', error); always = false; break; }
+                    voice_dsp = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH);
+                    gear_listen_params lp = gear_listen_defaults();
+                    pipe = gear_pipeline_new(voice_dsp, vad, hear, NULL, &lp, gear_countdown_remembered(models, 3));
+                    // Words as they are said, where the recogniser has a GPU (as the window's).
+                    if (SDL_strcasecmp(gear_hear_device(hear), "cpu")) gear_pipeline_set_drafter(pipe, hear);
+                }
+                if (!always && pipe) gear_pipeline_cancel(pipe);
+                pending_n = 0, samples = 0, last_words[0] = 0;
+                break;
+            case 'N':  // always-on: send what has been said now
+                if (pipe) {
+                    char *now = gear_pipeline_take(pipe);
+                    if (now) deliver_text(&s, now), SDL_free(now);
+                }
                 break;
             case 'E': {
+                if (always) break;
                 if (samples < 16000 / 4) { send_text(&s, 'F', "too short to hear"); samples = 0; break; }
                 send_text(&s, 'S', "hearing");
                 // A little silence after, as a piece of speech has from its pause.
@@ -219,15 +286,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
                 char *text = NULL;
                 while (!(text = gear_hear_take(hear, NULL))) SDL_Delay(5);
                 if (!*text) send_text(&s, 'F', "heard no words");
-                else {
-                    send_text(&s, 'M', text);
-                    gear_transcript_add(transcript, text, target);
-                    if (relay) {
-                        gear_relay_send(relay, text);
-                        SDL_snprintf(error, sizeof error, "waiting for %s", target);
-                        send_text(&s, 'S', error);
-                    } else send_text(&s, 'R', text), speak(&s, text);  // no agent: read back
-                }
+                else deliver_text(&s, text);
                 SDL_free(text);
                 break;
             }
@@ -263,6 +322,13 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
             SDL_free(f);
             continue;
         }
+        if (always && pipe) {
+            char *message = gear_pipeline_poll(pipe);
+            if (message) deliver_text(&s, message), SDL_free(message), last_words[0] = 0;
+            char now[2400];
+            SDL_snprintf(now, sizeof now, "%s|%s|%.1f", gear_pipeline_text(pipe), gear_pipeline_draft(pipe), gear_pipeline_countdown(pipe));
+            if (SDL_strcmp(now, last_words)) SDL_strlcpy(last_words, now, sizeof last_words), words(&s, pipe);
+        }
         bool failed;
         char *reply;
         while (relay && ((reply = gear_relay_take(relay, &failed, error, sizeof error)) || failed)) {
@@ -282,6 +348,9 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
     SDL_DetachThread(reader);  // (it is done, its input closed)
     gear_relay_free(relay);
     gear_transcript_close(transcript);
+    gear_pipeline_free(pipe);
+    gear_vad_free(vad);
+    if (voice_dsp) gs_voice_free(voice_dsp);
     gear_hear_close(hear);
     pt_voice_free(s.voice);
     pt_free(s.pocket);

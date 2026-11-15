@@ -33,6 +33,7 @@ typedef enum { IDLE, LISTENING, THINKING, SPEAKING } mood;
 typedef struct {
     // Where gear runs, kept in settings.txt; the phone's key, kept with gs_secret.
     char host[256], user[64], port[8], host_key[128];
+    bool always;          // always on: listening without holding, the computer finding the messages
     char pem[1024], key_line[400];
     char dir[1024];
     gp_link *link;
@@ -45,6 +46,8 @@ typedef struct {
     mood mood;
     bool holding;
     Uint64 held_at;
+    bool always_sent;     // the computer has been told always-on is on, on this connection
+    double left;          // always-on: seconds before what is said is sent, or < 0
     float level;          // the microphone's level while held, 0 to 1
     SDL_AudioStream *mic;
     bool mic_allowed;
@@ -77,6 +80,7 @@ static void load_settings(app *a) {
         else if (!SDL_strcmp(line, "user")) SDL_strlcpy(a->user, v, sizeof a->user);
         else if (!SDL_strcmp(line, "port")) SDL_strlcpy(a->port, v, sizeof a->port);
         else if (!SDL_strcmp(line, "host_key")) SDL_strlcpy(a->host_key, v, sizeof a->host_key);
+        else if (!SDL_strcmp(line, "always")) a->always = *v == '1';
     }
     SDL_free(text);
 }
@@ -84,7 +88,7 @@ static void load_settings(app *a) {
 static void save_settings(app *a) {
     char path[1100], text[700];
     settings_path(a, path, sizeof path, "settings.txt");
-    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\n", a->host, a->user, a->port, a->host_key);
+    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\n", a->host, a->user, a->port, a->host_key, a->always);
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
@@ -121,6 +125,7 @@ static void connect_link(app *a) {
     SDL_strlcpy(c.host_key, a->host_key, sizeof c.host_key);
     a->link = gp_link_open(&c);
     a->mood = IDLE;
+    a->always_sent = false;
 }
 
 static void set_text(char **slot, const char *text) { SDL_free(*slot), *slot = SDL_strdup(text); }
@@ -153,9 +158,24 @@ static void take_frames(app *a) {
                 SDL_strlcpy(a->voice, gs_json_str(gs_json_get(gs_json_root(doc), "voice"), "alba"), sizeof a->voice);
             }
             gs_json_free(doc);
+            if (a->always && !a->always_sent) gp_link_send(a->link, 'O', "1", 1), a->always_sent = true;
             break;
         }
-        case 'M': set_text(&a->said, data), a->note[0] = 0; break;
+        case 'W': {  // always-on: what is being said, and the countdown
+            gs_json *doc = gs_json_parse(data, len);
+            if (doc) {
+                gs_jv o = gs_json_root(doc);
+                const char *text = gs_json_str(gs_json_get(o, "text"), ""), *draft = gs_json_str(gs_json_get(o, "draft"), "");
+                char *both = SDL_malloc(SDL_strlen(text) + SDL_strlen(draft) + 2);
+                SDL_snprintf(both, SDL_strlen(text) + SDL_strlen(draft) + 2, "%s%s%s", text, *text && *draft ? " " : "", draft);
+                if (*both) set_text(&a->said, both);
+                SDL_free(both);
+                a->left = gs_json_num(gs_json_get(o, "left"), -1);
+            }
+            gs_json_free(doc);
+            break;
+        }
+        case 'M': set_text(&a->said, data), a->note[0] = 0, a->left = -1; if (a->always) a->mood = THINKING; break;
         case 'R': set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0; break;
         case 'S': SDL_strlcpy(a->note, data, sizeof a->note); break;
         case 'F': SDL_strlcpy(a->note, data, sizeof a->note), a->mood = IDLE; break;
@@ -176,20 +196,17 @@ static void take_frames(app *a) {
         SDL_free(data);
     }
     if (a->mood == SPEAKING && a->reply_done && gs_stream_buffered(a->play) <= 0) a->mood = IDLE;
+    if (a->mood == THINKING && a->reply && a->reply_done) a->mood = IDLE;
 }
 
 // ---- Talking ----
 
+static bool open_mic(app *a);
+
 static void start_holding(app *a) {
     if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
     // (opened here when it could not be at the start, before the system's question about the microphone was answered)
-    if (!a->mic) {
-        const SDL_AudioSpec spec = { SDL_AUDIO_S16, 1, MIC_RATE };
-        if (!(a->mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, NULL, NULL))) {
-            SDL_snprintf(a->note, sizeof a->note, "no microphone: %s", SDL_GetError());
-            return;
-        }
-    }
+    if (!open_mic(a)) return;
     if (a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a);
     SDL_ClearAudioStream(a->mic);
     SDL_ResumeAudioStreamDevice(a->mic);
@@ -210,6 +227,40 @@ static void send_audio(app *a) {
         a->level = SDL_max(a->level * 0.7f, SDL_min(rms * 8, 1));
         gp_link_send(a->link, 'A', buf, (uint32_t)got);
     }
+}
+
+// Always-on: the microphone streams while nothing is being spoken, so the reply is not heard as the user.
+static bool open_mic(app *a) {
+    if (a->mic) return true;
+    const SDL_AudioSpec spec = { SDL_AUDIO_S16, 1, MIC_RATE };
+    if (!(a->mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, NULL, NULL))) {
+        SDL_snprintf(a->note, sizeof a->note, "no microphone: %s", SDL_GetError());
+        return false;
+    }
+    return true;
+}
+
+static void always_listen(app *a) {
+    bool open = a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN && a->always_sent;
+    bool listen = a->always && open && a->mood != SPEAKING && open_mic(a);
+    if (!a->mic) return;
+    if (listen && SDL_AudioStreamDevicePaused(a->mic)) SDL_ClearAudioStream(a->mic), SDL_ResumeAudioStreamDevice(a->mic);
+    if (!listen && !a->holding && !SDL_AudioStreamDevicePaused(a->mic)) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic), a->level = 0;
+    if (listen) send_audio(a);
+}
+
+static void set_always(app *a, bool on) {
+    a->always = on;
+    save_settings(a);
+    if (a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN) gp_link_send(a->link, 'O', on ? "1" : "0", 1), a->always_sent = on;
+    a->left = -1;
+    if (!on) a->mood = a->mood == SPEAKING ? SPEAKING : IDLE;
+}
+
+// Always-on: a tap stops the reply, or sends what has been said without waiting for the countdown.
+static void tap_always(app *a) {
+    if (a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a), a->mood = IDLE;
+    else if (a->left >= 0) gp_link_send(a->link, 'N', NULL, 0), a->left = -1;
 }
 
 static void stop_holding(app *a) {
@@ -274,9 +325,15 @@ static void character(gs_ui *ui, float cx, float cy, float r, mood m, float t, f
 static const char *hint(app *a, char *buf, size_t size) {
     char why[256] = "";
     gp_link_state st = a->link ? gp_link_status(a->link, why, sizeof why) : GP_FAILED;
-    if (!a->link) return "set up the computer below";
+    if (!a->link) return "set up the computer in settings";
     if (st == GP_CONNECTING) return SDL_snprintf(buf, size, "%s…", why), buf;
     if (st == GP_FAILED) return SDL_snprintf(buf, size, "%s", why), buf;
+    if (a->always) {
+        if (a->mood == SPEAKING) return "speaking: tap to stop";
+        if (a->mood == THINKING) return a->note[0] ? a->note : "sent";
+        if (a->left >= 0) return SDL_snprintf(buf, size, "sending in %.0f s: tap to send now", SDL_ceil(a->left)), buf;
+        return a->note[0] ? a->note : "listening";
+    }
     switch (a->mood) {
     case LISTENING: return "listening: let go to send";
     case THINKING: return a->note[0] ? a->note : "hearing…";
@@ -325,12 +382,21 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     }
     gs_ui_clip(ui, NULL);
     // The character, in the middle of what is left, and what it is doing under it.
+    // Always-on's switch, under what the character is doing.
+    gs_rect toggle = gs_cut_bottom(&r, px * 2.2f);
+    const char *always_label = a->always ? "always on: on" : "always on: off";
+    float tw = gs_ui_text_width(ui, always_label, small) + 24;
+    gs_rect sw = { toggle.x + (toggle.w - tw) / 2, toggle.y, tw, toggle.h };
+    gs_ui_outline(ui, sw, sw.h / 2, 1, a->always ? ACCENT : BORDER);
+    gs_ui_text(ui, sw, always_label, small, a->always ? ACCENT : gs_ui_hovered(ui, sw) ? TEXT : DIM, 0);
+    if (gs_ui_clicked(ui, sw)) set_always(a, !a->always);
     gs_rect line = gs_cut_bottom(&r, px * 2);
     char buf[300];
-    gs_ui_text(ui, line, hint(a, buf, sizeof buf), small, a->mood == LISTENING ? ACCENT : DIM, 0);
+    bool listening = a->mood == LISTENING || (a->always && a->mood == IDLE);
+    gs_ui_text(ui, line, hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
     float radius = SDL_min(r.w, r.h) * 0.3f;
     float cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-    character(ui, cx, cy, radius, a->mood, t, a->level);
+    character(ui, cx, cy, radius, a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood, t, a->level);
     character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
     gs_ui_wake(ui, 16);
     // The agents to pick from, over everything.
@@ -355,7 +421,17 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
 static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
     gs_ui_fill(ui, area, BACKGROUND);
     gs_rect r = gs_inset(area, 16);
-    gs_ui_text(ui, gs_cut_top(&r, px * 2), "gear: the computer it talks to", px, BRIGHT, -1);
+    gs_rect head = gs_cut_top(&r, px * 2);
+    // Back to the character, once there is a computer to talk to.
+    if (a->host[0] && a->user[0]) {
+        gs_rect back = gs_cut_right(&head, gs_ui_text_width(ui, "back", px) + 16);
+        gs_ui_text(ui, back, "back", px, gs_ui_hovered(ui, back) ? ACCENT : TEXT, 1);
+        if (gs_ui_clicked(ui, back) || gs_ui_key(ui, SDLK_AC_BACK, 0)) {
+            a->setup = false;
+            if (!a->link) save_settings(a), connect_link(a);
+        }
+    }
+    gs_ui_text(ui, head, "gear: the computer it talks to", px, BRIGHT, -1);
     float row = px * 2.4f;
     gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "computer (name or address)", small, DIM, -1);
     gs_ui_field(ui, gs_cut_top(&r, row), "host", a->host, sizeof a->host, "example.org");
@@ -497,6 +573,9 @@ int main(int argc, char **argv) {
         }
         take_frames(&a);
         if (a.holding) send_audio(&a);
+        else always_listen(&a);
+        // Android's back leaves the app from the character, and goes back from settings and the agents.
+        SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, a.setup || a.picking ? "1" : "0");
         // A connection that failed is made again every five seconds, unless the key was refused or changed.
         char why[256];
         if (a.link && !a.setup && gp_link_status(a.link, why, sizeof why) == GP_FAILED && !SDL_strstr(why, "key")) {
@@ -515,7 +594,9 @@ int main(int argc, char **argv) {
             talk_screen(ui, &a, area, t);
             // Held on the character: a press that starts on it listens until it is let go, wherever.
             bool down = (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK) != 0;
-            if (!a.picking && down && !a.holding && !was_down && gs_ui_hovered(ui, character_area)) start_holding(&a);
+            if (a.always) {
+                if (!a.picking && down && !was_down && gs_ui_hovered(ui, character_area)) tap_always(&a);
+            } else if (!a.picking && down && !a.holding && !was_down && gs_ui_hovered(ui, character_area)) start_holding(&a);
             if (!down && a.holding) stop_holding(&a);
             was_down = down;
         }
