@@ -689,6 +689,10 @@ static int topic_rank(app *a, const topic *c, const char *typed) {
     return SDL_strcasestr(c->who, typed) || SDL_strcasestr(name, typed) ? 1 : 0;
 }
 
+// Where the list was drawn, and whether a tap went down and up outside it, which closes it.
+static gs_rect picker_area;
+static bool tapped_outside;
+
 // The conversations, narrowed by what is typed in the field above them and scrolled with a finger: each
 // with its unseen replies and its newest message. A tap opens one, Enter the first, and back or "close"
 // leaves the list.
@@ -702,6 +706,7 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
         for (int i = 0; i < count; i++)
             if (topic_rank(a, &all[i], typed) == best) shown[n++] = all[i];
     gs_rect m = gs_ui_modal_begin(ui, area.w - 24, area.h * 0.85f);
+    picker_area = m;
     gs_rect in = gs_inset(m, 12);
     gs_rect head = gs_cut_top(&in, px * 2);
     gs_rect close = gs_cut_right(&head, gs_ui_text_width(ui, "close", px) + 16);
@@ -709,7 +714,7 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
     gs_ui_text(ui, head, "Conversations", px, DIM, -1);
     gs_ui_field(ui, gs_cut_top(&in, px * 2.4f), "pick", typed, sizeof typed, "search conversations and agents");
     gs_cut_top(&in, 8);
-    bool done = gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0);
+    bool done = gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0) || tapped_outside;
     // (the agents asked for again every 3 s while the list shows, for which are mid-turn)
     if (a->link && SDL_GetTicks() - a->asked_agents >= 3000 && gp_link_status(a->link, NULL, 0) == GP_OPEN)
         gp_link_send(a->link, 'L', NULL, 0), a->asked_agents = SDL_GetTicks();
@@ -1327,6 +1332,9 @@ int main(int argc, char **argv) {
         float t = (float)(SDL_GetTicks() - start) / 1000.0f;
         last_area = area;
         swipe_step(&sw, &a);
+        // (by where the list was last frame: the tap that opened it does not close it)
+        bool was_picking = a.picking;
+        tapped_outside = a.picking && went_up && !moved && !gs_rect_contains(picker_area, press_x, press_y);
         if (a.setup) setup_screen(ui, &a, area);
         else {
             // Mid-swipe, the conversation beside the open one comes in beside it.
@@ -1342,7 +1350,7 @@ int main(int argc, char **argv) {
             bool on_character = went_down && !a.picking && gs_rect_contains(character_area, press_x, press_y);
             if (a.always) {
                 // (a tap, let go where it went down: a finger that moves is swiping)
-                if (went_up && !moved && !a.picking && gs_rect_contains(character_area, press_x, press_y)) tap_always(&a);
+                if (went_up && !moved && !was_picking && !a.picking && gs_rect_contains(character_area, press_x, press_y)) tap_always(&a);
             } else {
                 if (on_character && !a.holding) begin_press(&a);
                 if (a.pressing && (moved || !down)) drop_press(&a);
