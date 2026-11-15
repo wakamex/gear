@@ -33,6 +33,11 @@ static SDL_FColor hex(Uint32 c) { return (SDL_FColor){ (float)(c >> 16 & 255) / 
 
 typedef enum { IDLE, LISTENING, THINKING, SPEAKING } mood;
 
+// Which new messages are read aloud: the replies to what was sent (the computer speaks those), and
+// besides those every new message in the open conversation, or in every conversation.
+enum { READ_REPLIES, READ_OPEN, READ_ALL };
+static const char *const read_names[] = { "replies to me", "this conversation", "all conversations" };
+
 // The conversations, both sides, kept on the phone in history.jsonl so they outlast a restart: what was
 // sent and what each agent replied, with when, newest last. A conversation is one agent's, named by
 // the title of its tab (`who`), as Telegram has one topic for each.
@@ -44,6 +49,7 @@ typedef struct {
     // Where gear runs, kept in settings.txt; the phone's key, kept with gs_secret.
     char host[256], user[64], port[8], host_key[128];
     bool always;          // always on: listening without holding, the computer finding the messages
+    int read;             // which new messages are read aloud: READ_REPLIES, READ_OPEN or READ_ALL
     char avatar[16];      // the character drawn: fox, tomato, girl or robot
     char pem[1024], key_line[400];
     char dir[1024];
@@ -80,6 +86,9 @@ typedef struct {
     struct { int start, end; double at; } lines[512];
     int line_count;
     bool following;
+    // New messages waiting to be read aloud (the history's texts), each once nothing else is.
+    const char *to_read[32];
+    int to_read_count;
     float mark_y;         // where the sentence heard now was drawn, or < 0
     const char *saying;   // the text of the message being spoken (a history entry's), or NULL
     double reply_base;    // where the reply being played starts in the player's count of seconds
@@ -120,6 +129,7 @@ static void load_settings(app *a) {
         else if (!SDL_strcmp(line, "port")) SDL_strlcpy(a->port, v, sizeof a->port);
         else if (!SDL_strcmp(line, "host_key")) SDL_strlcpy(a->host_key, v, sizeof a->host_key);
         else if (!SDL_strcmp(line, "always")) a->always = *v == '1';
+        else if (!SDL_strcmp(line, "read")) a->read = SDL_clamp(SDL_atoi(v), 0, 2);
         else if (!SDL_strcmp(line, "avatar")) SDL_strlcpy(a->avatar, v, sizeof a->avatar);
         else if (!SDL_strcmp(line, "open")) SDL_strlcpy(a->open, v, sizeof a->open);
     }
@@ -127,9 +137,9 @@ static void load_settings(app *a) {
 }
 
 static void save_settings(app *a) {
-    char path[1100], text[900];
+    char path[1100], text[920];
     settings_path(a, path, sizeof path, "settings.txt");
-    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\nopen=%s\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar, a->open);
+    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\nopen=%s\nread=%d\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar, a->open, a->read);
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
@@ -389,6 +399,11 @@ static void take_frames(app *a) {
                 for (int i = a->count - 1; i >= 0 && i >= a->count - 200; i--)
                     if (a->history[i].mine == mine && !SDL_strcmp(a->history[i].who, who) && !SDL_strcmp(a->history[i].text, text)) had = true;
                 if (!had) add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine);
+                // (read aloud when new, as the setting asks: not one given again on connecting)
+                bool wanted = a->read == READ_ALL || (a->read == READ_OPEN && !SDL_strcmp(who, a->open));
+                if (!had && !mine && wanted && !gs_json_bool(gs_json_get(o, "again"), false) && !SDL_GetAtomicInt(&behind) &&
+                    a->to_read_count < (int)SDL_arraysize(a->to_read))
+                    a->to_read[a->to_read_count++] = a->history[a->count - 1].text;
             }
             gs_json_free(doc);
             break;
@@ -488,6 +503,12 @@ static void take_frames(app *a) {
         a->saying = NULL;
     }
     if (a->mood == THINKING && a->reply && a->reply_done) a->mood = IDLE;
+    // The next new message to read, once nothing is being said or heard.
+    if (a->to_read_count && !a->saying && a->mood == IDLE && !a->holding && speech_left(a) <= 0) {
+        entry e = { (char *)a->to_read[0], "", "", false };
+        SDL_memmove(a->to_read, a->to_read + 1, (size_t)--a->to_read_count * sizeof *a->to_read);
+        say_again(a, &e);
+    }
 }
 
 // ---- Talking ----
@@ -1322,8 +1343,13 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
         else gs_ui_text(ui, c, avatars[i], small, TEXT, 0);
         if (gs_ui_clicked(ui, c)) SDL_strlcpy(a->avatar, avatars[i], sizeof a->avatar), save_settings(a);
     }
-    // Words said wrongly, taught on the computer.
+    // Which new messages are read aloud, a tap going on to the next choice.
     gs_cut_top(&r, 14);
+    char read_label[80];
+    SDL_snprintf(read_label, sizeof read_label, "read aloud: %s", read_names[a->read]);
+    if (gs_ui_button(ui, gs_cut_top(&r, row), read_label)) a->read = (a->read + 1) % 3, save_settings(a);
+    // Words said wrongly, taught on the computer.
+    gs_cut_top(&r, 8);
     if (gs_ui_button(ui, gs_cut_top(&r, row), "pronunciation: words said wrongly") && a->link) {
         a->teaching = true;
         gp_link_send(a->link, 'Y', "", 0);
@@ -1529,6 +1555,7 @@ int main(int argc, char **argv) {
                 if (e.type == SDL_EVENT_DID_ENTER_BACKGROUND) {
                     stop_holding(&a);
                     SDL_SetAtomicInt(&behind, 1);
+                    a.to_read_count = 0;  // (what came while in front and was not read yet is not read later)
                     if (a.link) gp_link_set_background(a.link, true);
                 }
                 if (e.type == SDL_EVENT_WILL_ENTER_FOREGROUND) {

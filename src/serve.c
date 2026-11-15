@@ -392,9 +392,11 @@ static void log_message(server *s, const char *who, const char *at, bool mine, c
 static void replay(server *s, long long seen) {
     for (int i = 0; i < log_count; i++) {
         if (log_of[i].seq <= seen) continue;
-        char *line = log_line(&log_of[i]);
-        send_text(s, 'Z', line);
-        SDL_free(line);
+        // (marked as given again, which the phone shows and does not read aloud as new)
+        char *line = log_line(&log_of[i]), *again = SDL_malloc(SDL_strlen(line) + 16);
+        SDL_snprintf(again, SDL_strlen(line) + 16, "{\"again\":true,%s", line + 1);
+        send_text(s, 'Z', again);
+        SDL_free(line), SDL_free(again);
         send_seq(s, log_of[i].seq);
     }
 }

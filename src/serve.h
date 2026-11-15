@@ -34,7 +34,8 @@
 //   'L' before each sentence's speech: {"start", "end": the bytes of the reply or message being spoken
 //       it was read from, "at": seconds into that speech where it starts}, for showing what is heard
 //   'D' the reply has been spoken
-//   'Z' a message to show and not speak: {"seq", "who", "at", "text", "mine" when the user's}: a
+//   'Z' a message to show and not speak: {"seq", "who", "at", "text", "mine" when the user's, "again" when given
+//       again after 'K'}: a
 //       reply from an agent sent to before, what Panetone posts to Mihai's own channels (the hub
 //       follows `panetone watch`), as Telegram shows it, or one given again after the phone's 'K'
 //   'K' the number of the message just sent ('M', 'R' or 'Z'), as the hub's log (hub-log.jsonl) has it
