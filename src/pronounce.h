@@ -10,8 +10,13 @@
 // `text` with each taught word replaced by how to say it, matched whole and in any case, with a
 // plural's "s" or "es" kept after it and a capital first letter kept. SDL_free it.
 char *gear_pronounce(const char *text);
+// The same carrying `from` (each byte of `text`'s place elsewhere, one more than its length) over to
+// what is written, in *out_from (SDL_free it).
+char *gear_pronounce_map(const char *text, const int *from, int **out_from);
 // What is said of a reply: gear_speakable's reading of it, with the taught words. SDL_free it.
 char *gear_pronounce_reply(const char *reply);
+// The same with each byte's place in `reply` (gear_speakable_map), in *from; SDL_free it.
+char *gear_pronounce_reply_map(const char *reply, int **from);
 // Teaches `word` (one word, no spaces) to be said as `say`; an empty `say` forgets it. False when the
 // list could not be written.
 bool gear_pronounce_set(const char *word, const char *say);

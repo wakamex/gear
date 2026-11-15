@@ -44,6 +44,7 @@ typedef struct {
     // Speech: text queued for the synthesis thread, and the voice to load before the next.
     SDL_Condition *wake;
     char *speak, *next_voice;
+    int *speak_from;  // for each byte of `speak`, its place in the reply (gear_pronounce_reply_map)
     bool quit;
     SDL_AtomicInt generation;  // advanced by a stop; a synthesis of an older one gives up
     struct pt_context *pocket;
@@ -97,11 +98,12 @@ static int read_frames(void *user) {
     return 0;
 }
 
-typedef struct { server *s; int generation; } job;
+typedef struct { server *s; int generation; long long samples; } job;
 
 static bool on_chunk(const float *samples, int n, void *user) {
     job *j = user;
     if (SDL_GetAtomicInt(&j->s->generation) != j->generation) return false;
+    j->samples += n;
     Sint16 *pcm = SDL_malloc((size_t)n * sizeof *pcm);
     for (int i = 0; i < n; i++) pcm[i] = (Sint16)SDL_clamp(samples[i] * 32767.0f, -32768.0f, 32767.0f);
     // (kept at 16 kHz too, as the reference for what the phone plays)
@@ -127,8 +129,9 @@ static int synthesize(void *user) {
         while (!s->speak && !s->next_voice && !s->quit) SDL_WaitCondition(s->wake, s->lock);
         if (s->quit) break;
         char *voice = s->next_voice, *text = s->speak;
-        s->next_voice = NULL, s->speak = NULL;
-        job j = { s, SDL_GetAtomicInt(&s->generation) };
+        int *from = s->speak_from;
+        s->next_voice = NULL, s->speak = NULL, s->speak_from = NULL;
+        job j = { s, SDL_GetAtomicInt(&s->generation), 0 };
         SDL_UnlockMutex(s->lock);
         if (voice) {
             struct pt_voice *v = pt_voice_load(s->pocket, voice, 0);
@@ -139,15 +142,36 @@ static int synthesize(void *user) {
             SDL_LockMutex(s->lock);
             s->synthesizing = true;
             SDL_UnlockMutex(s->lock);
-            struct pt_tts_params p;
-            pt_tts_default_params(&p);
-            p.text = text;
-            p.voice = s->voice;
-            p.on_chunk = on_chunk;
-            p.user_data = &j;
-            pt_synthesize(s->pocket, &p, NULL);
+            // Sentence by sentence, each told to the phone before its speech ('L'): where in the reply it
+            // was read from, and how far into the speech it starts, for the phone to show it as it is heard.
+            size_t n = SDL_strlen(text);
+            for (size_t a = 0; a < n && SDL_GetAtomicInt(&s->generation) == j.generation;) {
+                while (a < n && text[a] == ' ') a++;
+                if (a >= n) break;
+                size_t e = a;
+                while (e < n && !(SDL_strchr(".!?", text[e]) && (e + 1 == n || text[e + 1] == ' '))) e++;
+                if (e < n) e++;
+                size_t next = e;
+                while (next < n && text[next] == ' ') next++;
+                if (from) {
+                    char line[96];
+                    SDL_snprintf(line, sizeof line, "{\"start\":%d,\"end\":%d,\"at\":%.3f}", from[a], SDL_max(from[a], from[next]), (double)j.samples / SPEECH_RATE);
+                    send_text(s, 'L', line);
+                }
+                char kept = text[e];
+                text[e] = 0;
+                struct pt_tts_params p;
+                pt_tts_default_params(&p);
+                p.text = text + a;
+                p.voice = s->voice;
+                p.on_chunk = on_chunk;
+                p.user_data = &j;
+                pt_synthesize(s->pocket, &p, NULL);
+                text[e] = kept;
+                a = next;
+            }
             if (SDL_GetAtomicInt(&s->generation) == j.generation) send_frame(s, 'D', NULL, 0);
-            SDL_free(text);
+            SDL_free(text), SDL_free(from);
             SDL_LockMutex(s->lock);
             s->synthesizing = false;
             SDL_UnlockMutex(s->lock);
@@ -159,13 +183,14 @@ static int synthesize(void *user) {
 }
 
 static void speak(server *s, const char *reply) {
-    char *spoken = gear_pronounce_reply(reply);
+    int *from = NULL;
+    char *spoken = gear_pronounce_reply_map(reply, &from);
     SDL_LockMutex(s->lock);
     // A new reply: its reference starts empty, as the phone's count of what it has played does.
     s->reply16_len = 0, s->phone_at = 0, s->since_at = 0;
     SDL_ClearAudioStream(s->to16);
-    SDL_free(s->speak);
-    s->speak = spoken;
+    SDL_free(s->speak), SDL_free(s->speak_from);
+    s->speak = spoken, s->speak_from = from;
     SDL_SignalCondition(s->wake);
     SDL_UnlockMutex(s->lock);
 }
@@ -193,6 +218,7 @@ static void phone_stop(void *user) {
     SDL_LockMutex(s->lock);
     SDL_AddAtomicInt(&s->generation, 1);
     SDL_free(s->speak), s->speak = NULL;
+    SDL_free(s->speak_from), s->speak_from = NULL;
     s->phone_playing = false, s->stopping = true;
     SDL_UnlockMutex(s->lock);
     send_frame(s, 'I', NULL, 0);

@@ -516,6 +516,21 @@ static void respells(const char *phones, const char *expected) {
     if (SDL_strcmp(got, expected)) fprintf(stderr, "respell %s: expected %s, got %s\n", phones, expected, got), failures++;
 }
 
+// Each byte said leads back to the reply: a word's to its first byte, past Markdown's marks; a number
+// said in words to its digits; a code block's count to the fence.
+static void test_speakable_map(void) {
+    const char *reply = "Hi there. It costs **energy** to pull 2 quarks!\n\n```\nls\n```\n\n- Done.";
+    int *from = NULL;
+    char *said = gear_speakable_map(reply, &from);
+    const char *at;
+    CHECK((at = SDL_strstr(said, "energy")) && !SDL_strncmp(reply + from[at - said], "energy", 6));
+    CHECK((at = SDL_strstr(said, "two")) && reply[from[at - said]] == '2');
+    CHECK((at = SDL_strstr(said, "A one-line code block")) && !SDL_strncmp(reply + from[at - said], "```", 3));
+    CHECK((at = SDL_strstr(said, "Done")) && !SDL_strncmp(reply + from[at - said], "Done", 4));
+    CHECK(from[SDL_strlen(said)] == (int)SDL_strlen(reply));
+    SDL_free(said), SDL_free(from);
+}
+
 static void test_pronounce(const char *tmp) {
     respells("P R OW1 T AA2 N", "proh-tahn");
     respells("M EY1 Z AA2 N", "may-zahn");
@@ -543,6 +558,7 @@ int main(int argc, char **argv) {
     char *tmp = SDL_GetPrefPath("wakamex", "gear-tests");
     test_listen();
     test_speakable();
+    test_speakable_map();
     test_pronounce(tmp);
     test_speech();
     test_wav(tmp);

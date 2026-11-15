@@ -60,12 +60,21 @@ static const taught *find(const char *word, size_t n) {
 
 static bool letter(char c) { return SDL_isalpha((unsigned char)c); }  // (so "proton's" is the word and its 's)
 
-char *gear_pronounce(const char *text) {
+char *gear_pronounce(const char *text) { return gear_pronounce_map(text, NULL, NULL); }
+
+// `out_from[k]` for each byte k written: `from` of the text's byte it stands for (a taught word's
+// first), when there is a `from`.
+char *gear_pronounce_map(const char *text, const int *from, int **out_from) {
     begin();
     size_t cap = SDL_strlen(text) * 2 + 64, len = 0;
     char *out = SDL_malloc(cap);
+    int *map = from ? SDL_malloc(cap * sizeof *map) : NULL;
+#define MAPPED(k, i) \
+    do { \
+        if (map) map[k] = from[i]; \
+    } while (0)
     for (const char *s = text; *s;) {
-        if (!letter(*s)) { out[len++] = *s++; goto room; }
+        if (!letter(*s)) { MAPPED(len, s - text); out[len++] = *s++; goto room; }
         const char *e = s;
         while (letter(*e)) e++;
         size_t n = (size_t)(e - s);
@@ -77,27 +86,36 @@ char *gear_pronounce(const char *text) {
         if (t) {
             size_t at = len;
             size_t sn = SDL_strlen(t->say);
-            if (len + sn + n + 8 >= cap) cap = (len + sn + n + 8) * 2, out = SDL_realloc(out, cap);
+            if (len + sn + n + 8 >= cap) cap = (len + sn + n + 8) * 2, out = SDL_realloc(out, cap), map = map ? SDL_realloc(map, cap * sizeof *map) : NULL;
+            for (size_t k = 0; k < sn; k++) MAPPED(len + k, s - text);
             SDL_memcpy(out + len, t->say, sn), len += sn;
             // (a capital where the word had one, at the start of a sentence)
             if (SDL_isupper((unsigned char)*s)) out[at] = (char)SDL_toupper((unsigned char)out[at]);
+            for (size_t k = stem; k < n; k++) MAPPED(len + k - stem, s + k - text);
             SDL_memcpy(out + len, s + stem, n - stem), len += n - stem;
         } else {
-            if (len + n + 8 >= cap) cap = (len + n + 8) * 2, out = SDL_realloc(out, cap);
+            if (len + n + 8 >= cap) cap = (len + n + 8) * 2, out = SDL_realloc(out, cap), map = map ? SDL_realloc(map, cap * sizeof *map) : NULL;
+            for (size_t k = 0; k < n; k++) MAPPED(len + k, s + k - text);
             SDL_memcpy(out + len, s, n), len += n;
         }
         s = e;
     room:
-        if (len + 8 >= cap) cap *= 2, out = SDL_realloc(out, cap);
+        if (len + 8 >= cap) cap *= 2, out = SDL_realloc(out, cap), map = map ? SDL_realloc(map, cap * sizeof *map) : NULL;
     }
+#undef MAPPED
     out[len] = 0;
+    if (map) map[len] = from[SDL_strlen(text)];
+    if (out_from) *out_from = map;
     end();
     return out;
 }
 
-char *gear_pronounce_reply(const char *reply) {
-    char *spoken = gear_speakable(reply), *said = gear_pronounce(spoken);
-    SDL_free(spoken);
+char *gear_pronounce_reply(const char *reply) { return gear_pronounce_reply_map(reply, NULL); }
+
+char *gear_pronounce_reply_map(const char *reply, int **from) {
+    int *spoken_from = NULL;
+    char *spoken = gear_speakable_map(reply, from ? &spoken_from : NULL), *said = gear_pronounce_map(spoken, spoken_from, from);
+    SDL_free(spoken), SDL_free(spoken_from);
     return said;
 }
 

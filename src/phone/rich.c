@@ -12,7 +12,7 @@ typedef struct {
     float font, colw[COLS], rowh[ROWS], line;
 } table;
 
-typedef struct { char *text; table *t; float height; } piece;  // a paragraph or a table
+typedef struct { char *text; table *t; float height; int from, to; } piece;  // a paragraph or a table, and its bytes in the text
 
 // A text's layout at one width, kept for the frames after (KEPT of them, the oldest replaced).
 typedef struct { Uint64 hash; float width, px; int n; piece p[PIECES]; float height; } layout;
@@ -191,13 +191,13 @@ static void forget(layout *l) {
     SDL_zerop(l);
 }
 
-static void add_text(layout *l, const char *s, const char *e) {
+static void add_text(layout *l, const char *text, const char *s, const char *e) {
     while (s < e && (*s == '\n' || blank(*s))) s++;
     while (e > s && (e[-1] == '\n' || blank(e[-1]))) e--;
     if (s == e || l->n == PIECES) return;
-    char *text = SDL_malloc((size_t)(e - s) + 1);
-    SDL_memcpy(text, s, (size_t)(e - s)), text[e - s] = 0;
-    l->p[l->n++] = (piece){ text, NULL, 0 };
+    char *copy = SDL_malloc((size_t)(e - s) + 1);
+    SDL_memcpy(copy, s, (size_t)(e - s)), copy[e - s] = 0;
+    l->p[l->n++] = (piece){ copy, NULL, 0, (int)(s - text), (int)(e - text) };
 }
 
 static layout *lay_out(gs_ui *ui, const char *text, float width, const gp_rich_style *st) {
@@ -213,16 +213,16 @@ static layout *lay_out(gs_ui *ui, const char *text, float width, const gp_rich_s
         const char *e = line_end(s);
         const char *next = *e ? e + 1 : e;
         if (table_row(s, e) && *next && table_rule(next, line_end(next)) && l->n < PIECES - 1) {
-            add_text(l, run, s);
+            add_text(l, text, run, s);
             const char *end = next;
             while (*end && table_row(end, line_end(end))) end = *line_end(end) ? line_end(end) + 1 : line_end(end);
-            l->p[l->n++] = (piece){ NULL, parse_table(s, end), 0 };
+            l->p[l->n++] = (piece){ NULL, parse_table(s, end), 0, (int)(s - text), (int)(end - text) };
             s = run = end;
             continue;
         }
         s = next;
     }
-    add_text(l, run, text + SDL_strlen(text));
+    add_text(l, text, run, text + SDL_strlen(text));
     float gap = st->px * 0.5f;
     for (int i = 0; i < l->n; i++) {
         piece *p = &l->p[i];
@@ -233,13 +233,39 @@ static layout *lay_out(gs_ui *ui, const char *text, float width, const gp_rich_s
 }
 
 float gp_rich(gs_ui *ui, gs_rect at, const char *text, const gp_rich_style *s, bool draw) {
+    if (!draw) return lay_out(ui, text, at.w, s)->height;
+    return gp_rich_marked(ui, at, text, s, 0, 0, NULL);
+}
+
+float gp_rich_marked(gs_ui *ui, gs_rect at, const char *text, const gp_rich_style *s, int start, int end, float *mark_y) {
     layout *l = lay_out(ui, text, at.w, s);
-    if (!draw) return l->height;
     float y = at.y, gap = s->px * 0.5f;
+    bool placed = false;
     for (int i = 0; i < l->n; i++) {
         const piece *p = &l->p[i];
-        if (p->t) draw_table(ui, p->t, at.x, y, s);
-        else gs_ui_text_wrapped(ui, (gs_rect){ at.x, y, at.w, p->height }, p->text, s->px, s->text);
+        int a = SDL_max(start, p->from), b = SDL_min(end, p->to);  // what of the mark is in this piece
+        if (p->t) {
+            if (a < b) {
+                float w = 0;
+                for (int c = 0; c < p->t->cols; c++) w += p->t->colw[c];
+                gs_ui_round(ui, (gs_rect){ at.x - 4, y - 2, w + 8, p->height + 4 }, 4, s->mark);
+                if (mark_y && !placed) *mark_y = y, placed = true;
+            }
+            draw_table(ui, p->t, at.x, y, s);
+        } else if (a < b) {
+            // (bytes of the piece's own copy, which begins at p->from)
+            gs_ui_text_span span = { a - p->from, b - p->from, 0, s->marked, s->mark, false };
+            int from = 0, to = 0, clicked;
+            gs_ui_text_spans(ui, (gs_rect){ at.x, y, at.w, p->height }, "spoken", p->text, s->px, s->text, NULL, 0, &span, 1, &from, &to, &clicked);
+            if (mark_y && !placed) {
+                // The line the mark starts on: below the text before it, less a line when that text
+                // runs on into the line.
+                char *before = SDL_strndup(p->text, (size_t)span.start);
+                float h = *before ? gs_ui_text_height(ui, before, s->px, at.w) : 0, line = gs_ui_text_height(ui, "0", s->px, 1e6f);
+                *mark_y = y + SDL_max(0, h - line), placed = true;
+                SDL_free(before);
+            }
+        } else gs_ui_text_wrapped(ui, (gs_rect){ at.x, y, at.w, p->height }, p->text, s->px, s->text);
         y += p->height + gap;
     }
     return l->height;

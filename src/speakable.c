@@ -2,16 +2,26 @@
 #include <SDL3/SDL.h>
 #include <string.h>
 
-typedef struct { char *s; size_t len, cap; } buf;
+// Text being written; with `map`, each byte's place in the reply it came from in `from` (the reply's
+// bytes begin at `base`), `at` being the place of what is written now.
+typedef struct { char *s; size_t len, cap; int *from; int at; bool map; const char *base; } buf;
 
 static void put(buf *b, const char *s, size_t n) {
     if (b->len + n + 1 > b->cap) {
         while (b->len + n + 1 > b->cap) b->cap = b->cap ? b->cap * 2 : 256;
         b->s = SDL_realloc(b->s, b->cap);
+        if (b->map) b->from = SDL_realloc(b->from, b->cap * sizeof *b->from);
     }
     SDL_memcpy(b->s + b->len, s, n);
+    if (b->map)
+        for (size_t i = 0; i <= n; i++) b->from[b->len + i] = b->at;
     b->len += n;
     b->s[b->len] = 0;
+}
+
+// Bytes of the reply itself, each from its own place.
+static void put_source(buf *b, const char *p, size_t n) {
+    for (size_t i = 0; i < n; i++) b->at = (int)(p + i - b->base), put(b, p + i, 1);
 }
 static void puts_(buf *b, const char *s) { put(b, s, SDL_strlen(s)); }
 
@@ -438,12 +448,12 @@ static bool token(buf *b, const char *t, size_t n, bool after_number) {
 // Inline Markdown dropped from one line of text: code spans keep their content, links their text,
 // emphasis marks go. Then each word goes through token().
 static void inline_text(buf *out, const char *s) {
-    buf plain = { 0 };
+    buf plain = { .map = out->map, .base = out->base };
     for (const char *p = s; *p;) {
         if (*p == '`') {
             size_t ticks = strspn(p, "`");
             const char *close = SDL_strstr(p + ticks, ticks == 1 ? "`" : ticks == 2 ? "``" : "```");
-            if (close) { put(&plain, p + ticks, (size_t)(close - p - ticks)); p = close + ticks; continue; }
+            if (close) { put_source(&plain, p + ticks, (size_t)(close - p - ticks)); p = close + ticks; continue; }
             p += ticks;
             continue;
         }
@@ -456,6 +466,7 @@ static void inline_text(buf *out, const char *s) {
                 size_t n = SDL_min((size_t)(close - p - 1), sizeof text - 1);
                 SDL_memcpy(text, p + 1, n);
                 text[n] = 0;
+                plain.at = (int)(p + 1 - plain.base);
                 puts_(&plain, text);
                 p = end + 1;
                 continue;
@@ -468,20 +479,21 @@ static void inline_text(buf *out, const char *s) {
         }
         if (*p == '<') {  // HTML tags and autolinks: an autolink keeps its address, a tag goes
             const char *end = SDL_strchr(p, '>');
-            if (end && (SDL_strncmp(p + 1, "http", 4) == 0)) { put(&plain, p + 1, (size_t)(end - p - 1)); p = end + 1; continue; }
+            if (end && (SDL_strncmp(p + 1, "http", 4) == 0)) { put_source(&plain, p + 1, (size_t)(end - p - 1)); p = end + 1; continue; }
             if (end && (SDL_isalpha((unsigned char)p[1]) || p[1] == '/')) { p = end + 1; continue; }
         }
-        put(&plain, p, 1);
+        put_source(&plain, p, 1);
         p++;
     }
     bool number = false;  // the last word ended in a number, so a unit after it is read as one
     for (const char *p = plain.s ? plain.s : ""; *p;) {
+        if (out->map) out->at = plain.from[p - plain.s];
         if (*p == ' ' || *p == '\t') { if (out->len && out->s[out->len - 1] != ' ') puts_(out, " "); p++; continue; }
         size_t n = strcspn(p, " \t");
         number = token(out, p, n, number);
         p += n;
     }
-    SDL_free(plain.s);
+    SDL_free(plain.s), SDL_free(plain.from);
 }
 
 static const char *skip_spaces(const char *s) {
@@ -517,10 +529,14 @@ static void counted(buf *b, const char *what, int n, const char *unit) {
     end_sentence(b);
 }
 
-char *gear_speakable(const char *reply) {
-    buf b = { 0 };
+char *gear_speakable(const char *reply) { return gear_speakable_map(reply, NULL); }
+
+char *gear_speakable_map(const char *reply, int **from) {
+    buf b = { .map = from != NULL };
     puts_(&b, "");
     char *copy = SDL_strdup(reply ? reply : "");
+    b.base = copy;
+    int fence_at = 0, table_at = 0;  // where the code block or table being counted began
     // Line by line: fences and tables are counted, headings and list items become sentences, and the
     // lines of a paragraph join with spaces.
     char fence[4] = "";
@@ -532,22 +548,27 @@ char *gear_speakable(const char *reply) {
         size_t len = SDL_strlen(l);
         if (len && l[len - 1] == '\r') l[--len] = 0;
         const char *t = skip_spaces(l);
+        b.at = (int)(l - copy);
         if (fence[0]) {
-            if (!SDL_strncmp(t, fence, 3)) { counted(&b, "code block", code_lines, "line"); fence[0] = 0; }
+            if (!SDL_strncmp(t, fence, 3)) { b.at = fence_at; counted(&b, "code block", code_lines, "line"); fence[0] = 0; }
             else code_lines++;
             continue;
         }
-        if (!SDL_strncmp(t, "```", 3) || !SDL_strncmp(t, "~~~", 3)) { SDL_memcpy(fence, t, 3); fence[3] = 0; code_lines = 0; continue; }
+        if (!SDL_strncmp(t, "```", 3) || !SDL_strncmp(t, "~~~", 3)) { SDL_memcpy(fence, t, 3); fence[3] = 0; code_lines = 0; fence_at = b.at; continue; }
         if (*t == '|') {
+            if (!table_rows && !table_has_rule) table_at = b.at;
             if (table_rule(t)) table_has_rule = true;
             else table_rows++;
             continue;
         }
         if (table_rows) {
             // The header row is not counted as a row of the table once a rule follows it.
+            int here = b.at;
+            b.at = table_at;
             counted(&b, "table", table_has_rule ? table_rows - 1 : table_rows, "row");
             table_rows = 0;
             table_has_rule = false;
+            b.at = here;
         }
         if (!*t) { end_sentence(&b); continue; }
         if (thematic_break(t)) { end_sentence(&b); continue; }
@@ -576,15 +597,22 @@ char *gear_speakable(const char *reply) {
         if (b.len && b.s[b.len - 1] != ' ') puts_(&b, " ");
         inline_text(&b, t);
     }
-    if (fence[0]) counted(&b, "code block", code_lines, "line");  // a fence never closed
-    if (table_rows) counted(&b, "table", table_has_rule ? table_rows - 1 : table_rows, "row");
+    if (fence[0]) b.at = fence_at, counted(&b, "code block", code_lines, "line");  // a fence never closed
+    if (table_rows) b.at = table_at, counted(&b, "table", table_has_rule ? table_rows - 1 : table_rows, "row");
     end_sentence(&b);
     trim_end(&b);
     SDL_free(copy);
     // "!." and "?." where a quoted or coded sentence ends inside the sentence around it.
     size_t o = 0;
     for (size_t i = 0; i < b.len; i++)
-        if (!(b.s[i] == '.' && i && (b.s[i - 1] == '!' || b.s[i - 1] == '?'))) b.s[o++] = b.s[i];
+        if (!(b.s[i] == '.' && i && (b.s[i - 1] == '!' || b.s[i - 1] == '?'))) {
+            if (b.map) b.from[o] = b.from[i];
+            b.s[o++] = b.s[i];
+        }
     if (b.s) b.s[b.len = o] = 0;
+    if (from) {
+        if (b.map) b.from[b.len] = (int)SDL_strlen(reply ? reply : "");  // (the end, past the last byte)
+        *from = b.from;
+    }
     return b.s;
 }

@@ -74,6 +74,13 @@ typedef struct {
     gs_stream *play;
     bool reply_done;
     Uint64 audio_at;      // when the last of the reply's speech came
+    // The sentences of what is being spoken ('L'): the bytes of the message each was read from, and
+    // where in its speech it starts; the one heard now is marked, and the conversation follows it
+    // until a finger moves it.
+    struct { int start, end; double at; } lines[512];
+    int line_count;
+    bool following;
+    float mark_y;         // where the sentence heard now was drawn, or < 0
     const char *saying;   // the text of the message being spoken (a history entry's), or NULL
     double reply_base;    // where the reply being played starts in the player's count of seconds
     // Words taught to be said rightly (pronunciation_panel): the word, as it is said, CMUdict's way, and the
@@ -332,7 +339,7 @@ static double speech_left(app *a) { return gs_stream_buffered(a->play) + SDL_Get
 static void stop_speaking(app *a) {
     gs_stream_flush(a->play);
     SDL_ClearAudioStream(a->conv);
-    a->saying = NULL;
+    a->saying = NULL, a->line_count = 0;
 }
 
 // A message's speaker tapped: the message spoken, in place of what was; tapped while it is spoken, stopped.
@@ -343,6 +350,7 @@ static void say_again(app *a, const entry *e) {
     if (same) return;
     gp_link_send(a->link, 'U', e->text, (uint32_t)SDL_strlen(e->text));
     a->saying = e->text, a->reply_done = false, a->audio_at = SDL_GetTicks();  // (its speech has 2 s to start)
+    a->line_count = 0, a->following = true;
     a->reply_base = gs_stream_position(a->play) + speech_left(a);
 }
 
@@ -417,13 +425,26 @@ static void take_frames(app *a) {
         case 'R':
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0, a->audio_at = SDL_GetTicks();
             add_message(a, data, here(a), false);
-            if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text;  // (spoken as it comes)
+            if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text, a->following = true;  // (spoken as it comes)
+            a->line_count = 0;
             a->reply_base = gs_stream_position(a->play) + speech_left(a);
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
         case 'S': SDL_strlcpy(a->note, data, sizeof a->note); break;
         case 'F': SDL_strlcpy(a->note, data, sizeof a->note), a->mood = IDLE; break;
         case 'G': parse_agents(a, data); break;
+        case 'L': {  // a sentence of what is being spoken, before its speech
+            gs_json *doc = gs_json_parse(data, len);
+            if (doc && a->line_count < (int)SDL_arraysize(a->lines)) {
+                gs_jv o = gs_json_root(doc);
+                a->lines[a->line_count].start = (int)gs_json_num(gs_json_get(o, "start"), 0);
+                a->lines[a->line_count].end = (int)gs_json_num(gs_json_get(o, "end"), 0);
+                a->lines[a->line_count].at = gs_json_num(gs_json_get(o, "at"), 0);
+                a->line_count++;
+            }
+            gs_json_free(doc);
+            break;
+        }
         case 'J': {  // how a word is said: as taught, and CMUdict's way
             gs_json *doc = gs_json_parse(data, len);
             if (doc && !SDL_strcasecmp(gs_json_str(gs_json_get(gs_json_root(doc), "word"), ""), a->word)) {
@@ -813,6 +834,28 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
     gs_ui_modal_end(ui);
 }
 
+// The sentence of `text` heard now, as bytes [*start, *end) of it: the last whose speech has begun,
+// its end brought back over the spaces and list marks before the next. False when none is.
+static bool heard_now(app *a, const char *text, int *start, int *end) {
+    if (!a->saying || a->saying != text || !a->line_count) return false;
+    double t = gs_stream_position(a->play) - a->reply_base;
+    int k = -1;
+    for (int i = 0; i < a->line_count; i++)
+        if (a->lines[i].at <= t) k = i;
+    if (k < 0) return false;
+    int len = (int)SDL_strlen(text), b = SDL_clamp(a->lines[k].end, 0, len);
+    *start = SDL_clamp(a->lines[k].start, 0, b);
+    for (;;) {
+        while (b > *start && SDL_strchr(" \t\n", text[b - 1])) b--;
+        int line = b;  // a line of nothing but a list or quote mark: the next item's, not this sentence's
+        while (line > *start && text[line - 1] != '\n') line--;
+        if (line == *start || b - line > 3 || !SDL_strchr("-*+>#", text[line])) break;
+        b = line;
+    }
+    *end = b;
+    return *end > *start;
+}
+
 // Drawing the conversation beside the open one, as a swipe brings it in: nothing in it takes a tap.
 static bool preview;
 
@@ -822,7 +865,8 @@ static bool preview;
 static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool live, bool draw) {
     float head = small * 1.7f, pad = 8, w = at.w - pad - 4;
     const char *text = e->text;
-    gp_rich_style style = { e->mine ? small + 1 : px, 11, e->mine ? DIM : (live ? BRIGHT : TEXT), ACCENT, BORDER, (SDL_FColor){ 1, 1, 1, 0.04f } };
+    gp_rich_style style = { e->mine ? small + 1 : px, 11, e->mine ? DIM : (live ? BRIGHT : TEXT), ACCENT, BORDER, (SDL_FColor){ 1, 1, 1, 0.04f },
+                            BRIGHT, (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.22f } };
     float h = head + gp_rich(ui, (gs_rect){ at.x + pad, 0, w, 0 }, text, &style, false) + 8;
     if (!draw) return h;
     gs_ui_fill(ui, (gs_rect){ at.x, at.y, 3, h - 4 }, e->mine ? BORDER : ACCENT);
@@ -857,7 +901,11 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
         }
         if (!preview && gs_ui_clicked(ui, hit)) say_again(a, e);
     }
-    gp_rich(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, true);
+    int from, to;
+    if (!preview && heard_now(a, e->text, &from, &to)) {
+        style.text = TEXT;  // (the rest of a message being heard stays as it was, the sentence brighter)
+        gp_rich_marked(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, from, to, &a->mark_y);
+    } else gp_rich(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, true);
     return h;
 }
 
@@ -872,6 +920,7 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
     int shown = 0;
     for (int i = 0; i < a->count; i++)
         if (!SDL_strcmp(a->history[i].who, key)) shown++;
+    if (!preview) a->mark_y = -1;  // (set again where the sentence heard is drawn)
     gs_rect page = gs_ui_page_begin(ui, r, id);
     float y = page.y, newest = page.y;
     for (int i = 0; i < a->count; i++) {
@@ -893,11 +942,18 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
     // (to the newest message's start when one came, and to the end on opening)
     bool fresh = !preview && a->fresh;
     if (fresh || *last_count < 0) gs_ui_page_scroll_to(ui, id, (newest - page.y), *last_count >= 0);
+    // Following what is heard: each new sentence glides to a third of the way down.
+    static float followed = -1;  // (where in the page, which the screen's place of the mark is not while it glides)
+    if (!preview && a->following && a->mark_y >= 0 && SDL_fabsf(a->mark_y - page.y - followed) > 1) {
+        followed = a->mark_y - page.y;
+        gs_ui_page_scroll_to(ui, id, SDL_max(0, followed - r.h / 3), true);
+    }
     if (!preview) a->fresh = false;
     *last_count = shown;
 }
 
 // The talk screen of the conversation `key`: the open one, or with `preview` set, the one beside it.
+static gs_rect follow_area;  // the button to follow what is heard again, when it shows
 static gs_rect compose_area;  // the box to type in, a press on which stops what is being spoken
 static gs_rect chat_area;  // where the open conversation's page and the box to type in were, which a swipe does not start on
 
@@ -1000,6 +1056,16 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     gs_cut_top(&r, 10);
     if (!preview) chat_area = (gs_rect){ r.x, r.y, r.w, chat_area.y + chat_area.h - r.y };
     conversation(ui, a, r, key);
+    // Scrolled away from what is being heard: a button to follow it again.
+    if (!preview && a->saying && !a->following && a->line_count) {
+        float w = gs_ui_text_width(ui, "follow", small) + 28, h = small * 2.2f;
+        gs_rect pill = { r.x + (r.w - w) / 2, r.y + r.h - h - 8, w, h };
+        gs_ui_round(ui, pill, h / 2, RAISED);
+        gs_ui_outline(ui, pill, h / 2, 1, ACCENT);
+        gs_ui_text(ui, pill, "follow", small, ACCENT, 0);
+        if (gs_ui_clicked(ui, pill)) a->following = true;
+        follow_area = pill;
+    } else follow_area = (gs_rect){ 0 };
     gs_ui_wake(ui, 16);
     // The agents to pick from, over everything.
     if (!preview && a->picking) picker(ui, a, area);
@@ -1114,7 +1180,7 @@ static void sound_out(app *a, const char *text) {
     if (!*text || !a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
     if (a->saying || a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a), a->mood = IDLE;
     gp_link_send(a->link, 'U', text, (uint32_t)SDL_strlen(text));
-    a->reply_done = false, a->audio_at = SDL_GetTicks();
+    a->reply_done = false, a->audio_at = SDL_GetTicks(), a->line_count = 0;
     a->reply_base = gs_stream_position(a->play) + speech_left(a);
 }
 
@@ -1441,7 +1507,12 @@ int main(int argc, char **argv) {
     gs_rect last_area = { 0, 0, 400, 760 };
     if (shot && !SDL_strcmp(argv[3], "speaking"))  // (the newest reply of the open conversation being spoken)
         for (int i = a.count - 1; i >= 0; i--)
-            if (!a.history[i].mine && !SDL_strcmp(a.history[i].who, a.open)) { a.saying = a.history[i].text, a.mood = SPEAKING; break; }
+            if (!a.history[i].mine && !SDL_strcmp(a.history[i].who, a.open)) {
+                a.saying = a.history[i].text, a.mood = SPEAKING, a.following = true;
+                const char *t = a.saying, *heard = SDL_strstr(t, "The transcribe agent"), *next = heard ? SDL_strstr(heard, "Trading3") : NULL;
+                if (next) a.lines[0].start = (int)(heard - t), a.lines[0].end = (int)(next - t), a.lines[0].at = 0, a.line_count = 1;
+                break;
+            }
     if (shot && !SDL_strcmp(argv[3], "type")) SDL_strlcpy(a.typed, "Can you check whether the phone build passed, and if it did, install it on the PC too?", sizeof a.typed), gs_ui_focus(ui, "compose");
     if (shot && !SDL_strcmp(argv[3], "swipe")) sw.axis = 1, sw.size = 400, sw.off = -170;  // (40% of the way to the next)
     for (bool running = true; running;) {
@@ -1504,6 +1575,10 @@ int main(int argc, char **argv) {
         swipe_step(&sw, &a);
         // (by where the list was last frame: the tap that opened it does not close it)
         bool was_picking = a.picking;
+        // A finger on the conversation takes it from following what is heard (the follow button excepted).
+        if (went_down && !a.setup && !a.picking && gs_rect_contains(chat_area, press_x, press_y) && !gs_rect_contains(compose_area, press_x, press_y) &&
+            !gs_rect_contains(follow_area, press_x, press_y))
+            a.following = false;
         // A press in the box to type in stops what is being spoken, as typing over it would.
         if (went_down && !a.setup && !a.picking && gs_rect_contains(compose_area, press_x, press_y) && (a.saying || a.mood == SPEAKING) && a.link)
             gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
