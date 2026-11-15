@@ -1,0 +1,12 @@
+[Unit]
+Description=gear hub: the phone app's agent, replies and models, kept between connections
+OnFailure=agent-notify@%n.service
+
+[Service]
+ExecStart=%h/.local/bin/gear hub
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

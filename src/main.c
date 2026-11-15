@@ -36,6 +36,8 @@ static const char usage[] =
     "       gear listen --to AGENT             talk to AGENT; its replies are read aloud\n"
     "       gear listen [--speak-back]         talk; each message is printed, and read back with --speak-back\n"
     "       gear send --to AGENT TEXT          send TEXT to AGENT and print its reply\n"
+    "       gear hub                           stay running for the Android app: its agent and replies kept\n"
+    "                                          between connections, which gear serve passes it\n"
     "       gear serve                         for a client over SSH (the Android app): framed audio and text on\n"
     "                                          standard input and output, as src/serve.h describes\n"
     "       gear read TEXT|-                   what would be read aloud of a reply (- reads standard input)\n"
@@ -420,7 +422,9 @@ int main(int argc, char **argv) {
     else if (!SDL_strcmp(args[0], "read") && nargs == 2) rc = read_text(args[1]);
     else if (!SDL_strcmp(args[0], "listen") && nargs == 1) rc = listen_live();
     else if (!SDL_strcmp(args[0], "hear") && nargs == 2) rc = hear_file(args[1]);
-    else if (!SDL_strcmp(args[0], "serve") && nargs == 1) { const char *dir = models(); rc = dir ? gear_serve(dir, opt.hear_threads, opt.say_threads) : 1; }
+    // (through the hub when one runs, which keeps the agent and its replies between connections)
+    else if (!SDL_strcmp(args[0], "serve") && nargs == 1) { const char *dir; rc = gear_serve_proxy() == 0 ? 0 : (dir = models()) ? gear_serve(dir, opt.hear_threads, opt.say_threads, false) : 1; }
+    else if (!SDL_strcmp(args[0], "hub") && nargs == 1) { const char *dir = models(); rc = dir ? gear_serve(dir, opt.hear_threads, opt.say_threads, true) : 1; }
     else if (!SDL_strcmp(args[0], "say") && nargs == 3) rc = say_file(args[1], args[2]);
     else if (!SDL_strcmp(args[0], "interrupt") && nargs == 4) rc = interrupt_file(args[1], args[2], args[3]);
     else fputs(usage, stderr);

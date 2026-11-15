@@ -8,6 +8,11 @@
     <uses-feature android:name="android.hardware.microphone" android:required="true" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- gesso's foreground service, which keeps gear connected behind other apps, as gink is -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_REMOTE_MESSAGING" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <application
         android:label="gear"
         android:icon="@mipmap/ic_launcher"
@@ -26,5 +31,17 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <service
+            android:name="dev.wakamex.gesso.Background"
+            android:exported="false"
+            android:foregroundServiceType="remoteMessaging" />
+        <!-- gesso's: brings the app back when a notification is tapped -->
+        <activity
+            android:name="dev.wakamex.gesso.NotifyActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity="" />
     </application>
 </manifest>

@@ -5,7 +5,9 @@
 #include <SDL3/SDL_main.h>
 #include <stdio.h>
 #include "gs_draw.h"
+#include "gs_background.h"
 #include "gs_json.h"
+#include "gs_notify.h"
 #include "gs_mix.h"
 #include "gs_secret.h"
 #include "gs_stream.h"
@@ -43,7 +45,6 @@ typedef struct {
     char pem[1024], key_line[400];
     char dir[1024];
     gp_link *link;
-    Uint64 retry_at;
     bool setup;           // the settings screen is showing
     char status[300];     // the connection's state, or why it failed
     // The conversation.
@@ -129,11 +130,7 @@ static void load_history(app *a) {
 }
 
 // A message of the conversation, kept and shown: what the user sent (to `who`), or an agent's reply.
-static void add_message(app *a, const char *text, const char *who, bool mine) {
-    SDL_Time now;
-    SDL_DateTime d;
-    char at[8] = "";
-    if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(at, sizeof at, "%02d:%02d", d.hour, d.minute);
+static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine) {
     remember(a, text, who, at, mine);
     a->fresh = true;
     gs_jval *o = gs_jval_object();
@@ -148,6 +145,45 @@ static void add_message(app *a, const char *text, const char *who, bool mine) {
     if (io) SDL_WriteIO(io, line, SDL_strlen(line)), SDL_WriteIO(io, "\n", 1), SDL_CloseIO(io);
     SDL_free(line);
 }
+
+static void add_message(app *a, const char *text, const char *who, bool mine) {
+    SDL_Time now;
+    SDL_DateTime d;
+    char at[8] = "";
+    if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(at, sizeof at, "%02d:%02d", d.hour, d.minute);
+    add_message_at(a, text, who, at, mine);
+}
+
+// ---- Notifications ----
+
+// While the app is behind others its loop is paused, so the link's own thread tells of a reply, or of
+// what an agent posted, with a notification; a tap brings the app back.
+static SDL_AtomicInt behind;
+static SDL_Mutex *who_lock;
+static char who_now[128];  // the agent sent to now, for a reply's notification
+static int notices;
+
+static void heard(char type, const char *data, uint32_t len, void *user) {
+    (void)user;
+    if (!SDL_GetAtomicInt(&behind) || (type != 'R' && type != 'Z')) return;
+    char title[160], body[300], tag[16];
+    if (type == 'R') {
+        SDL_LockMutex(who_lock);
+        SDL_strlcpy(title, who_now[0] ? who_now : "gear", sizeof title);
+        SDL_UnlockMutex(who_lock);
+        SDL_strlcpy(body, data, sizeof body);
+    } else {
+        gs_json *doc = gs_json_parse(data, len);
+        if (!doc) return;
+        SDL_strlcpy(title, gs_json_str(gs_json_get(gs_json_root(doc), "who"), "gear"), sizeof title);
+        SDL_strlcpy(body, gs_json_str(gs_json_get(gs_json_root(doc), "text"), ""), sizeof body);
+        gs_json_free(doc);
+    }
+    SDL_snprintf(tag, sizeof tag, "%d", ++notices);
+    gs_notify_show(tag, title, body);
+}
+
+static void notification_clicked(const char *tag) { (void)tag; }  // (the tap itself brings the app back)
 
 // The phone's key: made the first time, then kept where the system keeps secrets.
 static bool load_key(app *a) {
@@ -181,6 +217,10 @@ static void connect_link(app *a) {
     c.key_pem = a->pem, c.key_public = pub;
     SDL_strlcpy(c.host_key, a->host_key, sizeof c.host_key);
     a->link = gp_link_open(&c);
+    gp_link_on_frame(a->link, heard, NULL);
+    // Online behind other apps too, as gink is (asked while in front, as Android wants).
+    static bool kept;
+    if (!kept) kept = gs_background_keep("gear", "Connected to your agents");
     a->mood = IDLE;
     a->always_sent = false;
 }
@@ -216,6 +256,18 @@ static void take_frames(app *a) {
             }
             gs_json_free(doc);
             if (a->always && !a->always_sent) gp_link_send(a->link, 'O', "1", 1), a->always_sent = true;
+            SDL_LockMutex(who_lock);
+            SDL_strlcpy(who_now, a->target, sizeof who_now);
+            SDL_UnlockMutex(who_lock);
+            break;
+        }
+        case 'Z': {  // a message to show and not speak: a reply that waited, or what an agent posted
+            gs_json *doc = gs_json_parse(data, len);
+            if (doc) {
+                gs_jv o = gs_json_root(doc);
+                add_message_at(a, gs_json_str(gs_json_get(o, "text"), ""), gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""), false);
+            }
+            gs_json_free(doc);
             break;
         }
         case 'W': {  // always-on: what is being said, and the countdown
@@ -819,6 +871,8 @@ int main(int argc, char **argv) {
     gs_fontset_prepend(fonts, font);
     gs_ui *ui = gs_ui_new(win, ren, fonts);
     load_avatars(ren);
+    who_lock = SDL_CreateMutex();
+    if (!shot) gs_notify_init("gear", "org.wakamex.gear", NULL, notification_clicked);
 
     gs_mix_open(MIX_RATE);
     a.play = gs_stream_new(MIX_RATE, 300.0, 0.08);
@@ -843,8 +897,15 @@ int main(int argc, char **argv) {
             do {
                 if (e.type == SDL_EVENT_QUIT) running = false;
                 // Leaving the app ends what is being said; coming back, the connection is made again.
-                if (e.type == SDL_EVENT_DID_ENTER_BACKGROUND) stop_holding(&a);
-                if (e.type == SDL_EVENT_WILL_ENTER_FOREGROUND && a.link && gp_link_status(a.link, NULL, 0) == GP_FAILED) connect_link(&a);
+                if (e.type == SDL_EVENT_DID_ENTER_BACKGROUND) {
+                    stop_holding(&a);
+                    SDL_SetAtomicInt(&behind, 1);
+                    if (a.link) gp_link_set_background(a.link, true);
+                }
+                if (e.type == SDL_EVENT_WILL_ENTER_FOREGROUND) {
+                    SDL_SetAtomicInt(&behind, 0);
+                    if (a.link) gp_link_set_background(a.link, false);
+                }
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     window_points(win, ui, e.button.x, e.button.y, &press_x, &press_y);
                     down = went_down = true, moved = false;
@@ -863,12 +924,6 @@ int main(int argc, char **argv) {
         else always_listen(&a);
         // Android's back leaves the app from the character, and goes back from settings and the agents.
         SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, a.setup || a.picking ? "1" : "0");
-        // A connection that failed is made again every five seconds, unless the key was refused or changed.
-        char why[256];
-        if (a.link && !a.setup && gp_link_status(a.link, why, sizeof why) == GP_FAILED && !SDL_strstr(why, "key")) {
-            if (!a.retry_at) a.retry_at = SDL_GetTicks() + 5000;
-            else if (SDL_GetTicks() >= a.retry_at) a.retry_at = 0, connect_link(&a);
-        }
         // The computer's key, pinned once it is first seen.
         char seen[128];
         if (a.link && !a.host_key[0] && gp_link_status(a.link, NULL, 0) == GP_OPEN && gp_link_host_key(a.link, seen, sizeof seen))

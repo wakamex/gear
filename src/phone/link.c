@@ -25,6 +25,9 @@ struct gp_link {
     char *out;
     size_t out_len, out_cap;
     frame *in;
+    SDL_AtomicInt background;  // the app is behind others, told to the computer on each connection
+    gp_link_heard *heard;      // told of each frame as it comes, on this thread
+    void *heard_user;
 };
 
 static void set_state(gp_link *l, gp_link_state state, const char *why) {
@@ -86,6 +89,7 @@ static void take_frames(gp_link *l, char *buf, size_t *len) {
         f->data[n] = 0;
         SDL_memmove(buf, buf + 5 + n, *len - 5 - n);
         *len -= 5 + n;
+        if (l->heard) l->heard(f->type, f->data, f->len, l->heard_user);
         SDL_LockMutex(l->lock);
         frame **q = &l->in;
         while (*q) q = &(*q)->next;
@@ -94,20 +98,21 @@ static void take_frames(gp_link *l, char *buf, size_t *len) {
     }
 }
 
-static int run(void *user) {
-    gp_link *l = user;
-    char why[256];
+// One connection, until it breaks: false when it cannot work again as it is (the phone's key refused,
+// the computer's changed), with why in `why`.
+static bool session(gp_link *l, char *why, size_t why_size) {
+    bool again = true;
     set_state(l, GP_CONNECTING, "connecting");
-    int fd = dial(l->c.host, l->c.port, why, sizeof why);
-    if (fd < 0) { set_state(l, GP_FAILED, why); return 0; }
+    int fd = dial(l->c.host, l->c.port, why, why_size);
+    if (fd < 0) return true;
     LIBSSH2_SESSION *s = libssh2_session_init();
     LIBSSH2_CHANNEL *ch = NULL;
     libssh2_session_set_blocking(s, 1);
     libssh2_session_set_timeout(s, 15000);
-    if (libssh2_session_handshake(s, fd)) { ssh_error(s, "SSH failed", why, sizeof why); goto failed; }
+    if (libssh2_session_handshake(s, fd)) { ssh_error(s, "SSH failed", why, why_size); goto failed; }
     // The server's key, pinned the first time.
     const unsigned char *hash = (const unsigned char *)libssh2_hostkey_hash(s, LIBSSH2_HOSTKEY_HASH_SHA256);
-    if (!hash) { SDL_strlcpy(why, "the server's key could not be read", sizeof why); goto failed; }
+    if (!hash) { SDL_strlcpy(why, "the server's key could not be read", why_size); goto failed; }
     char seen[128];
     {
         static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -124,7 +129,8 @@ static int run(void *user) {
     SDL_strlcpy(l->seen_key, seen, sizeof l->seen_key);
     SDL_UnlockMutex(l->lock);
     if (l->c.host_key[0] && SDL_strcmp(l->c.host_key, seen)) {
-        SDL_snprintf(why, sizeof why, "the server's key has changed (SHA256:%s): not connecting", seen);
+        SDL_snprintf(why, why_size, "the server's key has changed (SHA256:%s): not connecting", seen);
+        again = false;
         goto failed;
     }
     set_state(l, GP_CONNECTING, "signing in");
@@ -133,10 +139,17 @@ static int run(void *user) {
     unsigned char blob[128];
     size_t blob_len = gp_key_blob(l->pem, blob, sizeof blob);
     if (!blob_len || libssh2_userauth_publickey(s, l->c.user, blob, blob_len, sign, (void **)&l->pem)) {
-        ssh_error(s, "the server did not accept the phone's key", why, sizeof why);
+        ssh_error(s, "the server did not accept the phone's key", why, why_size);
+        again = false;
         goto failed;
     }
-    if (!(ch = libssh2_channel_open_session(s)) || libssh2_channel_exec(ch, "gear serve")) { ssh_error(s, "could not start gear there", why, sizeof why); goto failed; }
+    if (!(ch = libssh2_channel_open_session(s)) || libssh2_channel_exec(ch, "gear serve")) { ssh_error(s, "could not start gear there", why, why_size); goto failed; }
+    // What was waiting for the connection before is dropped (audio of a moment gone), and the computer
+    // learns at once whether the app is behind others, so it sends no speech to play late.
+    SDL_LockMutex(l->lock);
+    l->out_len = 0;
+    SDL_UnlockMutex(l->lock);
+    gp_link_send(l, 'B', SDL_GetAtomicInt(&l->background) ? "1" : "0", 1);
     set_state(l, GP_CONNECTING, "loading the models");
     libssh2_keepalive_config(s, 1, 20);
     libssh2_session_set_blocking(s, 0);
@@ -150,7 +163,7 @@ static int run(void *user) {
         if (w > 0) SDL_memmove(l->out, l->out + w, l->out_len - (size_t)w), l->out_len -= (size_t)w;
         bool more = l->out_len > 0;
         SDL_UnlockMutex(l->lock);
-        if (w < 0 && w != LIBSSH2_ERROR_EAGAIN) { ssh_error(s, "the connection broke", why, sizeof why); break; }
+        if (w < 0 && w != LIBSSH2_ERROR_EAGAIN) { ssh_error(s, "the connection broke", why, why_size); break; }
         ssize_t r = libssh2_channel_read(ch, in + in_len, (1 << 20) - in_len);
         if (r > 0) {
             in_len += (size_t)r;
@@ -158,11 +171,11 @@ static int run(void *user) {
             if (!open_seen) open_seen = true, set_state(l, GP_OPEN, "connected");
             continue;
         }
-        if (r < 0 && r != LIBSSH2_ERROR_EAGAIN) { ssh_error(s, "the connection broke", why, sizeof why); break; }
+        if (r < 0 && r != LIBSSH2_ERROR_EAGAIN) { ssh_error(s, "the connection broke", why, why_size); break; }
         if (libssh2_channel_eof(ch)) {
             char err[200] = "";
             libssh2_channel_read_stderr(ch, err, sizeof err - 1);
-            SDL_snprintf(why, sizeof why, "gear on the computer stopped%s%s", *err ? ": " : "", err);
+            SDL_snprintf(why, why_size, "gear on the computer stopped%s%s", *err ? ": " : "", err);
             break;
         }
         int next;
@@ -174,12 +187,40 @@ static int run(void *user) {
     }
     SDL_free(in);
 failed:
-    if (!quitting(l)) set_state(l, GP_FAILED, why);
     if (ch) libssh2_channel_free(ch);
     libssh2_session_disconnect(s, "bye");
     libssh2_session_free(s);
     close(fd);
+    return again;
+}
+
+// Connections one after another, five seconds apart, for as long as the app keeps the link, on this
+// thread: in the background too, where the app's own loop is paused.
+static int run(void *user) {
+    gp_link *l = user;
+    char why[256];
+    while (!quitting(l)) {
+        bool again = session(l, why, sizeof why);
+        if (quitting(l)) break;
+        if (!again) { set_state(l, GP_FAILED, why); break; }
+        char wait[300];
+        SDL_snprintf(wait, sizeof wait, "%s; again in a moment", why);
+        set_state(l, GP_CONNECTING, wait);
+        for (int i = 0; i < 50 && !quitting(l); i++) SDL_Delay(100);
+    }
     return 0;
+}
+
+void gp_link_set_background(gp_link *l, bool behind) {
+    if (SDL_GetAtomicInt(&l->background) == behind) return;
+    SDL_SetAtomicInt(&l->background, behind);
+    gp_link_send(l, 'B', behind ? "1" : "0", 1);
+}
+
+void gp_link_on_frame(gp_link *l, gp_link_heard *fn, void *user) {
+    SDL_LockMutex(l->lock);
+    l->heard = fn, l->heard_user = user;
+    SDL_UnlockMutex(l->lock);
 }
 
 gp_link *gp_link_open(const gp_link_config *c) {

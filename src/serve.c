@@ -3,6 +3,10 @@
 #include <SDL3/SDL.h>
 #include <stdio.h>
 #ifndef _WIN32
+#include <poll.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 #endif
 #include "agent.h"
@@ -22,11 +26,18 @@ enum { READ_LIMIT = 1200, SPEECH_RATE = 24000, MAX_AUDIO = 60 * 16000 };
 
 typedef struct frame { struct frame *next; char type; Uint32 len; char *data; } frame;
 
+// A reply or message that came while no phone was connected, kept for the next one (in hub-queue.jsonl,
+// so a restart keeps it too).
+typedef struct { char *text; char who[128]; char at[8]; } waiting;
+enum { WAITING = 200 };
+
 typedef struct {
-    // Frames from the client, read on a thread of their own; `closed` once its input ends.
+    // Frames from the client, read on a thread of their own from `from`; `closed` once its input ends.
     SDL_Mutex *lock;
     frame *in;
     bool closed;
+    FILE *from;
+    bool background;   // the phone's app is behind others: replies go as text, not spoken
     // What goes out, one frame at a time, from the main thread and the synthesis thread.
     SDL_Mutex *out;
     // Speech: text queued for the synthesis thread, and the voice to load before the next.
@@ -48,11 +59,12 @@ typedef struct {
     long since_at;     // microphone samples since that report
 } server;
 
-static FILE *frames_out;  // the client's end; what the engines print goes to standard error instead
+static FILE *frames_out;  // the client's end, NULL with none; what the engines print goes to standard error instead
 
 static void send_frame(server *s, char type, const void *data, Uint32 len) {
     Uint8 head[5] = { (Uint8)type, (Uint8)len, (Uint8)(len >> 8), (Uint8)(len >> 16), (Uint8)(len >> 24) };
     SDL_LockMutex(s->out);
+    if (!frames_out) { SDL_UnlockMutex(s->out); return; }
     fwrite(head, 1, 5, frames_out);
     if (len) fwrite(data, 1, len, frames_out);
     fflush(frames_out);
@@ -65,12 +77,12 @@ static int read_frames(void *user) {
     server *s = user;
     for (;;) {
         Uint8 head[5];
-        if (fread(head, 1, 5, stdin) != 5) break;
+        if (fread(head, 1, 5, s->from) != 5) break;
         Uint32 len = (Uint32)head[1] | (Uint32)head[2] << 8 | (Uint32)head[3] << 16 | (Uint32)head[4] << 24;
         if (len > 8 * 1024 * 1024) break;  // (not a client of this protocol)
         frame *f = SDL_calloc(1, sizeof *f);
         f->type = (char)head[0], f->len = len, f->data = SDL_malloc(len + 1);
-        if (len && fread(f->data, 1, len, stdin) != len) { SDL_free(f->data), SDL_free(f); break; }
+        if (len && fread(f->data, 1, len, s->from) != len) { SDL_free(f->data), SDL_free(f); break; }
         f->data[len] = 0;
         SDL_LockMutex(s->lock);
         frame **q = &s->in;
@@ -246,19 +258,228 @@ static void deliver_text(server *s, const char *text) {
     } else send_text(s, 'R', text), speak(s, text);
 }
 
-int gear_serve(const char *models, int hear_threads, int say_threads) {
+// ---- What waits for the phone ----
+
+static waiting queue[WAITING];
+static int queued;
+static char queue_path[1100];
+
+static void save_queue(void) {
+    gs_jval *list = gs_jval_array();
+    char *all = NULL;
+    size_t len = 0;
+    for (int i = 0; i < queued; i++) {
+        gs_jval *o = gs_jval_object();
+        gs_jval_set(o, "who", gs_jval_str(queue[i].who));
+        gs_jval_set(o, "at", gs_jval_str(queue[i].at));
+        gs_jval_set(o, "text", gs_jval_str(queue[i].text));
+        char *line = gs_jval_write(o, false);
+        size_t n = SDL_strlen(line);
+        all = SDL_realloc(all, len + n + 2);
+        SDL_memcpy(all + len, line, n), len += n, all[len++] = '\n';
+        SDL_free(line), gs_jval_free(o);
+    }
+    gs_jval_free(list);
+    if (len) SDL_SaveFile(queue_path, all, len);
+    else SDL_RemovePath(queue_path);
+    SDL_free(all);
+}
+
+static void keep_for_later(const char *text, const char *who) {
+    SDL_Time now;
+    SDL_DateTime d;
+    if (queued == WAITING) SDL_free(queue[0].text), SDL_memmove(queue, queue + 1, (WAITING - 1) * sizeof *queue), queued--;
+    waiting *w = &queue[queued++];
+    w->text = SDL_strdup(text);
+    SDL_strlcpy(w->who, who, sizeof w->who);
+    w->at[0] = 0;
+    if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(w->at, sizeof w->at, "%02d:%02d", d.hour, d.minute);
+    save_queue();
+}
+
+static void load_queue(void) {
+    size_t n = 0;
+    char *all = SDL_LoadFile(queue_path, &n);
+    for (char *line = all, *end; line && line < all + n && queued < WAITING; line = end + 1) {
+        if (!(end = SDL_strchr(line, '\n'))) end = all + n;
+        gs_json *doc = gs_json_parse(line, (size_t)(end - line));
+        if (!doc) continue;
+        gs_jv o = gs_json_root(doc);
+        const char *text = gs_json_str(gs_json_get(o, "text"), NULL);
+        if (text) {
+            waiting *w = &queue[queued++];
+            w->text = SDL_strdup(text);
+            SDL_strlcpy(w->who, gs_json_str(gs_json_get(o, "who"), ""), sizeof w->who);
+            SDL_strlcpy(w->at, gs_json_str(gs_json_get(o, "at"), ""), sizeof w->at);
+        }
+        gs_json_free(doc);
+    }
+    SDL_free(all);
+}
+
+// What waited, to the phone just connected ('Z'), then forgotten.
+static void hand_over(server *s) {
+    for (int i = 0; i < queued; i++) {
+        gs_jval *o = gs_jval_object();
+        gs_jval_set(o, "who", gs_jval_str(queue[i].who));
+        gs_jval_set(o, "at", gs_jval_str(queue[i].at));
+        gs_jval_set(o, "text", gs_jval_str(queue[i].text));
+        char *json = gs_jval_write(o, false);
+        send_text(s, 'Z', json);
+        SDL_free(json), gs_jval_free(o), SDL_free(queue[i].text);
+    }
+    queued = 0;
+    save_queue();
+}
+
+// ---- Panetone's posts ----
+
+// Everything Panetone posts to Mihai's own channels (`panetone watch`, one JSON line a post), read on a
+// thread of its own and shown on the phone as an agent's message ('Z'), as Telegram shows it. The last
+// position handled is kept in hub-feed-seq, so a restart repeats and skips nothing.
+typedef struct post { struct post *next; char *text; char who[128]; char at[8]; long long seq; Uint64 came; } post;
+static SDL_Mutex *posts_lock;
+static post *posts;
+static char seq_path[1100];
+
+// A reply this hub has just given the phone itself, which Panetone posts too: those posts are not shown
+// again. (Panetone splits a long post as Telegram takes it, so a post may be a part of one.)
+static char *recent[16];
+static int recent_at;
+
+static void remember_reply(const char *text) {
+    SDL_free(recent[recent_at]);
+    recent[recent_at] = SDL_strdup(text);
+    recent_at = (recent_at + 1) % 16;
+}
+
+static bool already_given(const char *text) {
+    for (int i = 0; i < 16; i++)
+        if (recent[i] && *text && SDL_strstr(recent[i], text)) return true;
+    return false;
+}
+
+static int watch_feed(void *user) {
+    (void)user;
+    char *last = SDL_LoadFile(seq_path, NULL), cmd[200];
+    if (last) SDL_snprintf(cmd, sizeof cmd, "panetone watch --after %lld", SDL_strtoll(last, NULL, 10));
+    else SDL_strlcpy(cmd, "panetone watch", sizeof cmd);  // (the first time: from now on)
+    SDL_free(last);
+    FILE *in = popen(cmd, "r");
+    if (!in) return 0;
+    static char line[1 << 20];
+    while (fgets(line, sizeof line, in)) {
+        gs_json *doc = gs_json_parse(line, SDL_strlen(line));
+        if (!doc) continue;
+        gs_jv o = gs_json_root(doc);
+        post *p = SDL_calloc(1, sizeof *p);
+        p->came = SDL_GetTicks();
+        p->seq = (long long)gs_json_num(gs_json_get(o, "seq"), 0);
+        const char *route = gs_json_str(gs_json_get(o, "route"), NULL);
+        SDL_strlcpy(p->who, route ? route : "panetone", sizeof p->who);
+        // The text, and each attachment by name (the file stays on the computer).
+        const char *text = gs_json_str(gs_json_get(o, "text"), "");
+        size_t cap = SDL_strlen(text) + 1;
+        for (gs_jv f = gs_json_first(gs_json_get(o, "attachments")); f; f = gs_json_next(f)) cap += SDL_strlen(gs_json_str(gs_json_get(f, "name"), "")) + 20;
+        p->text = SDL_malloc(cap);
+        SDL_strlcpy(p->text, text, cap);
+        for (gs_jv f = gs_json_first(gs_json_get(o, "attachments")); f; f = gs_json_next(f))
+            SDL_strlcat(p->text, *p->text ? "\n[attached: " : "[attached: ", cap), SDL_strlcat(p->text, gs_json_str(gs_json_get(f, "name"), "a file"), cap), SDL_strlcat(p->text, "]", cap);
+        SDL_Time when = (SDL_Time)gs_json_num(gs_json_get(o, "time_ms"), 0) * 1000000;
+        SDL_DateTime d;
+        if (SDL_TimeToDateTime(when, &d, true)) SDL_snprintf(p->at, sizeof p->at, "%02d:%02d", d.hour, d.minute);
+        gs_json_free(doc);
+        SDL_LockMutex(posts_lock);
+        post **q = &posts;
+        while (*q) q = &(*q)->next;
+        *q = p;
+        SDL_UnlockMutex(posts_lock);
+    }
+    pclose(in);
+    return 0;
+}
+
+// ---- The hub ----
+
+#ifndef _WIN32
+// The hub's socket: in the user's runtime folder, which only the user can enter.
+static void hub_path(char *out, size_t size) {
+    const char *dir = SDL_getenv("XDG_RUNTIME_DIR");
+    char run[64];
+    SDL_snprintf(run, sizeof run, "/run/user/%d", (int)getuid());
+    // (systemd's runtime folder for the user when the variable is not set, as for some SSH commands)
+    if (dir && *dir) SDL_snprintf(out, size, "%s/gear-hub.sock", dir);
+    else if (access(run, W_OK) == 0) SDL_snprintf(out, size, "%s/gear-hub.sock", run);
+    else SDL_snprintf(out, size, "/tmp/gear-hub-%d.sock", (int)getuid());
+}
+
+int gear_serve_proxy(void) {
+    struct sockaddr_un at = { .sun_family = AF_UNIX };
+    hub_path(at.sun_path, sizeof at.sun_path);
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0 || connect(fd, (struct sockaddr *)&at, sizeof at) < 0) { if (fd >= 0) close(fd); return -1; }
+    // Both ways until either end closes.
+    char buf[65536];
+    struct pollfd p[2] = { { .fd = 0, .events = POLLIN }, { .fd = fd, .events = POLLIN } };
+    for (;;) {
+        if (poll(p, 2, -1) < 0) break;
+        if (p[0].revents) {
+            ssize_t n = read(0, buf, sizeof buf);
+            if (n <= 0 || write(fd, buf, (size_t)n) != n) break;
+        }
+        if (p[1].revents) {
+            ssize_t n = read(fd, buf, sizeof buf);
+            if (n <= 0 || write(1, buf, (size_t)n) != n) break;
+        }
+    }
+    close(fd);
+    return 0;
+}
+#else
+int gear_serve_proxy(void) { return -1; }
+#endif
+
+int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) {
     char path[1200], name[128], error[512];
+    server s = { 0 };
+    int listener = -1, client = -1;
 #ifndef _WIN32
     // The engines print progress to standard output in places: that goes to standard error, and the
-    // frames to a copy of standard output kept for them.
-    frames_out = fdopen(dup(1), "wb");
+    // frames to a copy of standard output kept for them, or to the phone connected to the hub.
+    if (hub) {
+        signal(SIGPIPE, SIG_IGN);  // (a phone gone mid-write is seen as the end of its input)
+        // (and stopped by a signal at once, which SDL would turn into an event nobody reads: what waits
+        // for the phone is already on disk)
+        signal(SIGTERM, SIG_DFL), signal(SIGINT, SIG_DFL);
+        struct sockaddr_un at = { .sun_family = AF_UNIX };
+        hub_path(at.sun_path, sizeof at.sun_path);
+        unlink(at.sun_path);
+        listener = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (listener < 0 || bind(listener, (struct sockaddr *)&at, sizeof at) < 0 || listen(listener, 4) < 0) {
+            fprintf(stderr, "gear: cannot listen at %s\n", at.sun_path);
+            return 1;
+        }
+        frames_out = NULL, s.closed = true;
+    } else {
+        frames_out = fdopen(dup(1), "wb");
+        s.from = stdin;
+    }
     dup2(2, 1);
 #else
-    frames_out = stdout;
+    if (hub) { fprintf(stderr, "gear: the hub needs a Unix system\n"); return 1; }
+    frames_out = stdout, s.from = stdin;
 #endif
+    {
+        char *pref = SDL_GetPrefPath("wakamex", "gear");
+        SDL_snprintf(queue_path, sizeof queue_path, "%shub-queue.jsonl", pref ? pref : "");
+        SDL_snprintf(seq_path, sizeof seq_path, "%shub-feed-seq", pref ? pref : "");
+        SDL_free(pref);
+        load_queue();
+    }
+    posts_lock = SDL_CreateMutex();
+    if (hub) SDL_DetachThread(SDL_CreateThread(watch_feed, "gear-hub-feed", NULL));
     gear_hear_model_pick(models, NULL, path, sizeof path, name, sizeof name);
     gear_hear *hear = gear_hear_open(path, hear_threads, error, sizeof error);
-    server s = { 0 };
     s.lock = SDL_CreateMutex(), s.out = SDL_CreateMutex(), s.wake = SDL_CreateCondition();
     const SDL_AudioSpec speech = { SDL_AUDIO_F32, 1, SPEECH_RATE }, mic = { SDL_AUDIO_F32, 1, GEAR_RATE };
     s.to16 = SDL_CreateAudioStream(&speech, &mic);
@@ -283,9 +504,9 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
     SDL_free(pref);
     gear_transcript *transcript = gear_transcript_open(path, 1);
     out_to = (delivery){ &relay, target, transcript };
-    SDL_Thread *reader = SDL_CreateThread(read_frames, "gear-serve-in", &s);
+    SDL_Thread *reader = hub ? NULL : SDL_CreateThread(read_frames, "gear-serve-in", &s);
     SDL_Thread *speaker = SDL_CreateThread(synthesize, "gear-serve-say", &s);
-    hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+    if (!hub) hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba"), hand_over(&s);
 
     float *audio = SDL_malloc(MAX_AUDIO * sizeof(float));
     int samples = 0;
@@ -299,11 +520,48 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
     float pending[160];
     int pending_n = 0;
     for (bool open = true; open;) {
+#ifndef _WIN32
+        // The hub: a phone connecting takes over from the one before, whose connection is closed.
+        struct pollfd lp = { .fd = listener, .events = POLLIN };
+        if (hub && poll(&lp, 1, 0) == 1) {
+            int fd = accept(listener, NULL, NULL);
+            if (fd >= 0) {
+                if (client >= 0) shutdown(client, SHUT_RDWR);
+                if (reader) SDL_WaitThread(reader, NULL), reader = NULL;
+                SDL_LockMutex(s.out);
+                if (frames_out) fclose(frames_out);
+                frames_out = fdopen(dup(fd), "wb");
+                SDL_UnlockMutex(s.out);
+                if (s.from) fclose(s.from);
+                if (client >= 0) close(client);
+                client = fd, s.from = fdopen(dup(fd), "rb");
+                SDL_LockMutex(s.lock);
+                for (frame *g = s.in, *next; g; g = next) next = g->next, SDL_free(g->data), SDL_free(g);
+                s.in = NULL, s.closed = false, s.background = false, s.phone_playing = false, s.stopping = false;
+                SDL_UnlockMutex(s.lock);
+                reader = SDL_CreateThread(read_frames, "gear-hub-in", &s);
+                always = false, samples = 0, pending_n = 0;
+                if (pipe) gear_pipeline_cancel(pipe);
+                hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                hand_over(&s);
+            }
+        }
+#endif
         SDL_LockMutex(s.lock);
         frame *f = s.in;
         if (f) s.in = f->next;
-        open = f || !s.closed;
+        bool gone = !f && s.closed;
+        open = !gone || hub;
         SDL_UnlockMutex(s.lock);
+        // The hub with its phone gone: what it was saying stops, and replies wait for the next.
+        if (hub && gone && frames_out) {
+            SDL_AddAtomicInt(&s.generation, 1);
+            SDL_LockMutex(s.out);
+            fclose(frames_out), frames_out = NULL;
+            SDL_UnlockMutex(s.out);
+            always = false;
+            if (pipe) gear_pipeline_cancel(pipe);
+        }
         if (f) {
             switch (f->type) {
             case 'A':
@@ -346,6 +604,12 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
                 SDL_UnlockMutex(s.lock);
                 break;
             }
+            case 'B':  // the phone's app: "1" behind others, "0" in front again
+                SDL_LockMutex(s.lock);
+                s.background = f->data[0] == '1';
+                SDL_UnlockMutex(s.lock);
+                if (s.background) SDL_AddAtomicInt(&s.generation, 1);
+                break;
             case 'N':  // always-on: send what has been said now
                 if (pipe) {
                     char *now = gear_pipeline_take(pipe);
@@ -406,12 +670,42 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
             SDL_snprintf(now, sizeof now, "%s|%s|%.1f", gear_pipeline_text(pipe), gear_pipeline_draft(pipe), gear_pipeline_countdown(pipe));
             if (SDL_strcmp(now, last_words)) SDL_strlcpy(last_words, now, sizeof last_words), words(&s, pipe);
         }
+        // Panetone's posts, to the phone or kept for it, the position written once each is handled. Each
+        // waits 3 s first, for the relay to have the same reply when it is one this hub asked for.
+        for (;;) {
+            SDL_LockMutex(posts_lock);
+            post *p = posts && SDL_GetTicks() - posts->came >= 3000 ? posts : NULL;
+            if (p) posts = p->next;
+            SDL_UnlockMutex(posts_lock);
+            if (!p) break;
+            if (!already_given(p->text)) {
+                if (!frames_out) keep_for_later(p->text, p->who);
+                else {
+                    gs_jval *o = gs_jval_object();
+                    gs_jval_set(o, "who", gs_jval_str(p->who));
+                    gs_jval_set(o, "at", gs_jval_str(p->at));
+                    gs_jval_set(o, "text", gs_jval_str(p->text));
+                    char *json = gs_jval_write(o, false);
+                    send_text(&s, 'Z', json);
+                    SDL_free(json), gs_jval_free(o);
+                }
+            }
+            char seq[32];
+            SDL_snprintf(seq, sizeof seq, "%lld", p->seq);
+            SDL_SaveFile(seq_path, seq, SDL_strlen(seq));
+            SDL_free(p->text), SDL_free(p);
+        }
         bool failed;
         char *reply;
         while (relay && ((reply = gear_relay_take(relay, &failed, error, sizeof error)) || failed)) {
             if (failed) { send_text(&s, 'F', error); break; }
-            send_text(&s, 'R', reply);
-            speak(&s, reply);
+            // (kept for the next phone when none is connected; sent as text alone to one in the background)
+            remember_reply(reply);
+            if (!frames_out) keep_for_later(reply, target);
+            else {
+                send_text(&s, 'R', reply);
+                if (!s.background) speak(&s, reply);
+            }
             SDL_free(reply);
         }
         SDL_Delay(10);
@@ -422,7 +716,10 @@ int gear_serve(const char *models, int hear_threads, int say_threads) {
     SDL_SignalCondition(s.wake);
     SDL_UnlockMutex(s.lock);
     SDL_WaitThread(speaker, NULL);
-    SDL_DetachThread(reader);  // (it is done, its input closed)
+    if (reader) SDL_DetachThread(reader);  // (it is done, its input closed)
+#ifndef _WIN32
+    if (listener >= 0) close(listener);
+#endif
     gear_relay_free(relay);
     gear_transcript_close(transcript);
     gear_pipeline_free(pipe);
