@@ -73,6 +73,7 @@ typedef struct {
     SDL_AudioStream *conv;
     gs_stream *play;
     bool reply_done;
+    Uint64 audio_at;      // when the last of the reply's speech came
     const char *saying;   // the text of the message being spoken (a history entry's), or NULL
     double reply_base;    // where the reply being played starts in the player's count of seconds
     // The agents to pick from.
@@ -333,7 +334,7 @@ static void say_again(app *a, const entry *e) {
     if (a->saying || a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a), a->mood = IDLE;
     if (same) return;
     gp_link_send(a->link, 'U', e->text, (uint32_t)SDL_strlen(e->text));
-    a->saying = e->text, a->reply_done = false;
+    a->saying = e->text, a->reply_done = false, a->audio_at = SDL_GetTicks();  // (its speech has 2 s to start)
     a->reply_base = gs_stream_position(a->play) + speech_left(a);
 }
 
@@ -406,7 +407,7 @@ static void take_frames(app *a) {
             if (a->always) a->mood = THINKING;
             break;
         case 'R':
-            set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0;
+            set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0, a->audio_at = SDL_GetTicks();
             add_message(a, data, here(a), false);
             if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text;  // (spoken as it comes)
             a->reply_base = gs_stream_position(a->play) + speech_left(a);
@@ -418,6 +419,7 @@ static void take_frames(app *a) {
         case 'D': a->reply_done = true; break;
         case 'P': {
             SDL_PutAudioStreamData(a->conv, data, (int)len);  // (handed to the player as it plays: feed_speech)
+            a->audio_at = SDL_GetTicks();
             if (!a->holding) a->mood = SPEAKING;
             break;
         }
@@ -425,7 +427,10 @@ static void take_frames(app *a) {
         SDL_free(data);
     }
     feed_speech(a);
-    if (a->reply_done && speech_left(a) <= 0) {
+    // Played out, and the computer has said it is done, or sent nothing for 2 s: it makes speech far
+    // faster than it plays, so its silence means the reply is over, even when its "done" ('D') never
+    // came (a connection that broke while the app was behind others).
+    if (speech_left(a) <= 0 && (a->reply_done || SDL_GetTicks() - a->audio_at > 2000)) {
         if (a->mood == SPEAKING) a->mood = IDLE;
         a->saying = NULL;
     }
