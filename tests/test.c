@@ -447,10 +447,11 @@ static void speaks(const char *reply, const char *expected) {
 
 static void test_speakable(void) {
     speaks("I found the bug in `src/listen.c`. See https://github.com/wakamex/gesso/pull/12 for details.",
-           "I found the bug in listen.c. See a github dot com link for details.");
+           "I found the bug in listen. See a github dot com link for details.");
     speaks("Here is the fix:\n\n```c\nint a;\nint b;\n```\n\nWant me to commit it?",
            "Here is the fix: A code block of 2 lines. Want me to commit it?");
     speaks("```\nls -la\n```", "A one-line code block.");
+    speaks("Notes are in `sources/swipe/NOTES.md` and README.md, e.g. on Chess.com.", "Notes are in NOTES and README, e.g. on Chess dot com.");
     speaks("Results:\n\n| Model | WER |\n|---|---|\n| a | 1% |\n| b | 2% |\n\nDone.", "Results: A table of 2 rows. Done.");
     speaks("Next steps:\n- Fix the **countdown**\n- Run `zig build test`\n1. Commit it",
            "Next steps: Fix the countdown. Run zig build test. Commit it.");
@@ -458,7 +459,7 @@ static void test_speakable(void) {
     speaks("Call `gear_listen_new` and then gs_voice_frame.", "Call gear listen new and then gs voice frame.");
     speaks("Keep it and/or drop half of 1/2 in tmp/live.", "Keep it and or drop half of 1/2 in tmp live.");
     speaks("[The README](README.md) explains it, and *so* does _the brief_.", "The README explains it, and so does the brief.");
-    speaks("It was in ~/.config/gear/settings.json and C:\\Users\\me\\gear.exe", "It was in settings.json and gear.exe.");
+    speaks("It was in ~/.config/gear/settings.json and C:\\Users\\me\\gear.exe", "It was in settings and gear.");
     speaks("First line\nsecond line of the same paragraph.\n\nNew paragraph",
            "First line second line of the same paragraph. New paragraph.");
     speaks("> quoted advice\n\n---\n\n- [x] done item", "quoted advice. done item.");
@@ -473,7 +474,7 @@ static void test_speakable(void) {
     speaks("It ran 1905 to 2021, on 2026-10-28 at 12:15 and 02:05, for $8 and -0.44 (~3 ms).",
            "It ran nineteen oh five to twenty twenty one, on October twenty eighth, twenty twenty six at twelve fifteen and "
            "two oh five, for eight dollars and minus zero point four four (about three milliseconds).");
-    speaks("The record is at dmarc.example.org, not notes.md.", "The record is at dmarc dot example dot org, not notes.md.");
+    speaks("The record is at dmarc.example.org, not notes.md.", "The record is at dmarc dot example dot org, not notes.");
     speaks("Costs $0.70, $1.00 or $1,249.50 for claude-opus-5-5 under m8-fogunits-wait3.",
            "Costs seventy cents, one dollar or one thousand two hundred forty nine dollars and fifty cents for claude opus "
            "five five under m eight fogunits wait three.");

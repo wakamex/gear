@@ -466,7 +466,7 @@ static void take_frames(app *a) {
             gs_json_free(doc);
             break;
         }
-        case 'D': a->reply_done = true; break;
+        case 'D': a->reply_done = true, SDL_FlushAudioStream(a->conv); break;  // (the resampler gives up the last it held back)
         case 'P': {
             SDL_PutAudioStreamData(a->conv, data, (int)len);  // (handed to the player as it plays: feed_speech)
             a->audio_at = SDL_GetTicks();
@@ -476,6 +476,9 @@ static void take_frames(app *a) {
         }
         SDL_free(data);
     }
+    // With no "done" ('D') for 2 s after the last speech, the resampler gives up what it held back, which
+    // would otherwise count as speech still to play.
+    if (!a->reply_done && a->audio_at && SDL_GetTicks() - a->audio_at > 2000 && SDL_GetAudioStreamQueued(a->conv) > 0) SDL_FlushAudioStream(a->conv);
     feed_speech(a);
     // Played out, and the computer has said it is done, or sent nothing for 2 s: it makes speech far
     // faster than it plays, so its silence means the reply is over, even when its "done" ('D') never

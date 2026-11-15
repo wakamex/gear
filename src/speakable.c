@@ -435,8 +435,17 @@ static bool token(buf *b, const char *t, size_t n, bool after_number) {
         // snake_case and kebab-free identifiers: underscores between letters read as spaces.
         char said[1024];
         size_t k = 0;
-        for (const char *p = name; *p; p++) said[k++] = *p == '_' && p > name && word_char(p[-1]) && word_char(p[1]) ? ' ' : *p;
+        for (const char *p = name; *p && k < sizeof said - 1; p++) said[k++] = *p == '_' && p > name && word_char(p[-1]) && word_char(p[1]) ? ' ' : *p;
         said[k] = 0;
+        // A file's name without its extension (NOTES.md as "NOTES", main.c as "main"): the letters after
+        // its last dot, which the speech would spell out. A site's ending is said ("Chess dot com").
+        char *ext = SDL_strrchr(said, '.');
+        if (ext && ext > said + 1 && word_char(ext[-1]) && word_char(ext[-2]) && !site_ending(ext + 1)) {  // (not e.g. or i.e.)
+            size_t e = 1;
+            while (SDL_isalnum((unsigned char)ext[e])) e++;
+            bool letters = e > 1 && e <= 6 && !ext[e] && SDL_isalpha((unsigned char)ext[1]);
+            if (letters) *ext = 0;
+        }
         bool number = say_word(b, said, after_number);
         put(b, t + tail, n - tail);
         return number && tail == n;
