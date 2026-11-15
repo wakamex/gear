@@ -7,6 +7,8 @@ ExecStart=%h/.local/bin/gear hub
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
 Restart=on-failure
 RestartSec=5
+# (on stop, the hub gets SIGTERM and its `panetone watch`, which waits it out, is killed with it)
+KillMode=mixed
 
 [Install]
 WantedBy=default.target

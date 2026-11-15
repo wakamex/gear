@@ -26,6 +26,7 @@ struct gp_link {
     size_t out_len, out_cap;
     frame *in;
     SDL_AtomicInt background;  // the app is behind others, told to the computer on each connection
+    long long seen;            // the newest message's number come ('K'), told on each connection
     gp_link_heard *heard;      // told of each frame as it comes, on this thread
     void *heard_user;
 };
@@ -91,6 +92,7 @@ static void take_frames(gp_link *l, char *buf, size_t *len) {
         *len -= 5 + n;
         if (l->heard) l->heard(f->type, f->data, f->len, l->heard_user);
         SDL_LockMutex(l->lock);
+        if (f->type == 'K' && SDL_strtoll(f->data, NULL, 10) > l->seen) l->seen = SDL_strtoll(f->data, NULL, 10);
         frame **q = &l->in;
         while (*q) q = &(*q)->next;
         *q = f;
@@ -150,6 +152,11 @@ static bool session(gp_link *l, char *why, size_t why_size) {
     l->out_len = 0;
     SDL_UnlockMutex(l->lock);
     gp_link_send(l, 'B', SDL_GetAtomicInt(&l->background) ? "1" : "0", 1);
+    char newest[32];
+    SDL_LockMutex(l->lock);
+    SDL_snprintf(newest, sizeof newest, "%lld", l->seen);
+    SDL_UnlockMutex(l->lock);
+    gp_link_send(l, 'K', newest, (uint32_t)SDL_strlen(newest));
     set_state(l, GP_CONNECTING, "loading the models");
     libssh2_keepalive_config(s, 1, 20);
     libssh2_session_set_blocking(s, 0);
@@ -231,7 +238,7 @@ gp_link *gp_link_open(const gp_link_config *c) {
     l->pem = SDL_strdup(c->key_pem), l->pub = SDL_strdup(c->key_public);
     l->c.key_pem = l->pem, l->c.key_public = l->pub;
     l->lock = SDL_CreateMutex();
-    l->state = GP_CONNECTING;
+    l->state = GP_CONNECTING, l->seen = c->seen;
     l->thread = SDL_CreateThread(run, "gear-link", l);
     return l;
 }

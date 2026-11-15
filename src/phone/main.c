@@ -54,6 +54,7 @@ typedef struct {
     // conversation), and the agent last asked for, once per conversation opened.
     char open[128], target[128], tab[128], asked[128], voice[16], note[300];
     unread unread[CONVERSATIONS];
+    long long seen;       // the newest message's number in the computer's log, kept in seen.txt
     int unread_count;
     char *said, *reply;   // what is being said now (always-on's live words), and the reply being spoken
     entry history[HISTORY];
@@ -71,6 +72,7 @@ typedef struct {
     SDL_AudioStream *conv;
     gs_stream *play;
     bool reply_done;
+    const char *saying;   // the text of the message being spoken (a history entry's), or NULL
     double reply_base;    // where the reply being played starts in the player's count of seconds
     // The agents to pick from.
     bool picking;
@@ -281,6 +283,7 @@ static void connect_link(app *a) {
     gp_key_public(a->pem, "gear-phone", pub, sizeof pub);
     c.key_pem = a->pem, c.key_public = pub;
     SDL_strlcpy(c.host_key, a->host_key, sizeof c.host_key);
+    c.seen = a->seen;
     a->link = gp_link_open(&c);
     gp_link_on_frame(a->link, heard, NULL);
     // Online behind other apps too, as gink is (asked while in front, as Android wants).
@@ -307,6 +310,18 @@ static void parse_agents(app *a, const char *json) {
 static void stop_speaking(app *a) {
     gs_stream_flush(a->play);
     SDL_ClearAudioStream(a->conv);
+    a->saying = NULL;
+}
+
+// A message's speaker tapped: the message spoken, in place of what was; tapped while it is spoken, stopped.
+static void say_again(app *a, const entry *e) {
+    if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
+    bool same = a->saying == e->text;
+    if (a->saying || a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a), a->mood = IDLE;
+    if (same) return;
+    gp_link_send(a->link, 'U', e->text, (uint32_t)SDL_strlen(e->text));
+    a->saying = e->text, a->reply_done = false;
+    a->reply_base = gs_stream_position(a->play) + gs_stream_buffered(a->play);
 }
 
 static void take_frames(app *a) {
@@ -332,13 +347,30 @@ static void take_frames(app *a) {
             SDL_UnlockMutex(who_lock);
             break;
         }
-        case 'Z': {  // a message to show and not speak: a reply that waited, or what an agent posted
+        case 'Z': {  // a message to show and not speak: an agent's post, a reply from an agent before, one missed
             gs_json *doc = gs_json_parse(data, len);
             if (doc) {
                 gs_jv o = gs_json_root(doc);
-                add_message_at(a, gs_json_str(gs_json_get(o, "text"), ""), gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""), false);
+                const char *text = gs_json_str(gs_json_get(o, "text"), ""), *who = gs_json_str(gs_json_get(o, "who"), "");
+                bool mine = gs_json_bool(gs_json_get(o, "mine"), false);
+                // (one shown already, its number lost with a connection that broke before it came or come
+                // before the phone kept numbers, is not shown twice)
+                bool had = false;
+                for (int i = a->count - 1; i >= 0 && i >= a->count - 200; i--)
+                    if (a->history[i].mine == mine && !SDL_strcmp(a->history[i].who, who) && !SDL_strcmp(a->history[i].text, text)) had = true;
+                if (!had) add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine);
             }
             gs_json_free(doc);
+            break;
+        }
+        case 'K': {  // the number of the message just come, kept for asking for what follows it
+            long long seq = SDL_strtoll(data, NULL, 10);
+            if (seq > a->seen) {
+                a->seen = seq;
+                char path[1100];
+                settings_path(a, path, sizeof path, "seen.txt");
+                SDL_SaveFile(path, data, len);
+            }
             break;
         }
         case 'W': {  // always-on: what is being said, and the countdown
@@ -363,6 +395,7 @@ static void take_frames(app *a) {
         case 'R':
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0;
             add_message(a, data, here(a), false);
+            if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text;  // (spoken as it comes)
             a->reply_base = gs_stream_position(a->play) + gs_stream_buffered(a->play);
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
@@ -384,7 +417,10 @@ static void take_frames(app *a) {
         }
         SDL_free(data);
     }
-    if (a->mood == SPEAKING && a->reply_done && gs_stream_buffered(a->play) <= 0) a->mood = IDLE;
+    if (a->reply_done && gs_stream_buffered(a->play) <= 0) {
+        if (a->mood == SPEAKING) a->mood = IDLE;
+        a->saying = NULL;
+    }
     if (a->mood == THINKING && a->reply && a->reply_done) a->mood = IDLE;
 }
 
@@ -448,7 +484,7 @@ static void always_listen(app *a) {
     bool open = a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN && a->always_sent;
     // (while a reply plays too: the computer cancels its echo, by the playback reported with each piece,
     // and stops the reply when the user talks over it, as the window does)
-    bool listen = a->always && open && open_mic(a);
+    bool listen = a->always && open && !SDL_GetAtomicInt(&behind) && open_mic(a);
     if (!a->mic) return;
     if (listen && SDL_AudioStreamDevicePaused(a->mic)) SDL_ClearAudioStream(a->mic), SDL_ResumeAudioStreamDevice(a->mic);
     if (!listen && !a->holding && !a->pressing && !SDL_AudioStreamDevicePaused(a->mic)) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic), a->level = 0;
@@ -751,7 +787,23 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
     SDL_snprintf(label, sizeof label, "%s", e->mine ? "you" : e->who);
     gs_rect line = { x + mark + 6, at.y, w - mark - 6, head };
     gs_ui_text(ui, line, label, small, e->mine ? DIM : ACCENT, -1);
-    gs_ui_text(ui, line, live ? "now" : e->at, small * 0.9f, DIM, 1);
+    float time_w = gs_ui_text(ui, line, live ? "now" : e->at, small * 0.9f, DIM, 1);
+    // To the left of the time, a speaker: three bars to speak the message, a square to stop it.
+    if (!live) {
+        float s = small * 1.05f, ix = line.x + line.w - time_w - 10 - s, iy = at.y + (head - s) / 2;
+        gs_rect hit = { ix - s, at.y - 4, s * 3, head + 8 };
+        bool now = a->saying == e->text;
+        SDL_FColor c = now ? ACCENT : gs_ui_hovered(ui, hit) ? TEXT : DIM;
+        if (now) gs_ui_round(ui, (gs_rect){ ix + s * 0.1f, iy + s * 0.1f, s * 0.8f, s * 0.8f }, s * 0.15f, c);
+        else {
+            static const float bars[3] = { 0.45f, 1.0f, 0.7f };
+            for (int k = 0; k < 3; k++) {
+                float bh = s * bars[k], bw = s * 0.2f;
+                gs_ui_round(ui, (gs_rect){ ix + k * s * 0.4f, iy + (s - bh) / 2, bw, bh }, bw / 2, c);
+            }
+        }
+        if (gs_ui_clicked(ui, hit)) say_again(a, e);
+    }
     gp_rich(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, true);
     return h;
 }
@@ -967,6 +1019,9 @@ int main(int argc, char **argv) {
     // `gear-phone --shot FILE setup|talk|pick|table`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
+    // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
+    // being spoken plays to its end; it draws nothing until it is back (in the loop below).
+    SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return 1;
     static app a;
     char *pref = SDL_GetPrefPath("wakamex", "gear-phone");
@@ -974,7 +1029,14 @@ int main(int argc, char **argv) {
     SDL_free(pref);
     load_settings(&a);
     bool keyed = load_key(&a);
-    if (!shot) load_history(&a), load_unread(&a);
+    if (!shot) {
+        load_history(&a), load_unread(&a);
+        char path[1100];
+        settings_path(&a, path, sizeof path, "seen.txt");
+        char *seen = SDL_LoadFile(path, NULL);
+        a.seen = seen ? SDL_strtoll(seen, NULL, 10) : 0;
+        SDL_free(seen);
+    }
     if (shot) {
         SDL_strlcpy(a.target, "voice", sizeof a.target), SDL_strlcpy(a.voice, "alba", sizeof a.voice);
         SDL_strlcpy(a.tab, "voice", sizeof a.tab), SDL_strlcpy(a.open, "voice", sizeof a.open);
@@ -1050,7 +1112,9 @@ int main(int argc, char **argv) {
     bool down = false, went_down = false, moved = false;
     for (bool running = true; running;) {
         SDL_Event e;
-        if (SDL_WaitEventTimeout(&e, a.holding || a.mood != IDLE ? 5 : 30)) {
+        int wait = a.holding || a.mood != IDLE ? 5 : 30;
+        if (SDL_GetAtomicInt(&behind)) wait = gs_stream_buffered(a.play) > 0 || a.saying ? 20 : 500;
+        if (SDL_WaitEventTimeout(&e, wait)) {
             do {
                 if (e.type == SDL_EVENT_QUIT) running = false;
                 // Leaving the app ends what is being said; coming back, the connection is made again.
@@ -1092,6 +1156,8 @@ int main(int argc, char **argv) {
         if (a.link && !a.host_key[0] && gp_link_status(a.link, NULL, 0) == GP_OPEN && gp_link_host_key(a.link, seen, sizeof seen))
             SDL_strlcpy(a.host_key, seen, sizeof a.host_key), save_settings(&a);
 
+        // Behind other apps, or with the phone locked, the loop goes on (the speech playing) without drawing.
+        if (SDL_GetAtomicInt(&behind)) continue;
         gs_rect area = gs_ui_begin(ui);
         // The whole width: in portrait what the safe area keeps clear at the sides (the back gesture's
         // edges, the screen's rounded corners) covers nothing a line of text minds.

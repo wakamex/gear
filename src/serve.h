@@ -6,13 +6,17 @@
 //   'A' audio being said: 16-bit little-endian samples, 16 kHz mono
 //   'E' the end of what was said: it is transcribed and sent to the agent
 //   'X' stop: what is being spoken stops, and nothing more of it comes
+//   'U' a message to speak (UTF-8), in place of what is being spoken: its speech comes as a reply's
 //   'L' the agents there are, answered with 'G'
+//   'K' the number of the newest message the phone has (from 'K' below), sent on connecting: the
+//       messages after it come again as 'Z', so none sent to a connection that had died is lost
 //   'T' the agent to send to from now on, by name or tab title (UTF-8): what a conversation is named by
 //   'V' the voice to speak in, "alba" or "mary"
 //   'O' always-on, "1" or "0": while on, 'A' goes through gear's own listener, which finds the messages
 //       (pauses, then the countdown) and sends them itself, and 'E' is not used
 //   'N' always-on: send what has been said now, without waiting for the countdown
-//   'B' the phone's app is behind other apps ("1") or in front ("0"): behind, replies come as text alone
+//   'B' the phone's app is behind other apps ("1") or in front ("0"): behind, new replies come as text
+//       alone, and what is being spoken goes on
 //   'Q' always-on, the phone's playback, before each 'A': "1 SECONDS" while it plays the reply, that
 //       far into it, or "0". It lines what the phone played up with its microphone, for the echo
 //       canceller and the check against the speakers' words, and tells the pipeline a reply is playing,
@@ -24,9 +28,10 @@
 //   'R' the agent's reply, as written
 //   'P' speech of the reply: 16-bit little-endian samples, 24 kHz mono
 //   'D' the reply has been spoken
-//   'Z' a message to show and not speak: {"who", "at", "text"}: a reply that came while no phone was
-//       connected (sent on connecting), or what Panetone posts to Mihai's own channels (the hub follows
-//       `panetone watch`), as Telegram shows it
+//   'Z' a message to show and not speak: {"seq", "who", "at", "text", "mine" when the user's}: a
+//       reply from an agent sent to before, what Panetone posts to Mihai's own channels (the hub
+//       follows `panetone watch`), as Telegram shows it, or one given again after the phone's 'K'
+//   'K' the number of the message just sent ('M', 'R' or 'Z'), as the hub's log (hub-log.jsonl) has it
 //   'I' always-on: the user talked over the reply, which stops: the phone drops what it has of it
 //   'G' the agents: [{"name", "tab", "harness", "status"}]
 //   'W' always-on, what is being said: {"text": the message so far, "draft": the piece being said,
@@ -38,8 +43,8 @@
 #include <stdbool.h>
 
 // Serves one client on standard input and output; with `hub`, stays running and serves whichever
-// client connects to its socket ($XDG_RUNTIME_DIR/gear-hub.sock), the newest taking over, keeping the
-// agent's replies that come while none is connected for the next ('Z').
+// client connects to its socket ($XDG_RUNTIME_DIR/gear-hub.sock), the newest taking over, its log of
+// messages giving each phone what it missed ('K').
 int gear_serve(const char *models, int hear_threads, int say_threads, bool hub);
 // `gear serve` with a hub running: standard input and output passed to the hub's socket until either
 // end closes. -1 when no hub answers, for serving here instead.
