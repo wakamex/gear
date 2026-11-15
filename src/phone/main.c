@@ -765,6 +765,9 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
     gs_ui_modal_end(ui);
 }
 
+// Drawing the conversation beside the open one, as a swipe brings it in: nothing in it takes a tap.
+static bool preview;
+
 // One message as the log draws it: a bar down its left, amber for an agent and dim for the user; a line
 // with a small mark (the agent's character, or a round "you"), who and when; then the text, the user's
 // dimmed. Returns its height; draws nothing when `draw` is false.
@@ -802,7 +805,7 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
                 gs_ui_round(ui, (gs_rect){ ix + k * s * 0.4f, iy + (s - bh) / 2, bw, bh }, bw / 2, c);
             }
         }
-        if (gs_ui_clicked(ui, hit)) say_again(a, e);
+        if (!preview && gs_ui_clicked(ui, hit)) say_again(a, e);
     }
     gp_rich(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, true);
     return h;
@@ -810,37 +813,44 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
 
 // The conversation: a page a finger scrolls back through, the newest at the end; a new message scrolls
 // to its start, and what is being said now (always-on's words as they come) is shown last.
-static void conversation(gs_ui *ui, app *a, gs_rect r) {
-    static int last_count = -1;
-    static char last_open[128];
-    if (SDL_strcmp(last_open, a->open)) SDL_strlcpy(last_open, a->open, sizeof last_open), last_count = -1;
+static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
+    static int last_counts[2] = { -1, -1 };
+    static char last_keys[2][128];
+    int *last_count = &last_counts[preview];
+    const char *id = preview ? "chat-beside" : "chat";
+    if (SDL_strcmp(last_keys[preview], key)) SDL_strlcpy(last_keys[preview], key, 128), *last_count = -1;
     int last = -1, shown = 0;
     for (int i = 0; i < a->count; i++)
-        if (!SDL_strcmp(a->history[i].who, a->open)) last = i, shown++;
-    gs_rect page = gs_ui_page_begin(ui, r, "chat");
+        if (!SDL_strcmp(a->history[i].who, key)) last = i, shown++;
+    gs_rect page = gs_ui_page_begin(ui, r, id);
     float y = page.y, newest = page.y;
     for (int i = 0; i < a->count; i++) {
         const entry *e = &a->history[i];
-        if (SDL_strcmp(e->who, a->open)) continue;
-        bool speaking = !e->mine && i == last && a->mood == SPEAKING;
+        if (SDL_strcmp(e->who, key)) continue;
+        bool speaking = !preview && !e->mine && i == last && a->mood == SPEAKING;
         newest = y;
         y += message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, e, speaking, true) + 8;
     }
-    if (a->said && *a->said) {
+    if (!preview && a->said && *a->said) {
         entry now = { a->said, "", "", true };
         SDL_strlcpy(now.who, here(a), sizeof now.who);
         gs_ui_opacity(ui, 0.7f);
         y += message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, &now, true, true) + 8;
         gs_ui_opacity(ui, 1);
     }
-    if (!shown && !(a->said && *a->said)) gs_ui_text(ui, (gs_rect){ page.x, y, page.w, px * 2 }, "what you say and the replies show here", small, DIM, -1);
+    if (!shown && (preview || !(a->said && *a->said))) gs_ui_text(ui, (gs_rect){ page.x, y, page.w, px * 2 }, "what you say and the replies show here", small, DIM, -1);
     gs_ui_page_end(ui, y);
     // (to the newest message's start when one came, and to the end on opening)
-    if (a->fresh || last_count < 0) gs_ui_page_scroll_to(ui, "chat", (newest - page.y), last_count >= 0);
-    a->fresh = false, last_count = shown;
+    bool fresh = !preview && a->fresh;
+    if (fresh || *last_count < 0) gs_ui_page_scroll_to(ui, id, (newest - page.y), *last_count >= 0);
+    if (!preview) a->fresh = false;
+    *last_count = shown;
 }
 
-static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
+// The talk screen of the conversation `key`: the open one, or with `preview` set, the one beside it.
+static gs_rect chat_area;  // where the open conversation's page was drawn, which a swipe does not start on
+
+static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *key) {
     gs_ui_fill(ui, area, BACKGROUND);
     gs_rect r = { area.x + 8, area.y + 10, area.w - 16, area.h - 14 };
     // The top line: the agent, which a tap changes; the voice, which a tap switches; and settings.
@@ -850,18 +860,18 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     gs_ui_circle(ui, top.x + 6, top.y + top.h / 2, 5, st == GP_OPEN ? OK : st == GP_CONNECTING ? ACCENT : OVER);
     gs_rect settings = gs_cut_right(&top, gs_ui_text_width(ui, "settings", small) + 8);
     gs_ui_text(ui, settings, "settings", small, gs_ui_hovered(ui, settings) ? ACCENT : DIM, 1);
-    if (gs_ui_clicked(ui, settings)) a->setup = true;
+    if (!preview && gs_ui_clicked(ui, settings)) a->setup = true;
     gs_cut_right(&top, 16);
     gs_rect voice = gs_cut_right(&top, gs_ui_text_width(ui, "mary", small) + 8);
     gs_ui_text(ui, voice, a->voice[0] ? a->voice : "alba", small, gs_ui_hovered(ui, voice) ? ACCENT : DIM, 1);
-    if (gs_ui_clicked(ui, voice) && st == GP_OPEN) gp_link_send(a->link, 'V', !SDL_strcmp(a->voice, "mary") ? "alba" : "mary", 4);
+    if (!preview && gs_ui_clicked(ui, voice) && st == GP_OPEN) gp_link_send(a->link, 'V', !SDL_strcmp(a->voice, "mary") ? "alba" : "mary", 4);
     gs_rect who = { top.x + 18, top.y, top.w - 18, top.h };
     // (with the count of replies unseen in the other conversations)
     int elsewhere = 0;
-    for (int i = 0; i < a->unread_count; i++) elsewhere += SDL_strcmp(a->unread[i].who, a->open) ? a->unread[i].n : 0;
+    for (int i = 0; i < a->unread_count; i++) elsewhere += SDL_strcmp(a->unread[i].who, key) ? a->unread[i].n : 0;
     char label[200], count_text[16] = "";
     if (elsewhere) SDL_snprintf(count_text, sizeof count_text, "%d", elsewhere);
-    SDL_snprintf(label, sizeof label, "→ %s", a->open[0] ? a->open : "nobody: read back");
+    SDL_snprintf(label, sizeof label, "→ %s", key[0] ? key : "nobody: read back");
     float label_w = gs_ui_text(ui, who, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
     if (elsewhere) {
         float d = small * 1.5f, w = SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10);
@@ -869,7 +879,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
         gs_ui_round(ui, badge, d / 2, ACCENT);
         gs_ui_text(ui, badge, count_text, small, BACKGROUND, 0);
     }
-    if (gs_ui_clicked(ui, who)) {
+    if (!preview && gs_ui_clicked(ui, who)) {
         a->picking = true;
         if (st == GP_OPEN) gp_link_send(a->link, 'L', NULL, 0);
     }
@@ -878,28 +888,131 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     float block = SDL_min(r.w * 0.62f, r.h * 0.3f), radius = block * 0.4f;
     gs_rect stage = gs_cut_top(&r, block);
     float cx = stage.x + stage.w / 2, cy = stage.y + stage.h / 2;
-    mood shown = a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood;
+    mood shown = preview ? IDLE : a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood;
     if (!avatar(ui, avatar_index(a->avatar), cx, cy, radius * 1.25f, shown, t, a->level)) character(ui, cx, cy, radius, shown, t, a->level);
-    character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
+    if (!preview) character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
     char buf[300];
-    bool listening = a->mood == LISTENING || (a->always && a->mood == IDLE);
-    gs_ui_text(ui, gs_cut_top(&r, px * 1.8f), hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
+    bool listening = !preview && (a->mood == LISTENING || (a->always && a->mood == IDLE));
+    gs_ui_text(ui, gs_cut_top(&r, px * 1.8f), preview ? "" : hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
     gs_rect toggle = gs_cut_top(&r, px * 2);
     const char *always_label = a->always ? "always on: on" : "always on: off";
     float tw = gs_ui_text_width(ui, always_label, small) + 24;
     gs_rect sw = { toggle.x + (toggle.w - tw) / 2, toggle.y, tw, toggle.h };
     gs_ui_outline(ui, sw, sw.h / 2, 1, a->always ? ACCENT : BORDER);
     gs_ui_text(ui, sw, always_label, small, a->always ? ACCENT : gs_ui_hovered(ui, sw) ? TEXT : DIM, 0);
-    if (gs_ui_clicked(ui, sw)) set_always(a, !a->always);
+    if (!preview && gs_ui_clicked(ui, sw)) set_always(a, !a->always);
     // What was said and the reply: the rest of the screen, a page a finger scrolls, back at its top for each
     // new reply so it reads from the start.
     gs_cut_top(&r, 12);
     gs_ui_fill(ui, (gs_rect){ r.x, r.y, r.w, 1 }, BORDER);
     gs_cut_top(&r, 10);
-    conversation(ui, a, r);
+    if (!preview) chat_area = r;
+    conversation(ui, a, r, key);
     gs_ui_wake(ui, 16);
     // The agents to pick from, over everything.
-    if (a->picking) picker(ui, a, area);
+    if (!preview && a->picking) picker(ui, a, area);
+}
+
+// ---- Swiping between conversations ----
+
+// A swipe outside the conversation's page, left or up, opens the conversation after the open one in the
+// list; right or down, the one before. As pagers do (sources/swipe/NOTES.md): the screen follows the
+// finger from when it has moved 16 points along one axis, with the conversation beside it coming in;
+// let go, it goes on to that one after a fling (25 points and 400 points a second its way) or past
+// half way, and back otherwise, easing out in at most 600 ms. With no conversation that way the
+// screen moves less and less, as a rubber band does.
+enum { SWIPE_SLOP = 16, FLING_DISTANCE = 25, FLING_SPEED = 400, SETTLE_MS = 600, SAMPLES = 8 };
+typedef struct {
+    bool down;               // a finger down outside the page: perhaps a swipe
+    int axis;                // 0 until it has moved the slop, then 1 across or 2 up and down
+    float x0, y0, size;      // where it went down; the screen's width or height along the axis
+    float off;               // how far the screen is moved, the rubber band applied
+    float pos[SAMPLES], at[SAMPLES];  // the latest offsets and their times, for the speed let go at
+    int samples;
+    bool settling;           // easing from `from` to `to` since `began`, over `ms`
+    float from, to, ms;
+    Uint64 began;
+    char next[128];          // the conversation it lands on, when it goes on
+} swipe;
+
+// The conversation `step` from the open one in the list (1 the next, -1 the one before).
+static bool beside(app *a, int step, char *out, size_t size) {
+    static topic list[256];
+    int n = topics(a, list, 256), at = -1;
+    for (int i = 0; i < n; i++)
+        if (!SDL_strcmp(list[i].who, a->open)) at = i;
+    int k = at < 0 ? (step > 0 ? 0 : -1) : at + step;
+    if (k < 0 || k >= n) return false;
+    SDL_strlcpy(out, list[k].who, size);
+    return true;
+}
+
+static float rubber(float x, float d) {
+    float r = (1.0f - 1.0f / (SDL_fabsf(x) * 0.55f / d + 1.0f)) * d;
+    return x < 0 ? -r : r;
+}
+
+static void swipe_down(swipe *w, float x, float y) {
+    if (w->settling) return;
+    *w = (swipe){ .down = true, .x0 = x, .y0 = y };
+}
+
+static void swipe_move(swipe *w, app *a, float x, float y, gs_rect area) {
+    if (w->down && !w->axis && a->holding) w->down = false;  // (a finger kept still on the character is talking)
+    if (!w->down) return;
+    float dx = x - w->x0, dy = y - w->y0;
+    if (!w->axis) {
+        if (SDL_sqrtf(dx * dx + dy * dy) < SWIPE_SLOP) return;
+        w->axis = SDL_fabsf(dx) >= SDL_fabsf(dy) ? 1 : 2;
+        w->size = w->axis == 1 ? area.w : area.h;
+    }
+    float raw = w->axis == 1 ? dx : dy;
+    raw -= raw < 0 ? -SWIPE_SLOP : SWIPE_SLOP;  // (from where it was taken for a swipe, so it does not jump)
+    char next[128];
+    w->off = beside(a, raw < 0 ? 1 : -1, next, sizeof next) ? SDL_clamp(raw, -w->size, w->size) : rubber(raw, w->size);
+    if (w->samples == SAMPLES) SDL_memmove(w->pos, w->pos + 1, sizeof w->pos - sizeof *w->pos), SDL_memmove(w->at, w->at + 1, sizeof w->at - sizeof *w->at), w->samples--;
+    w->pos[w->samples] = raw, w->at[w->samples] = (float)SDL_GetTicks() / 1000.0f, w->samples++;
+}
+
+static void settle(swipe *w, float to, float speed) {
+    float left = SDL_fabsf(to - w->off);
+    w->ms = speed > 0 ? SDL_min(SETTLE_MS, 4000.0f * left / speed) : SDL_min(SETTLE_MS, (left / w->size + 1) * 100);
+    w->settling = true, w->from = w->off, w->to = to, w->began = SDL_GetTicks();
+}
+
+static void swipe_up(swipe *w, app *a) {
+    bool was = w->down && w->axis;
+    w->down = false;
+    if (!was) return;
+    // The speed over the last 0.1 s of the drag.
+    float now = (float)SDL_GetTicks() / 1000.0f, speed = 0;
+    int first = w->samples - 1;
+    while (first > 0 && now - w->at[first - 1] <= 0.1f) first--;
+    if (w->samples >= 2 && first < w->samples - 1 && w->at[w->samples - 1] > w->at[first])
+        speed = (w->pos[w->samples - 1] - w->pos[first]) / (w->at[w->samples - 1] - w->at[first]);
+    int step = w->off < 0 ? 1 : -1;
+    bool has = beside(a, step, w->next, sizeof w->next);
+    bool fling = SDL_fabsf(w->off) > FLING_DISTANCE && SDL_fabsf(speed) > FLING_SPEED && (speed < 0) == (w->off < 0);
+    bool on = has && (fling || SDL_fabsf(w->off) > w->size / 2);
+    settle(w, on ? -step * w->size : 0, fling ? SDL_fabsf(speed) : 0);
+    if (!on) w->next[0] = 0;
+}
+
+// Each frame: the easing on, and the conversation it went to opened when it ends there.
+static void swipe_step(swipe *w, app *a) {
+    if (!w->settling) return;
+    float t = w->ms > 0 ? SDL_min(1.0f, (float)(SDL_GetTicks() - w->began) / w->ms) : 1;
+    float e = t - 1;
+    w->off = w->from + (w->to - w->from) * (e * e * e * e * e + 1);
+    if (t < 1) return;
+    w->settling = false, w->off = 0, w->axis = 0;
+    if (w->next[0]) open_conversation(a, w->next);
+}
+
+static gs_rect shifted(gs_rect r, int axis, float by) {
+    if (axis == 1) r.x += by;
+    else r.y += by;
+    return r;
 }
 
 static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
@@ -1016,7 +1129,7 @@ static void window_points(SDL_Window *win, gs_ui *ui, float x, float y, float *p
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|pick|table`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|pick|table|swipe`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -1109,10 +1222,13 @@ int main(int argc, char **argv) {
     Uint64 start = SDL_GetTicks();
     // Where the finger (or mouse) went down, in the interface's points, and whether it has moved since.
     float press_x = 0, press_y = 0;
-    bool down = false, went_down = false, moved = false;
+    bool down = false, went_down = false, went_up = false, moved = false;
+    static swipe sw;
+    gs_rect last_area = { 0, 0, 400, 760 };
+    if (shot && !SDL_strcmp(argv[3], "swipe")) sw.axis = 1, sw.size = 400, sw.off = -170;  // (40% of the way to the next)
     for (bool running = true; running;) {
         SDL_Event e;
-        int wait = a.holding || a.mood != IDLE ? 5 : 30;
+        int wait = a.holding || a.mood != IDLE || sw.settling || sw.axis ? 5 : 30;
         if (SDL_GetAtomicInt(&behind)) wait = gs_stream_buffered(a.play) > 0 || a.saying ? 20 : 500;
         if (SDL_WaitEventTimeout(&e, wait)) {
             do {
@@ -1130,13 +1246,15 @@ int main(int argc, char **argv) {
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     window_points(win, ui, e.button.x, e.button.y, &press_x, &press_y);
                     down = went_down = true, moved = false;
+                    if (!a.setup && !a.picking && !gs_rect_contains(chat_area, press_x, press_y)) swipe_down(&sw, press_x, press_y);
                 }
                 if (e.type == SDL_EVENT_MOUSE_MOTION && down) {
                     float x, y;
                     window_points(win, ui, e.motion.x, e.motion.y, &x, &y);
                     if ((x - press_x) * (x - press_x) + (y - press_y) * (y - press_y) > 12 * 12) moved = true;
+                    swipe_move(&sw, &a, x, y, last_area);
                 }
-                if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) down = false;
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) down = false, went_up = true, swipe_up(&sw, &a);
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
@@ -1164,20 +1282,31 @@ int main(int argc, char **argv) {
         int out_w, out_h;
         if (SDL_GetCurrentRenderOutputSize(ren, &out_w, &out_h) && out_w < out_h) area.x = 0, area.w = (float)out_w / gs_ui_scale(ui);
         float t = (float)(SDL_GetTicks() - start) / 1000.0f;
+        last_area = area;
+        swipe_step(&sw, &a);
         if (a.setup) setup_screen(ui, &a, area);
         else {
-            talk_screen(ui, &a, area, t);
+            // Mid-swipe, the conversation beside the open one comes in beside it.
+            char next[128];
+            int step = sw.off < 0 ? 1 : -1;
+            if (sw.off != 0 && beside(&a, step, next, sizeof next)) {
+                preview = true;
+                talk_screen(ui, &a, shifted(area, sw.axis, sw.off + step * sw.size), t, next);
+                preview = false;
+            }
+            talk_screen(ui, &a, sw.off != 0 ? shifted(area, sw.axis, sw.off) : area, t, a.open);
             // A press is on the character only where it went down, not where the pointer was last.
             bool on_character = went_down && !a.picking && gs_rect_contains(character_area, press_x, press_y);
             if (a.always) {
-                if (on_character) tap_always(&a);
+                // (a tap, let go where it went down: a finger that moves is swiping)
+                if (went_up && !moved && !a.picking && gs_rect_contains(character_area, press_x, press_y)) tap_always(&a);
             } else {
                 if (on_character && !a.holding) begin_press(&a);
                 if (a.pressing && (moved || !down)) drop_press(&a);
                 else if (a.pressing && SDL_GetTicks() - a.held_at >= HOLD_MS) start_holding(&a);
                 if (!down && a.holding) stop_holding(&a);
             }
-            went_down = false;
+            went_down = went_up = false;
         }
         gs_ui_end(ui);
         if (shot && ++frames >= 4) { gs_draw_save_png(ren, shot); running = false; }
