@@ -44,7 +44,7 @@ typedef struct {
     char target[128], voice[16], note[300];
     char *said, *reply;
     mood mood;
-    bool holding;
+    bool holding, pressing;  // a hold under way; a press on the character not yet a hold
     Uint64 held_at;
     bool always_sent;     // the computer has been told always-on is on, on this connection
     double left;          // always-on: seconds before what is said is sent, or < 0
@@ -203,15 +203,30 @@ static void take_frames(app *a) {
 
 static bool open_mic(app *a);
 
-static void start_holding(app *a) {
+// A press on the character records at once, kept on the phone; only once it has been held still for
+// HOLD_MS is it a hold, which stops a reply being spoken and sends what was recorded. A drag (scrolling)
+// or a press let go sooner drops the recording and changes nothing.
+enum { HOLD_MS = 250 };
+
+static void begin_press(app *a) {
     if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
     // (opened here when it could not be at the start, before the system's question about the microphone was answered)
     if (!open_mic(a)) return;
-    if (a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a);
     SDL_ClearAudioStream(a->mic);
     SDL_ResumeAudioStreamDevice(a->mic);
-    a->holding = true;
+    a->pressing = true;
     a->held_at = SDL_GetTicks();
+}
+
+static void drop_press(app *a) {
+    a->pressing = false;
+    if (!a->always) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic);
+}
+
+static void start_holding(app *a) {
+    a->pressing = false;
+    if (a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a);
+    a->holding = true;
     a->mood = LISTENING;
     a->note[0] = 0;
 }
@@ -245,7 +260,7 @@ static void always_listen(app *a) {
     bool listen = a->always && open && a->mood != SPEAKING && open_mic(a);
     if (!a->mic) return;
     if (listen && SDL_AudioStreamDevicePaused(a->mic)) SDL_ClearAudioStream(a->mic), SDL_ResumeAudioStreamDevice(a->mic);
-    if (!listen && !a->holding && !SDL_AudioStreamDevicePaused(a->mic)) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic), a->level = 0;
+    if (!listen && !a->holding && !a->pressing && !SDL_AudioStreamDevicePaused(a->mic)) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic), a->level = 0;
     if (listen) send_audio(a);
 }
 
@@ -546,6 +561,16 @@ static int say_file(app *a, const char *wav) {
     return 0;
 }
 
+// An event's window coordinates in the interface's points, as gs_ui reads them: through the window's
+// pixels, then gs_ui's pixels per point.
+static void window_points(SDL_Window *win, gs_ui *ui, float x, float y, float *px_out, float *py_out) {
+    int w, h, pw, ph;
+    SDL_GetWindowSize(win, &w, &h);
+    SDL_GetWindowSizeInPixels(win, &pw, &ph);
+    float to_pixels = w > 0 ? (float)pw / (float)w : 1, per_point = gs_ui_scale(ui);  // (its zoom is in its scale)
+    *px_out = x * to_pixels / per_point, *py_out = y * to_pixels / per_point;
+}
+
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return 1;
@@ -605,7 +630,9 @@ int main(int argc, char **argv) {
     if (!a.setup && !shot) connect_link(&a);
     int frames = 0;
     Uint64 start = SDL_GetTicks();
-    bool was_down = false;
+    // Where the finger (or mouse) went down, in the interface's points, and whether it has moved since.
+    float press_x = 0, press_y = 0;
+    bool down = false, went_down = false, moved = false;
     for (bool running = true; running;) {
         SDL_Event e;
         if (SDL_WaitEventTimeout(&e, a.holding || a.mood != IDLE ? 5 : 30)) {
@@ -614,6 +641,16 @@ int main(int argc, char **argv) {
                 // Leaving the app ends what is being said; coming back, the connection is made again.
                 if (e.type == SDL_EVENT_DID_ENTER_BACKGROUND) stop_holding(&a);
                 if (e.type == SDL_EVENT_WILL_ENTER_FOREGROUND && a.link && gp_link_status(a.link, NULL, 0) == GP_FAILED) connect_link(&a);
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
+                    window_points(win, ui, e.button.x, e.button.y, &press_x, &press_y);
+                    down = went_down = true, moved = false;
+                }
+                if (e.type == SDL_EVENT_MOUSE_MOTION && down) {
+                    float x, y;
+                    window_points(win, ui, e.motion.x, e.motion.y, &x, &y);
+                    if ((x - press_x) * (x - press_x) + (y - press_y) * (y - press_y) > 12 * 12) moved = true;
+                }
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) down = false;
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
@@ -638,13 +675,17 @@ int main(int argc, char **argv) {
         if (a.setup) setup_screen(ui, &a, area);
         else {
             talk_screen(ui, &a, area, t);
-            // Held on the character: a press that starts on it listens until it is let go, wherever.
-            bool down = (SDL_GetMouseState(NULL, NULL) & SDL_BUTTON_LMASK) != 0;
+            // A press is on the character only where it went down, not where the pointer was last.
+            bool on_character = went_down && !a.picking && gs_rect_contains(character_area, press_x, press_y);
             if (a.always) {
-                if (!a.picking && down && !was_down && gs_ui_hovered(ui, character_area)) tap_always(&a);
-            } else if (!a.picking && down && !a.holding && !was_down && gs_ui_hovered(ui, character_area)) start_holding(&a);
-            if (!down && a.holding) stop_holding(&a);
-            was_down = down;
+                if (on_character) tap_always(&a);
+            } else {
+                if (on_character && !a.holding) begin_press(&a);
+                if (a.pressing && (moved || !down)) drop_press(&a);
+                else if (a.pressing && SDL_GetTicks() - a.held_at >= HOLD_MS) start_holding(&a);
+                if (!down && a.holding) stop_holding(&a);
+            }
+            went_down = false;
         }
         gs_ui_end(ui);
         if (shot && ++frames >= 4) { gs_draw_save_png(ren, shot); running = false; }
