@@ -15,6 +15,7 @@
 #include "gs_ui.h"
 #include "key.h"
 #include "link.h"
+#include "rich.h"
 
 enum { MIX_RATE = 48000, MIC_RATE = 16000, SPEECH_RATE = 24000, MAX_AGENTS = 200 };
 
@@ -74,7 +75,9 @@ typedef struct {
     // The agents to pick from.
     bool picking;
     char agents[MAX_AGENTS][2][128];  // name, and the tab's title
+    bool busy[MAX_AGENTS];            // in the middle of a turn
     int agent_count;
+    Uint64 asked_agents;              // when the list was last asked for, to keep it current while shown
 } app;
 
 // ---- Settings ----
@@ -295,6 +298,7 @@ static void parse_agents(app *a, const char *json) {
     for (gs_jv x = doc ? gs_json_first(gs_json_root(doc)) : NULL; x && a->agent_count < MAX_AGENTS; x = gs_json_next(x)) {
         SDL_strlcpy(a->agents[a->agent_count][0], gs_json_str(gs_json_get(x, "name"), ""), 128);
         SDL_strlcpy(a->agents[a->agent_count][1], gs_json_str(gs_json_get(x, "tab"), ""), 128);
+        a->busy[a->agent_count] = !SDL_strcmp(gs_json_str(gs_json_get(x, "status"), ""), "busy");
         a->agent_count++;
     }
     gs_json_free(doc);
@@ -669,6 +673,9 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
     gs_ui_field(ui, gs_cut_top(&in, px * 2.4f), "pick", typed, sizeof typed, "search conversations and agents");
     gs_cut_top(&in, 8);
     bool done = gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0);
+    // (the agents asked for again every 3 s while the list shows, for which are mid-turn)
+    if (a->link && SDL_GetTicks() - a->asked_agents >= 3000 && gp_link_status(a->link, NULL, 0) == GP_OPEN)
+        gp_link_send(a->link, 'L', NULL, 0), a->asked_agents = SDL_GetTicks();
     const char *chosen = NULL;
     if (!n) gs_ui_text(ui, gs_cut_top(&in, px * 2), count ? "nothing matches" : "looking for agents…", px, DIM, -1);
     else {
@@ -690,6 +697,16 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
                 row.w -= w + 8;
             }
             gs_rect top = gs_cut_top(&row, px * 1.4f);
+            // Whether its agent is mid-turn (a dot pulsing) or done (a still one); none without an agent.
+            gs_rect mark = gs_cut_left(&top, px);
+            if (c->agent >= 0) {
+                float cy = mark.y + mark.h / 2, cx = mark.x + px * 0.3f;
+                if (a->busy[c->agent]) {
+                    float pulse = 0.5f + 0.5f * SDL_sinf((float)SDL_GetTicks() / 1000.0f * 5.0f);
+                    gs_ui_circle(ui, cx, cy, px * 0.3f, (SDL_FColor){ ACCENT.r, ACCENT.g, ACCENT.b, 0.25f + 0.35f * pulse });
+                    gs_ui_circle(ui, cx, cy, px * 0.18f, ACCENT);
+                } else gs_ui_circle(ui, cx, cy, px * 0.18f, OK);
+            }
             if (c->agent >= 0 && SDL_strcmp(c->who, a->agents[c->agent][0])) {
                 gs_rect name = gs_cut_right(&top, gs_ui_text_width(ui, a->agents[c->agent][0], small) + 8);
                 gs_ui_text(ui, name, a->agents[c->agent][0], small, DIM, 1);
@@ -716,9 +733,10 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
 // with a small mark (the agent's character, or a round "you"), who and when; then the text, the user's
 // dimmed. Returns its height; draws nothing when `draw` is false.
 static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool live, bool draw) {
-    float head = small * 1.7f, pad = 10, w = at.w - pad - 6;
+    float head = small * 1.7f, pad = 8, w = at.w - pad - 4;
     const char *text = e->text;
-    float h = head + gs_ui_text_height(ui, text, e->mine ? small + 1 : px, w) + 8;
+    gp_rich_style style = { e->mine ? small + 1 : px, 11, e->mine ? DIM : (live ? BRIGHT : TEXT), ACCENT, BORDER, (SDL_FColor){ 1, 1, 1, 0.04f } };
+    float h = head + gp_rich(ui, (gs_rect){ at.x + pad, 0, w, 0 }, text, &style, false) + 8;
     if (!draw) return h;
     gs_ui_fill(ui, (gs_rect){ at.x, at.y, 3, h - 4 }, e->mine ? BORDER : ACCENT);
     if (!e->mine) gs_ui_fill(ui, (gs_rect){ at.x + 3, at.y, at.w - 3, h - 4 }, (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.06f });
@@ -734,7 +752,7 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
     gs_rect line = { x + mark + 6, at.y, w - mark - 6, head };
     gs_ui_text(ui, line, label, small, e->mine ? DIM : ACCENT, -1);
     gs_ui_text(ui, line, live ? "now" : e->at, small * 0.9f, DIM, 1);
-    gs_ui_text_wrapped(ui, (gs_rect){ x, at.y + head, w, 100000 }, text, e->mine ? small + 1 : px, e->mine ? DIM : (live ? BRIGHT : TEXT));
+    gp_rich(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, true);
     return h;
 }
 
@@ -772,7 +790,7 @@ static void conversation(gs_ui *ui, app *a, gs_rect r) {
 
 static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     gs_ui_fill(ui, area, BACKGROUND);
-    gs_rect r = gs_inset(area, 14);
+    gs_rect r = { area.x + 8, area.y + 10, area.w - 16, area.h - 14 };
     // The top line: the agent, which a tap changes; the voice, which a tap switches; and settings.
     gs_rect top = gs_cut_top(&r, px * 2.2f);
     char why[8];
@@ -946,6 +964,9 @@ static void window_points(SDL_Window *win, gs_ui *ui, float x, float y, float *p
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
+    // `gear-phone --shot FILE setup|talk|pick|table`: a screen drawn to a picture, without a display.
+    const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
+    if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return 1;
     static app a;
     char *pref = SDL_GetPrefPath("wakamex", "gear-phone");
@@ -953,11 +974,8 @@ int main(int argc, char **argv) {
     SDL_free(pref);
     load_settings(&a);
     bool keyed = load_key(&a);
-    // `gear-phone --shot FILE setup|talk|pick`: a screen drawn to a picture, without a display.
-    const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (!shot) load_history(&a), load_unread(&a);
     if (shot) {
-        SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
         SDL_strlcpy(a.target, "voice", sizeof a.target), SDL_strlcpy(a.voice, "alba", sizeof a.voice);
         SDL_strlcpy(a.tab, "voice", sizeof a.tab), SDL_strlcpy(a.open, "voice", sizeof a.open);
         remember(&a, "Did the gesso pin land?", "gesso", "08:30", true);
@@ -965,6 +983,14 @@ int main(int argc, char **argv) {
         remember(&a, "The Kijiji search found two 3090s under 900 dollars near you.", "personal", "11:02", false);
         remember(&a, "One of them is listed as tested with a receipt.", "personal", "11:03", false);
         *unread_of(&a, "personal", true) = 2;
+        remember(&a, "The production model drifts into English on long recordings. The figure is the share of common short words that are English:\n\n"
+                     "| Recording | Language | Minutes | Production (`parakeet-ft-v1`) | Parakeet v3 |\n|---|---|---|---|---|\n"
+                     "| Interview with an ultrarunner | German | 38.6 | 23% | 15% |\n| Comedy highlights | German | 42.9 | 52% | 18% |\n"
+                     "| Comedy set | German | 12.8 | 63% | 19% |\n| Guided meditation | Italian | 11.2 | 4% | 4% |\n"
+                     "| Talk on tarot | Italian | 44.7 | 31% | 4% |\n| Video on earning with AI videos | Portuguese | 31.0 | 9% | 0% |\n"
+                     "| Exam strategy | Portuguese | 15.4 | 8% | 1% |\n\n- German shares words like \"in\", \"so\", \"was\" and \"will\" with English, so a clean German transcript scores about 15% here.",
+                 "transcribe", "12:53", false);
+        if (!SDL_strcmp(argv[3], "table")) SDL_strlcpy(a.open, "transcribe", sizeof a.open);
         remember(&a, "What did the agents get done this morning?", "voice", "09:12", true);
         remember(&a, "Three things. The transcribe agent fixed the Spanish drift, gear's phone app got a searchable agent picker, and the fellows site is up.", "voice", "09:12", false);
         remember(&a, "Can you check whether the build finished?", "voice", "10:40", true);
@@ -974,7 +1000,7 @@ int main(int argc, char **argv) {
             static const char *names[][2] = { { "voice", "voice" }, { "personal_claude", "personal" }, { "gear_claude", "gear" }, { "gesso", "gesso" },
                                               { "hearsay_claude", "hearsay" }, { "gink_claude", "gink" }, { "aeroplan_claude", "aeroplan" } };
             for (int i = 0; i < 7; i++) SDL_strlcpy(a.agents[i][0], names[i][0], 128), SDL_strlcpy(a.agents[i][1], names[i][1], 128);
-            a.agent_count = 7, a.picking = true;
+            a.agent_count = 7, a.picking = true, a.busy[2] = a.busy[4] = true;
         }
     }
     if (argc >= 3 && !SDL_strcmp(argv[1], "--say")) {
@@ -1067,6 +1093,10 @@ int main(int argc, char **argv) {
             SDL_strlcpy(a.host_key, seen, sizeof a.host_key), save_settings(&a);
 
         gs_rect area = gs_ui_begin(ui);
+        // The whole width: in portrait what the safe area keeps clear at the sides (the back gesture's
+        // edges, the screen's rounded corners) covers nothing a line of text minds.
+        int out_w, out_h;
+        if (SDL_GetCurrentRenderOutputSize(ren, &out_w, &out_h) && out_w < out_h) area.x = 0, area.w = (float)out_w / gs_ui_scale(ui);
         float t = (float)(SDL_GetTicks() - start) / 1000.0f;
         if (a.setup) setup_screen(ui, &a, area);
         else {
