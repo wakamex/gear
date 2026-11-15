@@ -30,6 +30,11 @@ static SDL_FColor hex(Uint32 c) { return (SDL_FColor){ (float)(c >> 16 & 255) / 
 
 typedef enum { IDLE, LISTENING, THINKING, SPEAKING } mood;
 
+// The conversation, both sides, kept on the phone in history.jsonl so it outlasts a restart: what was
+// sent and what each agent replied, with when, newest last.
+typedef struct { char *text; char who[128]; char at[8]; bool mine; } entry;
+enum { HISTORY = 500 };
+
 typedef struct {
     // Where gear runs, kept in settings.txt; the phone's key, kept with gs_secret.
     char host[256], user[64], port[8], host_key[128];
@@ -43,7 +48,10 @@ typedef struct {
     char status[300];     // the connection's state, or why it failed
     // The conversation.
     char target[128], voice[16], note[300];
-    char *said, *reply;
+    char *said, *reply;   // what is being said now (always-on's live words), and the reply being spoken
+    entry history[HISTORY];
+    int count;
+    bool fresh;           // a message came: the conversation scrolls to its start
     mood mood;
     bool holding, pressing;  // a hold under way; a press on the character not yet a hold
     Uint64 held_at;
@@ -94,6 +102,51 @@ static void save_settings(app *a) {
     settings_path(a, path, sizeof path, "settings.txt");
     SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar);
     SDL_SaveFile(path, text, SDL_strlen(text));
+}
+
+static void remember(app *a, const char *text, const char *who, const char *at, bool mine) {
+    if (a->count == HISTORY) SDL_free(a->history[0].text), SDL_memmove(a->history, a->history + 1, (HISTORY - 1) * sizeof *a->history), a->count--;
+    entry *e = &a->history[a->count++];
+    e->text = SDL_strdup(text), e->mine = mine;
+    SDL_strlcpy(e->who, who, sizeof e->who), SDL_strlcpy(e->at, at, sizeof e->at);
+}
+
+static void load_history(app *a) {
+    char path[1100];
+    settings_path(a, path, sizeof path, "history.jsonl");
+    size_t n = 0;
+    char *all = SDL_LoadFile(path, &n);
+    for (char *line = all, *end; line && line < all + n; line = end + 1) {
+        if (!(end = SDL_strchr(line, '\n'))) end = all + n;
+        gs_json *doc = gs_json_parse(line, (size_t)(end - line));
+        if (!doc) continue;
+        gs_jv o = gs_json_root(doc);
+        const char *text = gs_json_str(gs_json_get(o, "text"), NULL);
+        if (text) remember(a, text, gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""), gs_json_bool(gs_json_get(o, "mine"), false));
+        gs_json_free(doc);
+    }
+    SDL_free(all);
+}
+
+// A message of the conversation, kept and shown: what the user sent (to `who`), or an agent's reply.
+static void add_message(app *a, const char *text, const char *who, bool mine) {
+    SDL_Time now;
+    SDL_DateTime d;
+    char at[8] = "";
+    if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(at, sizeof at, "%02d:%02d", d.hour, d.minute);
+    remember(a, text, who, at, mine);
+    a->fresh = true;
+    gs_jval *o = gs_jval_object();
+    gs_jval_set(o, "at", gs_jval_str(at));
+    gs_jval_set(o, "who", gs_jval_str(who));
+    gs_jval_set(o, "mine", gs_jval_bool(mine));
+    gs_jval_set(o, "text", gs_jval_str(text));
+    char *line = gs_jval_write(o, false), path[1100];
+    gs_jval_free(o);
+    settings_path(a, path, sizeof path, "history.jsonl");
+    SDL_IOStream *io = line ? SDL_IOFromFile(path, "ab") : NULL;
+    if (io) SDL_WriteIO(io, line, SDL_strlen(line)), SDL_WriteIO(io, "\n", 1), SDL_CloseIO(io);
+    SDL_free(line);
 }
 
 // The phone's key: made the first time, then kept where the system keeps secrets.
@@ -179,9 +232,14 @@ static void take_frames(app *a) {
             gs_json_free(doc);
             break;
         }
-        case 'M': set_text(&a->said, data), a->note[0] = 0, a->left = -1; if (a->always) a->mood = THINKING; break;
+        case 'M':
+            add_message(a, data, a->target[0] ? a->target : "read back", true);
+            SDL_free(a->said), a->said = NULL, a->note[0] = 0, a->left = -1;
+            if (a->always) a->mood = THINKING;
+            break;
         case 'R':
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0;
+            add_message(a, data, a->target[0] ? a->target : "read back", false);
             a->reply_base = gs_stream_position(a->play) + gs_stream_buffered(a->play);
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
@@ -496,6 +554,58 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
     gs_ui_modal_end(ui);
 }
 
+// One message as the log draws it: a bar down its left, amber for an agent and dim for the user; a line
+// with a small mark (the agent's character, or a round "you"), who and when; then the text, the user's
+// dimmed. Returns its height; draws nothing when `draw` is false.
+static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool live, bool draw) {
+    float head = small * 1.7f, pad = 10, w = at.w - pad - 6;
+    const char *text = e->text;
+    float h = head + gs_ui_text_height(ui, text, e->mine ? small + 1 : px, w) + 8;
+    if (!draw) return h;
+    gs_ui_fill(ui, (gs_rect){ at.x, at.y, 3, h - 4 }, e->mine ? BORDER : ACCENT);
+    if (!e->mine) gs_ui_fill(ui, (gs_rect){ at.x + 3, at.y, at.w - 3, h - 4 }, (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.06f });
+    float mark = head - 4, x = at.x + pad;
+    int which = avatar_index(a->avatar);
+    if (!e->mine && frames[which][REST]) gs_ui_texture(ui, (gs_rect){ x, at.y + 2, mark, mark }, frames[which][REST], NULL);
+    else {
+        gs_ui_circle(ui, x + mark / 2, at.y + 2 + mark / 2, mark / 2, RAISED);
+        gs_ui_text(ui, (gs_rect){ x, at.y + 2, mark, mark }, "you", small * 0.6f, DIM, 0);
+    }
+    char label[200];
+    SDL_snprintf(label, sizeof label, e->mine ? "you → %s" : "%s", e->who);
+    gs_rect line = { x + mark + 6, at.y, w - mark - 6, head };
+    gs_ui_text(ui, line, label, small, e->mine ? DIM : ACCENT, -1);
+    gs_ui_text(ui, line, live ? "now" : e->at, small * 0.9f, DIM, 1);
+    gs_ui_text_wrapped(ui, (gs_rect){ x, at.y + head, w, 100000 }, text, e->mine ? small + 1 : px, e->mine ? DIM : (live ? BRIGHT : TEXT));
+    return h;
+}
+
+// The conversation: a page a finger scrolls back through, the newest at the end; a new message scrolls
+// to its start, and what is being said now (always-on's words as they come) is shown last.
+static void conversation(gs_ui *ui, app *a, gs_rect r) {
+    static int last_count = -1;
+    gs_rect page = gs_ui_page_begin(ui, r, "chat");
+    float y = page.y, newest = page.y;
+    for (int i = 0; i < a->count; i++) {
+        const entry *e = &a->history[i];
+        bool speaking = !e->mine && i == a->count - 1 && a->mood == SPEAKING;
+        newest = y;
+        y += message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, e, speaking, true) + 8;
+    }
+    if (a->said && *a->said) {
+        entry now = { a->said, "", "", true };
+        SDL_strlcpy(now.who, a->target[0] ? a->target : "read back", sizeof now.who);
+        gs_ui_opacity(ui, 0.7f);
+        y += message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, &now, true, true) + 8;
+        gs_ui_opacity(ui, 1);
+    }
+    if (!a->count && !(a->said && *a->said)) gs_ui_text(ui, (gs_rect){ page.x, y, page.w, px * 2 }, "what you say and the replies show here", small, DIM, -1);
+    gs_ui_page_end(ui, y);
+    // (to the newest message's start when one came, and to the end on opening)
+    if (a->fresh || last_count < 0) gs_ui_page_scroll_to(ui, "chat", (newest - page.y), last_count >= 0);
+    a->fresh = false, last_count = a->count;
+}
+
 static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     gs_ui_fill(ui, area, BACKGROUND);
     gs_rect r = gs_inset(area, 14);
@@ -539,13 +649,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     gs_cut_top(&r, 12);
     gs_ui_fill(ui, (gs_rect){ r.x, r.y, r.w, 1 }, BORDER);
     gs_cut_top(&r, 10);
-    static const char *shown_reply;
-    if (a->reply != shown_reply) shown_reply = a->reply, gs_ui_page_scroll_to(ui, "chat", 0, false);
-    gs_rect page = gs_ui_page_begin(ui, r, "chat");
-    float y = page.y;
-    if (a->said) y += gs_ui_text_wrapped(ui, (gs_rect){ page.x, y, page.w, 100000 }, a->said, small, DIM) + 12;
-    if (a->reply) y += gs_ui_text_wrapped(ui, (gs_rect){ page.x, y, page.w, 100000 }, a->reply, px, a->mood == SPEAKING ? BRIGHT : TEXT) + 12;
-    gs_ui_page_end(ui, y);
+    conversation(ui, a, r);
     gs_ui_wake(ui, 16);
     // The agents to pick from, over everything.
     if (a->picking) picker(ui, a, area);
@@ -674,11 +778,15 @@ int main(int argc, char **argv) {
     bool keyed = load_key(&a);
     // `gear-phone --shot FILE setup|talk|pick`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
+    if (!shot) load_history(&a);
     if (shot) {
         SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
         SDL_strlcpy(a.target, "voice", sizeof a.target), SDL_strlcpy(a.voice, "alba", sizeof a.voice);
-        a.said = SDL_strdup("Can you check whether the build finished?");
-        a.reply = SDL_strdup("The build finished at 4:12 and all 31 tests passed. I published it and restarted gear on your PC.\n\nThe transcribe agent found that the production model drifts into English on every long Spanish and French recording it tested, and switching back to base Parakeet fixes it. Trading3's walk-forward test came back positive for large non-vault accounts but failed for vaults.\n\nYou also started prep for something with nine days left, with the progcomp agent planning around Python basics. The fellows agent built a study site, and gear's Android app got a scrollable agent picker with search.");
+        remember(&a, "What did the agents get done this morning?", "voice", "09:12", true);
+        remember(&a, "Three things. The transcribe agent fixed the Spanish drift, gear's phone app got a searchable agent picker, and the fellows site is up.", "voice", "09:12", false);
+        remember(&a, "Can you check whether the build finished?", "voice", "10:40", true);
+        a.reply = NULL;
+        remember(&a, "The build finished at 4:12 and all 31 tests passed. I published it and restarted gear on your PC.\n\nThe transcribe agent found that the production model drifts into English on every long Spanish and French recording it tested, and switching back to base Parakeet fixes it. Trading3's walk-forward test came back positive for large non-vault accounts but failed for vaults.\n\nYou also started prep for something with nine days left, with the progcomp agent planning around Python basics. The fellows agent built a study site, and gear's Android app got a scrollable agent picker with search.", "voice", "10:41", false);
         if (!SDL_strcmp(argv[3], "pick")) {
             static const char *names[][2] = { { "voice", "voice" }, { "personal_claude", "personal" }, { "gear_claude", "gear" }, { "gesso", "gesso" },
                                               { "hearsay_claude", "hearsay" }, { "gink_claude", "gink" }, { "aeroplan_claude", "aeroplan" } };
