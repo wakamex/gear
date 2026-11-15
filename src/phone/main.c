@@ -32,10 +32,12 @@ static SDL_FColor hex(Uint32 c) { return (SDL_FColor){ (float)(c >> 16 & 255) / 
 
 typedef enum { IDLE, LISTENING, THINKING, SPEAKING } mood;
 
-// The conversation, both sides, kept on the phone in history.jsonl so it outlasts a restart: what was
-// sent and what each agent replied, with when, newest last.
+// The conversations, both sides, kept on the phone in history.jsonl so they outlast a restart: what was
+// sent and what each agent replied, with when, newest last. A conversation is one agent's, named by
+// the title of its tab (`who`), as Telegram has one topic for each.
 typedef struct { char *text; char who[128]; char at[8]; bool mine; } entry;
-enum { HISTORY = 500 };
+enum { HISTORY = 2000, CONVERSATIONS = 64 };
+typedef struct { char who[128]; int n; } unread;  // the replies in a conversation not yet seen
 
 typedef struct {
     // Where gear runs, kept in settings.txt; the phone's key, kept with gs_secret.
@@ -47,8 +49,11 @@ typedef struct {
     gp_link *link;
     bool setup;           // the settings screen is showing
     char status[300];     // the connection's state, or why it failed
-    // The conversation.
-    char target[128], voice[16], note[300];
+    // The conversations: the one shown, the agent sent to (its name, and its tab's title naming its
+    // conversation), and the agent last asked for, once per conversation opened.
+    char open[128], target[128], tab[128], asked[128], voice[16], note[300];
+    unread unread[CONVERSATIONS];
+    int unread_count;
     char *said, *reply;   // what is being said now (always-on's live words), and the reply being spoken
     entry history[HISTORY];
     int count;
@@ -94,14 +99,15 @@ static void load_settings(app *a) {
         else if (!SDL_strcmp(line, "host_key")) SDL_strlcpy(a->host_key, v, sizeof a->host_key);
         else if (!SDL_strcmp(line, "always")) a->always = *v == '1';
         else if (!SDL_strcmp(line, "avatar")) SDL_strlcpy(a->avatar, v, sizeof a->avatar);
+        else if (!SDL_strcmp(line, "open")) SDL_strlcpy(a->open, v, sizeof a->open);
     }
     SDL_free(text);
 }
 
 static void save_settings(app *a) {
-    char path[1100], text[760];
+    char path[1100], text[900];
     settings_path(a, path, sizeof path, "settings.txt");
-    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar);
+    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\nopen=%s\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar, a->open);
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
@@ -129,10 +135,63 @@ static void load_history(app *a) {
     SDL_free(all);
 }
 
-// A message of the conversation, kept and shown: what the user sent (to `who`), or an agent's reply.
+// ---- Conversations ----
+
+// The conversation of the agent sent to now.
+static const char *here(app *a) { return a->tab[0] ? a->tab : a->target[0] ? a->target : "read back"; }
+
+// The count of a conversation's unseen replies, kept in unread.txt as "COUNT WHO" lines.
+static int *unread_of(app *a, const char *who, bool make) {
+    for (int i = 0; i < a->unread_count; i++)
+        if (!SDL_strcmp(a->unread[i].who, who)) return &a->unread[i].n;
+    if (!make || a->unread_count == CONVERSATIONS) return NULL;
+    unread *u = &a->unread[a->unread_count++];
+    SDL_strlcpy(u->who, who, sizeof u->who), u->n = 0;
+    return &u->n;
+}
+
+static void save_unread(app *a) {
+    char path[1100], text[CONVERSATIONS * 140] = "";
+    settings_path(a, path, sizeof path, "unread.txt");
+    for (int i = 0; i < a->unread_count; i++)
+        if (a->unread[i].n) SDL_snprintf(text + SDL_strlen(text), sizeof text - SDL_strlen(text), "%d %s\n", a->unread[i].n, a->unread[i].who);
+    SDL_SaveFile(path, text, SDL_strlen(text));
+}
+
+static void load_unread(app *a) {
+    char path[1100], *save = NULL;
+    settings_path(a, path, sizeof path, "unread.txt");
+    char *text = SDL_LoadFile(path, NULL);
+    for (char *line = text ? SDL_strtok_r(text, "\n", &save) : NULL; line; line = SDL_strtok_r(NULL, "\n", &save)) {
+        char *space = SDL_strchr(line, ' ');
+        int *n = space ? unread_of(a, space + 1, true) : NULL;
+        if (n) *n = SDL_atoi(line);
+    }
+    SDL_free(text);
+}
+
+// Shows the conversation `who`, its replies seen and its notification taken back, and sends to its
+// agent from now on (asked of the computer when connected, and again on connecting).
+static void open_conversation(app *a, const char *who) {
+    SDL_strlcpy(a->open, who, sizeof a->open);
+    int *n = unread_of(a, who, false);
+    if (n && *n) *n = 0, save_unread(a);
+    gs_notify_close(who);
+    save_settings(a);
+    a->asked[0] = 0;
+    if (a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN && SDL_strcmp(who, here(a)) && SDL_strcmp(who, "read back"))
+        gp_link_send(a->link, 'T', who, (uint32_t)SDL_strlen(who)), SDL_strlcpy(a->asked, who, sizeof a->asked);
+}
+
+// A message of a conversation, kept and shown: what the user sent (to `who`), or an agent's reply,
+// counted unseen when its conversation is not the one open.
 static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine) {
     remember(a, text, who, at, mine);
-    a->fresh = true;
+    if (!SDL_strcmp(who, a->open)) a->fresh = true;
+    else if (!mine) {
+        int *n = unread_of(a, who, true);
+        if (n) ++*n, save_unread(a);
+    }
     gs_jval *o = gs_jval_object();
     gs_jval_set(o, "at", gs_jval_str(at));
     gs_jval_set(o, "who", gs_jval_str(who));
@@ -160,13 +219,13 @@ static void add_message(app *a, const char *text, const char *who, bool mine) {
 // what an agent posted, with a notification; a tap brings the app back.
 static SDL_AtomicInt behind;
 static SDL_Mutex *who_lock;
-static char who_now[128];  // the agent sent to now, for a reply's notification
-static int notices;
+static char who_now[128];  // the conversation sent to now, for a reply's notification
+static char tapped[128];   // the conversation of a notification tapped, for the app to open
 
 static void heard(char type, const char *data, uint32_t len, void *user) {
     (void)user;
     if (!SDL_GetAtomicInt(&behind) || (type != 'R' && type != 'Z')) return;
-    char title[160], body[300], tag[16];
+    char title[160], body[300];
     if (type == 'R') {
         SDL_LockMutex(who_lock);
         SDL_strlcpy(title, who_now[0] ? who_now : "gear", sizeof title);
@@ -179,11 +238,14 @@ static void heard(char type, const char *data, uint32_t len, void *user) {
         SDL_strlcpy(body, gs_json_str(gs_json_get(gs_json_root(doc), "text"), ""), sizeof body);
         gs_json_free(doc);
     }
-    SDL_snprintf(tag, sizeof tag, "%d", ++notices);
-    gs_notify_show(tag, title, body);
+    gs_notify_show(title, title, body);  // (one for each conversation, its newest message)
 }
 
-static void notification_clicked(const char *tag) { (void)tag; }  // (the tap itself brings the app back)
+static void notification_clicked(const char *tag) {
+    SDL_LockMutex(who_lock);
+    SDL_strlcpy(tapped, tag, sizeof tapped);
+    SDL_UnlockMutex(who_lock);
+}
 
 // The phone's key: made the first time, then kept where the system keeps secrets.
 static bool load_key(app *a) {
@@ -252,12 +314,17 @@ static void take_frames(app *a) {
             gs_json *doc = gs_json_parse(data, len);
             if (doc) {
                 SDL_strlcpy(a->target, gs_json_str(gs_json_get(gs_json_root(doc), "target"), ""), sizeof a->target);
+                SDL_strlcpy(a->tab, gs_json_str(gs_json_get(gs_json_root(doc), "tab"), ""), sizeof a->tab);
                 SDL_strlcpy(a->voice, gs_json_str(gs_json_get(gs_json_root(doc), "voice"), "alba"), sizeof a->voice);
             }
             gs_json_free(doc);
             if (a->always && !a->always_sent) gp_link_send(a->link, 'O', "1", 1), a->always_sent = true;
+            // The conversation open sends to its agent, asked for once; with none open, the agent's.
+            if (!a->open[0]) open_conversation(a, here(a));
+            else if (SDL_strcmp(a->open, here(a)) && SDL_strcmp(a->open, "read back") && SDL_strcmp(a->asked, a->open))
+                gp_link_send(a->link, 'T', a->open, (uint32_t)SDL_strlen(a->open)), SDL_strlcpy(a->asked, a->open, sizeof a->asked);
             SDL_LockMutex(who_lock);
-            SDL_strlcpy(who_now, a->target, sizeof who_now);
+            SDL_strlcpy(who_now, here(a), sizeof who_now);
             SDL_UnlockMutex(who_lock);
             break;
         }
@@ -285,13 +352,13 @@ static void take_frames(app *a) {
             break;
         }
         case 'M':
-            add_message(a, data, a->target[0] ? a->target : "read back", true);
+            add_message(a, data, here(a), true);
             SDL_free(a->said), a->said = NULL, a->note[0] = 0, a->left = -1;
             if (a->always) a->mood = THINKING;
             break;
         case 'R':
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0;
-            add_message(a, data, a->target[0] ? a->target : "read back", false);
+            add_message(a, data, here(a), false);
             a->reply_base = gs_stream_position(a->play) + gs_stream_buffered(a->play);
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
@@ -547,61 +614,100 @@ static const char *hint(app *a, char *buf, size_t size) {
 static float px = 18, small = 14;
 static gs_rect character_area;  // where the character was drawn, which holding down on starts listening
 
-// How well agent i matches what is typed: 0 not at all, higher better; with nothing typed, the agent
-// sent to now first.
-static int pick_rank(app *a, int i, const char *typed) {
-    const char *name = a->agents[i][0], *tab = a->agents[i][1];
-    if (!*typed) return !SDL_strcmp(name, a->target) ? 2 : 1;
-    size_t n = SDL_strlen(typed);
-    if (!SDL_strncasecmp(tab, typed, n) || !SDL_strncasecmp(name, typed, n)) return 3;
-    return SDL_strcasestr(tab, typed) || SDL_strcasestr(name, typed) ? 2 : 0;
+// The conversations to open: those with messages, the newest first, then the agents without one yet.
+typedef struct { const char *who; int last; int agent; } topic;  // last: its newest message, or -1
+
+static int agent_of(app *a, const char *who) {
+    for (int i = 0; i < a->agent_count; i++)
+        if (!SDL_strcmp(a->agents[i][1][0] ? a->agents[i][1] : a->agents[i][0], who)) return i;
+    return -1;
 }
 
-static const char *agent_title(app *a, int i) { return a->agents[i][1][0] ? a->agents[i][1] : a->agents[i][0]; }
+static int topics(app *a, topic *out, int max) {
+    int n = 0;
+    for (int i = a->count - 1; i >= 0 && n < max; i--) {
+        int k = 0;
+        while (k < n && SDL_strcmp(out[k].who, a->history[i].who)) k++;
+        if (k == n) out[n++] = (topic){ a->history[i].who, i, agent_of(a, a->history[i].who) };
+    }
+    for (int i = 0; i < a->agent_count && n < max; i++) {
+        const char *who = a->agents[i][1][0] ? a->agents[i][1] : a->agents[i][0];
+        int k = 0;
+        while (k < n && SDL_strcmp(out[k].who, who)) k++;
+        if (k == n) out[n++] = (topic){ who, -1, i };
+    }
+    return n;
+}
 
-// The agents, narrowed by what is typed in the field above them and scrolled with a finger; a tap on
-// one sends to it from now on, Enter takes the first, and back or "close" leaves it.
+// How well a conversation matches what is typed: 0 not at all, 2 at the start of its name or its
+// agent's, 1 inside.
+static int topic_rank(app *a, const topic *c, const char *typed) {
+    const char *name = c->agent >= 0 ? a->agents[c->agent][0] : "";
+    size_t n = SDL_strlen(typed);
+    if (!n || !SDL_strncasecmp(c->who, typed, n) || !SDL_strncasecmp(name, typed, n)) return 2;
+    return SDL_strcasestr(c->who, typed) || SDL_strcasestr(name, typed) ? 1 : 0;
+}
+
+// The conversations, narrowed by what is typed in the field above them and scrolled with a finger: each
+// with its unseen replies and its newest message. A tap opens one, Enter the first, and back or "close"
+// leaves the list.
 static void picker(gs_ui *ui, app *a, gs_rect area) {
     static char typed[64];
     static int selected;
-    int order[MAX_AGENTS], rank[MAX_AGENTS], n = 0;
-    for (int i = 0; i < a->agent_count; i++) {
-        int r = pick_rank(a, i, typed);
-        if (!r) continue;
-        int at = n++;
-        for (; at > 0 && (rank[at - 1] < r || (rank[at - 1] == r && SDL_strcasecmp(agent_title(a, order[at - 1]), agent_title(a, i)) > 0)); at--)
-            order[at] = order[at - 1], rank[at] = rank[at - 1];
-        order[at] = i, rank[at] = r;
-    }
-    gs_rect m = gs_ui_modal_begin(ui, area.w - 24, area.h * 0.8f);
+    enum { MOST = HISTORY < 256 ? HISTORY : 256 };
+    static topic all[MOST], shown[MOST];
+    int count = topics(a, all, MOST), n = 0;
+    for (int best = 2; best >= 1; best--)
+        for (int i = 0; i < count; i++)
+            if (topic_rank(a, &all[i], typed) == best) shown[n++] = all[i];
+    gs_rect m = gs_ui_modal_begin(ui, area.w - 24, area.h * 0.85f);
     gs_rect in = gs_inset(m, 12);
     gs_rect head = gs_cut_top(&in, px * 2);
     gs_rect close = gs_cut_right(&head, gs_ui_text_width(ui, "close", px) + 16);
     gs_ui_text(ui, close, "close", px, gs_ui_hovered(ui, close) ? ACCENT : TEXT, 1);
-    gs_ui_text(ui, head, "Send to", px, DIM, -1);
-    gs_ui_field(ui, gs_cut_top(&in, px * 2.4f), "pick", typed, sizeof typed, "search tabs and agents");
+    gs_ui_text(ui, head, "Conversations", px, DIM, -1);
+    gs_ui_field(ui, gs_cut_top(&in, px * 2.4f), "pick", typed, sizeof typed, "search conversations and agents");
     gs_cut_top(&in, 8);
     bool done = gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0);
     const char *chosen = NULL;
-    if (!a->agent_count) gs_ui_text(ui, gs_cut_top(&in, px * 2), "looking for agents…", px, DIM, -1);
-    else if (!n) gs_ui_text(ui, gs_cut_top(&in, px * 2), "no agent matches", px, DIM, -1);
+    if (!n) gs_ui_text(ui, gs_cut_top(&in, px * 2), count ? "nothing matches" : "looking for agents…", px, DIM, -1);
     else {
-        float row_h = px * 2.4f;
+        float row_h = px * 1.4f + small * 1.4f + 16;
         selected = SDL_clamp(selected, 0, n - 1);
-        gs_ui_rows rows = gs_ui_list(ui, in, "agents", n, row_h, &selected);
+        gs_ui_rows rows = gs_ui_list(ui, in, "conversations", n, row_h, &selected);
         for (int k = rows.first; k < rows.end; k++) {
-            int i = order[k];
-            gs_rect row = { in.x, rows.y + k * row_h, in.w, row_h };
-            if (k == selected && rows.activated) chosen = a->agents[i][0];
-            bool now = !SDL_strcmp(a->agents[i][0], a->target);
-            gs_rect text = gs_inset(row, 8);
-            gs_ui_text(ui, text, agent_title(a, i), px, now ? ACCENT : TEXT, -1);
-            if (SDL_strcmp(agent_title(a, i), a->agents[i][0])) gs_ui_text(ui, text, a->agents[i][0], small, DIM, 1);
+            const topic *c = &shown[k];
+            gs_rect row = gs_inset((gs_rect){ in.x, rows.y + k * row_h, in.w, row_h }, 8);
+            if (k == selected && rows.activated) chosen = c->who;
+            int *unseen = unread_of(a, c->who, false);
+            if (unseen && *unseen) {
+                char count_text[16];
+                SDL_snprintf(count_text, sizeof count_text, "%d", *unseen);
+                float d = small * 1.5f, w = SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10);
+                gs_rect badge = { row.x + row.w - w, row.y + (row.h - d) / 2, w, d };
+                gs_ui_round(ui, badge, d / 2, ACCENT);
+                gs_ui_text(ui, badge, count_text, small, BACKGROUND, 0);
+                row.w -= w + 8;
+            }
+            gs_rect top = gs_cut_top(&row, px * 1.4f);
+            if (c->agent >= 0 && SDL_strcmp(c->who, a->agents[c->agent][0])) {
+                gs_rect name = gs_cut_right(&top, gs_ui_text_width(ui, a->agents[c->agent][0], small) + 8);
+                gs_ui_text(ui, name, a->agents[c->agent][0], small, DIM, 1);
+            }
+            gs_ui_text(ui, top, c->who, px, !SDL_strcmp(c->who, a->open) ? ACCENT : unseen && *unseen ? BRIGHT : TEXT, -1);
+            char preview[200];
+            if (c->last >= 0) {
+                const entry *e = &a->history[c->last];
+                SDL_snprintf(preview, sizeof preview, "%s%s%s", e->at, e->mine ? "  you: " : "  ", e->text);
+                for (char *q = preview; *q; q++)
+                    if (*q == '\n') *q = ' ';
+            } else SDL_strlcpy(preview, c->agent >= 0 ? "no messages yet" : "", sizeof preview);
+            gs_ui_text(ui, gs_cut_top(&row, small * 1.4f), preview, small, DIM, -1);
         }
         gs_ui_list_end(ui);
-        if (gs_ui_key(ui, SDLK_RETURN, 0)) chosen = a->agents[order[0]][0];
+        if (gs_ui_key(ui, SDLK_RETURN, 0)) chosen = shown[0].who;
     }
-    if (chosen) gp_link_send(a->link, 'T', chosen, (uint32_t)SDL_strlen(chosen)), done = true;
+    if (chosen) open_conversation(a, chosen), done = true;
     if (done) a->picking = false, typed[0] = 0, selected = 0;
     gs_ui_modal_end(ui);
 }
@@ -624,7 +730,7 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
         gs_ui_text(ui, (gs_rect){ x, at.y + 2, mark, mark }, "you", small * 0.6f, DIM, 0);
     }
     char label[200];
-    SDL_snprintf(label, sizeof label, e->mine ? "you → %s" : "%s", e->who);
+    SDL_snprintf(label, sizeof label, "%s", e->mine ? "you" : e->who);
     gs_rect line = { x + mark + 6, at.y, w - mark - 6, head };
     gs_ui_text(ui, line, label, small, e->mine ? DIM : ACCENT, -1);
     gs_ui_text(ui, line, live ? "now" : e->at, small * 0.9f, DIM, 1);
@@ -636,26 +742,32 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
 // to its start, and what is being said now (always-on's words as they come) is shown last.
 static void conversation(gs_ui *ui, app *a, gs_rect r) {
     static int last_count = -1;
+    static char last_open[128];
+    if (SDL_strcmp(last_open, a->open)) SDL_strlcpy(last_open, a->open, sizeof last_open), last_count = -1;
+    int last = -1, shown = 0;
+    for (int i = 0; i < a->count; i++)
+        if (!SDL_strcmp(a->history[i].who, a->open)) last = i, shown++;
     gs_rect page = gs_ui_page_begin(ui, r, "chat");
     float y = page.y, newest = page.y;
     for (int i = 0; i < a->count; i++) {
         const entry *e = &a->history[i];
-        bool speaking = !e->mine && i == a->count - 1 && a->mood == SPEAKING;
+        if (SDL_strcmp(e->who, a->open)) continue;
+        bool speaking = !e->mine && i == last && a->mood == SPEAKING;
         newest = y;
         y += message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, e, speaking, true) + 8;
     }
     if (a->said && *a->said) {
         entry now = { a->said, "", "", true };
-        SDL_strlcpy(now.who, a->target[0] ? a->target : "read back", sizeof now.who);
+        SDL_strlcpy(now.who, here(a), sizeof now.who);
         gs_ui_opacity(ui, 0.7f);
         y += message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, &now, true, true) + 8;
         gs_ui_opacity(ui, 1);
     }
-    if (!a->count && !(a->said && *a->said)) gs_ui_text(ui, (gs_rect){ page.x, y, page.w, px * 2 }, "what you say and the replies show here", small, DIM, -1);
+    if (!shown && !(a->said && *a->said)) gs_ui_text(ui, (gs_rect){ page.x, y, page.w, px * 2 }, "what you say and the replies show here", small, DIM, -1);
     gs_ui_page_end(ui, y);
     // (to the newest message's start when one came, and to the end on opening)
     if (a->fresh || last_count < 0) gs_ui_page_scroll_to(ui, "chat", (newest - page.y), last_count >= 0);
-    a->fresh = false, last_count = a->count;
+    a->fresh = false, last_count = shown;
 }
 
 static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
@@ -674,10 +786,23 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t) {
     gs_ui_text(ui, voice, a->voice[0] ? a->voice : "alba", small, gs_ui_hovered(ui, voice) ? ACCENT : DIM, 1);
     if (gs_ui_clicked(ui, voice) && st == GP_OPEN) gp_link_send(a->link, 'V', !SDL_strcmp(a->voice, "mary") ? "alba" : "mary", 4);
     gs_rect who = { top.x + 18, top.y, top.w - 18, top.h };
-    char label[160];
-    SDL_snprintf(label, sizeof label, "→ %s", a->target[0] ? a->target : "nobody: read back");
-    gs_ui_text(ui, who, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
-    if (gs_ui_clicked(ui, who) && st == GP_OPEN) a->picking = true, a->agent_count = 0, gp_link_send(a->link, 'L', NULL, 0);
+    // (with the count of replies unseen in the other conversations)
+    int elsewhere = 0;
+    for (int i = 0; i < a->unread_count; i++) elsewhere += SDL_strcmp(a->unread[i].who, a->open) ? a->unread[i].n : 0;
+    char label[200], count_text[16] = "";
+    if (elsewhere) SDL_snprintf(count_text, sizeof count_text, "%d", elsewhere);
+    SDL_snprintf(label, sizeof label, "→ %s", a->open[0] ? a->open : "nobody: read back");
+    float label_w = gs_ui_text(ui, who, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
+    if (elsewhere) {
+        float d = small * 1.5f, w = SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10);
+        gs_rect badge = { who.x + SDL_min(label_w, who.w) + 10, who.y + (who.h - d) / 2, w, d };
+        gs_ui_round(ui, badge, d / 2, ACCENT);
+        gs_ui_text(ui, badge, count_text, small, BACKGROUND, 0);
+    }
+    if (gs_ui_clicked(ui, who)) {
+        a->picking = true;
+        if (st == GP_OPEN) gp_link_send(a->link, 'L', NULL, 0);
+    }
     // The character, a third of the screen at most, with what it is doing and always-on's switch under it.
     gs_cut_top(&r, 8);
     float block = SDL_min(r.w * 0.62f, r.h * 0.3f), radius = block * 0.4f;
@@ -830,10 +955,16 @@ int main(int argc, char **argv) {
     bool keyed = load_key(&a);
     // `gear-phone --shot FILE setup|talk|pick`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
-    if (!shot) load_history(&a);
+    if (!shot) load_history(&a), load_unread(&a);
     if (shot) {
         SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
         SDL_strlcpy(a.target, "voice", sizeof a.target), SDL_strlcpy(a.voice, "alba", sizeof a.voice);
+        SDL_strlcpy(a.tab, "voice", sizeof a.tab), SDL_strlcpy(a.open, "voice", sizeof a.open);
+        remember(&a, "Did the gesso pin land?", "gesso", "08:30", true);
+        remember(&a, "Yes, d895f7f is pushed with link finding and styled spans.", "gesso", "08:31", false);
+        remember(&a, "The Kijiji search found two 3090s under 900 dollars near you.", "personal", "11:02", false);
+        remember(&a, "One of them is listed as tested with a receipt.", "personal", "11:03", false);
+        *unread_of(&a, "personal", true) = 2;
         remember(&a, "What did the agents get done this morning?", "voice", "09:12", true);
         remember(&a, "Three things. The transcribe agent fixed the Spanish drift, gear's phone app got a searchable agent picker, and the fellows site is up.", "voice", "09:12", false);
         remember(&a, "Can you check whether the build finished?", "voice", "10:40", true);
@@ -920,6 +1051,12 @@ int main(int argc, char **argv) {
             } while (SDL_PollEvent(&e));
         }
         take_frames(&a);
+        // A notification tapped opens its conversation.
+        char opened[128];
+        SDL_LockMutex(who_lock);
+        SDL_strlcpy(opened, tapped, sizeof opened), tapped[0] = 0;
+        SDL_UnlockMutex(who_lock);
+        if (*opened) open_conversation(&a, opened);
         if (a.holding) send_audio(&a);
         else always_listen(&a);
         // Android's back leaves the app from the character, and goes back from settings and the agents.

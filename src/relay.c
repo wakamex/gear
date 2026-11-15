@@ -128,7 +128,7 @@ char *gear_relay_take(gear_relay *r, bool *failed, char *error, size_t error_siz
 
 bool gear_relay_waiting(gear_relay *r) {
     SDL_LockMutex(r->lock);
-    bool w = r->waiting > 0;
+    bool w = r->waiting > 0 || r->inbox;
     SDL_UnlockMutex(r->lock);
     return w;
 }

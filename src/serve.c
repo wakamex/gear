@@ -232,9 +232,25 @@ static void words(server *s, gear_pipeline *p) {
     gs_jval_free(o);
 }
 
+// The title of the tab the agent `name` runs in, which names its conversation on the phone (and its
+// Panetone route); the name itself when there is no such tab.
+static void tab_of(const char *name, char *out, size_t size) {
+    gear_agent all[256];
+    char error[256];
+    int n = gear_agents_list(all, 256, error, sizeof error);
+    SDL_strlcpy(out, name, size);
+    if (n <= 0 || !*name) return;
+    gear_agent_tabs(all, n);
+    for (int i = 0; i < n; i++)
+        if (!SDL_strcmp(all[i].name, name) && all[i].tab[0]) SDL_strlcpy(out, all[i].tab, size);
+}
+
+static char target_tab[128];  // the conversation of the agent sent to now
+
 static void hello(server *s, const char *target, const char *voice) {
     gs_jval *o = gs_jval_object();
     gs_jval_set(o, "target", gs_jval_str(target));
+    gs_jval_set(o, "tab", gs_jval_str(target_tab));
     gs_jval_set(o, "voice", gs_jval_str(voice));
     char *json = gs_jval_write(o, false);
     send_text(s, 'H', json);
@@ -259,6 +275,21 @@ static void deliver_text(server *s, const char *text) {
 }
 
 // ---- What waits for the phone ----
+
+// A message to show and not speak ('Z'), from `who` at `at` (HH:MM, or now when empty).
+static void send_shown(server *s, const char *who, const char *at, const char *text) {
+    char now[8] = "";
+    SDL_Time t;
+    SDL_DateTime d;
+    if (!*at && SDL_GetCurrentTime(&t) && SDL_TimeToDateTime(t, &d, true)) SDL_snprintf(now, sizeof now, "%02d:%02d", d.hour, d.minute), at = now;
+    gs_jval *o = gs_jval_object();
+    gs_jval_set(o, "who", gs_jval_str(who));
+    gs_jval_set(o, "at", gs_jval_str(at));
+    gs_jval_set(o, "text", gs_jval_str(text));
+    char *json = gs_jval_write(o, false);
+    send_text(s, 'Z', json);
+    SDL_free(json), gs_jval_free(o);
+}
 
 static waiting queue[WAITING];
 static int queued;
@@ -504,6 +535,12 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
     SDL_free(pref);
     gear_transcript *transcript = gear_transcript_open(path, 1);
     out_to = (delivery){ &relay, target, transcript };
+    // Agents sent to before the one now, still owing replies.
+    typedef struct { gear_relay *relay; char name[128], tab[128]; } owed;
+    enum { EARLIER = 16 };
+    owed earlier[EARLIER];
+    int earlier_count = 0;
+    tab_of(target, target_tab, sizeof target_tab);
     SDL_Thread *reader = hub ? NULL : SDL_CreateThread(read_frames, "gear-serve-in", &s);
     SDL_Thread *speaker = SDL_CreateThread(synthesize, "gear-serve-say", &s);
     if (!hub) hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba"), hand_over(&s);
@@ -640,9 +677,20 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'T': {
                 gear_agent a;
                 if (!gear_agent_find(f->data, &a, error, sizeof error)) { send_text(&s, 'F', error); break; }
-                gear_relay_free(relay);  // (a reply the agent before still owed is given up)
-                relay = gear_relay_new(a.name);
+                // The agent before keeps its relay while it owes replies, which come to its own
+                // conversation; one gone back to takes its relay up again.
+                int was = -1;
+                for (int i = 0; i < earlier_count; i++)
+                    if (!SDL_strcmp(earlier[i].name, a.name)) was = i;
+                gear_relay *again = was >= 0 ? earlier[was].relay : NULL;
+                if (was >= 0) earlier[was] = earlier[--earlier_count];
+                if (relay && gear_relay_waiting(relay) && earlier_count < EARLIER)
+                    earlier[earlier_count++] = (owed){ relay, "", "" }, SDL_strlcpy(earlier[earlier_count - 1].name, target, 128),
+                    SDL_strlcpy(earlier[earlier_count - 1].tab, target_tab, 128);
+                else gear_relay_free(relay);
+                relay = again ? again : gear_relay_new(a.name);
                 SDL_strlcpy(target, a.name, sizeof target);
+                tab_of(a.name, target_tab, sizeof target_tab);
                 gear_target_remember(models, a.name, "");
                 hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
                 break;
@@ -680,15 +728,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             if (!p) break;
             if (!already_given(p->text)) {
                 if (!frames_out) keep_for_later(p->text, p->who);
-                else {
-                    gs_jval *o = gs_jval_object();
-                    gs_jval_set(o, "who", gs_jval_str(p->who));
-                    gs_jval_set(o, "at", gs_jval_str(p->at));
-                    gs_jval_set(o, "text", gs_jval_str(p->text));
-                    char *json = gs_jval_write(o, false);
-                    send_text(&s, 'Z', json);
-                    SDL_free(json), gs_jval_free(o);
-                }
+                else send_shown(&s, p->who, p->at, p->text);
             }
             char seq[32];
             SDL_snprintf(seq, sizeof seq, "%lld", p->seq);
@@ -697,11 +737,21 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
         }
         bool failed;
         char *reply;
+        for (int i = 0; i < earlier_count; i++) {
+            while ((reply = gear_relay_take(earlier[i].relay, &failed, error, sizeof error)) || failed) {
+                if (failed) { send_text(&s, 'F', error); continue; }
+                remember_reply(reply);
+                if (!frames_out) keep_for_later(reply, earlier[i].tab);
+                else send_shown(&s, earlier[i].tab, "", reply);
+                SDL_free(reply);
+            }
+            if (!gear_relay_waiting(earlier[i].relay)) gear_relay_free(earlier[i].relay), earlier[i--] = earlier[--earlier_count];
+        }
         while (relay && ((reply = gear_relay_take(relay, &failed, error, sizeof error)) || failed)) {
             if (failed) { send_text(&s, 'F', error); break; }
             // (kept for the next phone when none is connected; sent as text alone to one in the background)
             remember_reply(reply);
-            if (!frames_out) keep_for_later(reply, target);
+            if (!frames_out) keep_for_later(reply, target_tab);
             else {
                 send_text(&s, 'R', reply);
                 if (!s.background) speak(&s, reply);
@@ -721,6 +771,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
     if (listener >= 0) close(listener);
 #endif
     gear_relay_free(relay);
+    for (int i = 0; i < earlier_count; i++) gear_relay_free(earlier[i].relay);
     gear_transcript_close(transcript);
     gear_pipeline_free(pipe);
     gear_vad_free(vad);
