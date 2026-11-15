@@ -797,9 +797,11 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
     SDL_snprintf(label, sizeof label, "%s", e->mine ? "you" : e->who);
     gs_rect line = { x + mark + 6, at.y, w - mark - 6, head };
     gs_ui_text(ui, line, label, small, e->mine ? DIM : ACCENT, -1);
-    float time_w = gs_ui_text(ui, line, live ? "now" : e->at, small * 0.9f, DIM, 1);
+    // (what is being said now has no time yet, nor a speaker)
+    bool said_now = !e->at[0];
+    float time_w = gs_ui_text(ui, line, said_now ? "now" : e->at, small * 0.9f, DIM, 1);
     // To the left of the time, a speaker: three bars to speak the message, a square to stop it.
-    if (!live) {
+    if (!said_now) {
         float s = small * 1.05f, ix = line.x + line.w - time_w - 10 - s, iy = at.y + (head - s) / 2;
         gs_rect hit = { ix - s, at.y - 4, s * 3, head + 8 };
         bool now = a->saying == e->text;
@@ -834,7 +836,7 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
     for (int i = 0; i < a->count; i++) {
         const entry *e = &a->history[i];
         if (SDL_strcmp(e->who, key)) continue;
-        bool speaking = !preview && !e->mine && i == last && a->mood == SPEAKING;
+        bool speaking = !preview && a->saying == e->text && a->mood == SPEAKING;
         newest = y;
         y += message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, e, speaking, true) + 8;
     }
@@ -855,6 +857,7 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
 }
 
 // The talk screen of the conversation `key`: the open one, or with `preview` set, the one beside it.
+static gs_rect compose_area;  // the box to type in, a press on which stops what is being spoken
 static gs_rect chat_area;  // where the open conversation's page and the box to type in were, which a swipe does not start on
 
 // The typed message, to the agent of the open conversation: shown when the computer sends it back ('M').
@@ -909,6 +912,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         float send_w = gs_ui_text_width(ui, "send", px) + 24;
         float h = gs_ui_textarea_height(ui, a->typed, r.w - send_w - 8, 5) + 12;
         gs_rect box = gs_cut_bottom(&r, h);
+        if (!preview) compose_area = box;
         gs_rect send = gs_cut_right(&box, send_w);
         gs_cut_right(&box, 8);
         if (preview) {
@@ -1176,7 +1180,7 @@ static void window_points(SDL_Window *win, gs_ui *ui, float x, float y, float *p
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|pick|table|swipe|type`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|pick|table|swipe|type|speaking`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -1272,6 +1276,9 @@ int main(int argc, char **argv) {
     bool down = false, went_down = false, went_up = false, moved = false;
     static swipe sw;
     gs_rect last_area = { 0, 0, 400, 760 };
+    if (shot && !SDL_strcmp(argv[3], "speaking"))  // (the newest reply of the open conversation being spoken)
+        for (int i = a.count - 1; i >= 0; i--)
+            if (!a.history[i].mine && !SDL_strcmp(a.history[i].who, a.open)) { a.saying = a.history[i].text, a.mood = SPEAKING; break; }
     if (shot && !SDL_strcmp(argv[3], "type")) SDL_strlcpy(a.typed, "Can you check whether the phone build passed, and if it did, install it on the PC too?", sizeof a.typed), gs_ui_focus(ui, "compose");
     if (shot && !SDL_strcmp(argv[3], "swipe")) sw.axis = 1, sw.size = 400, sw.off = -170;  // (40% of the way to the next)
     for (bool running = true; running;) {
@@ -1334,6 +1341,9 @@ int main(int argc, char **argv) {
         swipe_step(&sw, &a);
         // (by where the list was last frame: the tap that opened it does not close it)
         bool was_picking = a.picking;
+        // A press in the box to type in stops what is being spoken, as typing over it would.
+        if (went_down && !a.setup && !a.picking && gs_rect_contains(compose_area, press_x, press_y) && (a.saying || a.mood == SPEAKING) && a.link)
+            gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
         tapped_outside = a.picking && went_up && !moved && !gs_rect_contains(picker_area, press_x, press_y);
         if (a.setup) setup_screen(ui, &a, area);
         else {
