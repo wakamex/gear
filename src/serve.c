@@ -17,7 +17,7 @@
 #include "models.h"
 #include "pipeline.h"
 #include "pocket.h"
-#include "relay.h"
+#include "panetone.h"
 #include "pronounce.h"
 #include "speakable.h"
 #include "transcript.h"
@@ -264,21 +264,15 @@ static void words(server *s, gear_pipeline *p) {
 
 // The title of the tab the agent `name` runs in, which names its conversation on the phone (and its
 // Panetone route); the name itself when there is no such tab.
-static bool target_posts;  // the agent sent to now replies through Panetone (an endchat profile's)
-
 static void tab_of(const char *name, char *out, size_t size) {
     gear_agent all[256];
     char error[256];
     int n = gear_agents_list(all, 256, error, sizeof error);
     SDL_strlcpy(out, name, size);
-    target_posts = false;
     if (n <= 0 || !*name) return;
     gear_agent_tabs(all, n);
     for (int i = 0; i < n; i++)
-        if (!SDL_strcmp(all[i].name, name)) {
-            if (all[i].tab[0]) SDL_strlcpy(out, all[i].tab, size);
-            target_posts = !gear_agent_replies(&all[i]);
-        }
+        if (!SDL_strcmp(all[i].name, name) && all[i].tab[0]) SDL_strlcpy(out, all[i].tab, size);
 }
 
 static char target_tab[128];  // the conversation of the agent sent to now
@@ -294,23 +288,25 @@ static void hello(server *s, const char *target, const char *voice) {
     gs_jval_free(o);
 }
 
-// A message to the agent: shown to the phone, kept in the transcript, and sent, or read back when no
-// agent is chosen.
-typedef struct { gear_relay **relay; const char *target; gear_transcript *transcript; } delivery;
+// A message to the agent: shown to the phone, kept in the transcript, and handed to Panetone for the
+// route of the agent's tab, as the user ('panetone say'), or read back when no agent is chosen. The
+// agent's answers come through the feed (watch_feed).
+typedef struct { const char *target; gear_transcript *transcript; } delivery;
 static delivery out_to;
 
 static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, bool shown);
 static const char *conversation_of(const char *tab) { return *tab ? tab : "read back"; }
 
 static void deliver_text(server *s, const char *text) {
-    char status[200];
+    char status[200], error[512];
     send_text(s, 'M', text);
     log_message(s, conversation_of(target_tab), "", true, false, text, false);
     gear_transcript_add(out_to.transcript, text, out_to.target);
-    if (*out_to.relay) {
-        gear_relay_send(*out_to.relay, text);
-        SDL_snprintf(status, sizeof status, "waiting for %s", out_to.target);
-        send_text(s, 'S', status);
+    if (*out_to.target) {
+        if (gear_panetone_say(target_tab, text, error, sizeof error)) {
+            SDL_snprintf(status, sizeof status, "waiting for %s", out_to.target);
+            send_text(s, 'S', status);
+        } else send_text(s, 'F', error);
     } else send_text(s, 'R', text), log_message(s, "read back", "", false, false, text, false), speak(s, text);
 }
 
@@ -416,27 +412,12 @@ static void replay(server *s, long long seen) {
 // Everything Panetone posts to Mihai's own channels (`panetone watch`, one JSON line a post), read on a
 // thread of its own and shown on the phone as an agent's message ('Z'), as Telegram shows it. The last
 // position handled is kept in hub-feed-seq, so a restart repeats and skips nothing.
-typedef struct post { struct post *next; char *text; char who[128]; char at[8]; char kind[16]; long long seq; Uint64 came; } post;
+// kind: Panetone's ("agent", "question", "request", "notice", "owner"); via: for an owner's message,
+// the client it came through; final: whether it ends the agent's turn, or -1 when the feed does not say.
+typedef struct post { struct post *next; char *text; char who[128]; char at[8]; char kind[16], via[32]; int final; long long seq; } post;
 static SDL_Mutex *posts_lock;
 static post *posts;
 static char seq_path[1100];
-
-// A reply this hub has just given the phone itself, which Panetone posts too: those posts are not shown
-// again. (Panetone splits a long post as Telegram takes it, so a post may be a part of one.)
-static char *recent[16];
-static int recent_at;
-
-static void remember_reply(const char *text) {
-    SDL_free(recent[recent_at]);
-    recent[recent_at] = SDL_strdup(text);
-    recent_at = (recent_at + 1) % 16;
-}
-
-static bool already_given(const char *text) {
-    for (int i = 0; i < 16; i++)
-        if (recent[i] && *text && SDL_strstr(recent[i], text)) return true;
-    return false;
-}
 
 static int watch_feed(void *user) {
     (void)user;
@@ -452,13 +433,15 @@ static int watch_feed(void *user) {
         if (!doc) continue;
         gs_jv o = gs_json_root(doc);
         post *p = SDL_calloc(1, sizeof *p);
-        p->came = SDL_GetTicks();
         p->seq = (long long)gs_json_num(gs_json_get(o, "seq"), 0);
         const char *route = gs_json_str(gs_json_get(o, "route"), NULL);
         SDL_strlcpy(p->who, route ? route : "panetone", sizeof p->who);
         // (what Panetone says the post is: an agent's message or question, or its own receipt for a
         // send ("request") or notice, which the phone shows quietly)
         SDL_strlcpy(p->kind, gs_json_str(gs_json_get(o, "kind"), ""), sizeof p->kind);
+        SDL_strlcpy(p->via, gs_json_str(gs_json_get(o, "via"), ""), sizeof p->via);
+        gs_jv final = gs_json_get(o, "final");
+        p->final = final ? gs_json_bool(final, false) : -1;
         // The text, and each attachment by name (the file stays on the computer).
         const char *text = gs_json_str(gs_json_get(o, "text"), "");
         size_t cap = SDL_strlen(text) + 1;
@@ -580,17 +563,11 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
     // The agent last sent to from here, as the window remembers it.
     char target[128] = "", host[128] = "";
     gear_target_remembered(models, target, sizeof target, host, sizeof host);
-    gear_relay *relay = target[0] ? gear_relay_new(target) : NULL;
     char *pref = SDL_GetPrefPath("wakamex", "gear");
     SDL_snprintf(path, sizeof path, "%smessages.jsonl", pref ? pref : "");
     SDL_free(pref);
     gear_transcript *transcript = gear_transcript_open(path, 1);
-    out_to = (delivery){ &relay, target, transcript };
-    // Agents sent to before the one now, still owing replies.
-    typedef struct { gear_relay *relay; char name[128], tab[128]; } owed;
-    enum { EARLIER = 16 };
-    owed earlier[EARLIER];
-    int earlier_count = 0;
+    out_to = (delivery){ target, transcript };
     tab_of(target, target_tab, sizeof target_tab);
     SDL_Thread *reader = hub ? NULL : SDL_CreateThread(read_frames, "gear-serve-in", &s);
     SDL_Thread *speaker = SDL_CreateThread(synthesize, "gear-serve-say", &s);
@@ -763,18 +740,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'T': {
                 gear_agent a;
                 if (!gear_agent_find(f->data, &a, error, sizeof error)) { send_text(&s, 'F', error); break; }
-                // The agent before keeps its relay while it owes replies, which come to its own
-                // conversation; one gone back to takes its relay up again.
-                int was = -1;
-                for (int i = 0; i < earlier_count; i++)
-                    if (!SDL_strcmp(earlier[i].name, a.name)) was = i;
-                gear_relay *again = was >= 0 ? earlier[was].relay : NULL;
-                if (was >= 0) earlier[was] = earlier[--earlier_count];
-                if (relay && gear_relay_waiting(relay) && earlier_count < EARLIER)
-                    earlier[earlier_count++] = (owed){ relay, "", "" }, SDL_strlcpy(earlier[earlier_count - 1].name, target, 128),
-                    SDL_strlcpy(earlier[earlier_count - 1].tab, target_tab, 128);
-                else gear_relay_free(relay);
-                relay = again ? again : gear_relay_new(a.name);
+                // (the agent before goes on answering in its own conversation, through the feed)
                 SDL_strlcpy(target, a.name, sizeof target);
                 tab_of(a.name, target_tab, sizeof target_tab);
                 gear_target_remember(models, a.name, "");
@@ -804,19 +770,23 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             SDL_snprintf(now, sizeof now, "%s|%s|%.1f", gear_pipeline_text(pipe), gear_pipeline_draft(pipe), gear_pipeline_countdown(pipe));
             if (SDL_strcmp(now, last_words)) SDL_strlcpy(last_words, now, sizeof last_words), words(&s, pipe);
         }
-        // Panetone's posts, to the phone or kept for it, the position written once each is handled. Each
-        // waits 3 s first, for the relay to have the same reply when it is one this hub asked for.
+        // Panetone's posts, to the phone or kept for it, the position written once each is handled.
         for (;;) {
             SDL_LockMutex(posts_lock);
-            post *p = posts && SDL_GetTicks() - posts->came >= 3000 ? posts : NULL;
+            post *p = posts;
             if (p) posts = p->next;
             SDL_UnlockMutex(posts_lock);
             if (!p) break;
             bool quiet = !SDL_strcmp(p->kind, "request") || !SDL_strcmp(p->kind, "notice");
-            if (already_given(p->text)) {
-            } else if (!quiet && target_posts && !SDL_strcmp(p->who, target_tab)) {
-                // What the agent sent to now writes, when its replies come this way: a reply, shown and
-                // spoken as one (sent as text alone to a phone in the background).
+            if (!SDL_strcmp(p->kind, "owner")) {
+                // The user's own message, Panetone's copy: one sent from here is shown already; one
+                // sent through another client is the user's in that conversation, without its "[via X] ".
+                const char *text = p->text;
+                if (*text == '[' && SDL_strstr(text, "] ")) text = SDL_strstr(text, "] ") + 2;
+                if (SDL_strcmp(p->via, "gear")) log_message(&s, p->who, p->at, true, false, text, true);
+            } else if (!quiet && *target && !SDL_strcmp(p->who, target_tab) && p->final != 0) {
+                // The agent sent to now answering (its turn's last message, when the feed says which):
+                // a reply, shown and spoken (as text alone to a phone in the background).
                 send_text(&s, 'R', p->text);
                 log_message(&s, p->who, p->at, false, false, p->text, false);
                 if (frames_out && !s.background) speak(&s, p->text);
@@ -826,26 +796,6 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             SDL_snprintf(seq, sizeof seq, "%lld", p->seq);
             SDL_SaveFile(seq_path, seq, SDL_strlen(seq));
             SDL_free(p->text), SDL_free(p);
-        }
-        bool failed;
-        char *reply;
-        for (int i = 0; i < earlier_count; i++) {
-            while ((reply = gear_relay_take(earlier[i].relay, &failed, error, sizeof error)) || failed) {
-                if (failed) { send_text(&s, 'F', error); continue; }
-                remember_reply(reply);
-                log_message(&s, earlier[i].tab, "", false, false, reply, true);
-                SDL_free(reply);
-            }
-            if (!gear_relay_waiting(earlier[i].relay)) gear_relay_free(earlier[i].relay), earlier[i--] = earlier[--earlier_count];
-        }
-        while (relay && ((reply = gear_relay_take(relay, &failed, error, sizeof error)) || failed)) {
-            if (failed) { send_text(&s, 'F', error); break; }
-            // (logged for a phone that misses it; sent as text alone to one in the background)
-            remember_reply(reply);
-            send_text(&s, 'R', reply);
-            log_message(&s, conversation_of(target_tab), "", false, false, reply, false);
-            if (frames_out && !s.background) speak(&s, reply);
-            SDL_free(reply);
         }
         SDL_Delay(10);
     }
@@ -859,8 +809,6 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
 #ifndef _WIN32
     if (listener >= 0) close(listener);
 #endif
-    gear_relay_free(relay);
-    for (int i = 0; i < earlier_count; i++) gear_relay_free(earlier[i].relay);
     gear_transcript_close(transcript);
     gear_pipeline_free(pipe);
     gear_vad_free(vad);
