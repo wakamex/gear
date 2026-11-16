@@ -520,6 +520,7 @@ static void take_frames(app *a) {
 // ---- Talking ----
 
 static bool open_mic(app *a);
+static void close_mic(app *a);
 
 // A press on the character records at once, kept on the phone; only once it has been held still for
 // HOLD_MS is it a hold, which stops a reply being spoken and sends what was recorded. A drag (scrolling)
