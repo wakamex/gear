@@ -227,11 +227,11 @@ bool gear_feed_next(gear_feed *f, const char *route, gear_post *out) {
                 post_of(l, GEAR_POST_MINE, false, false, SDL_strdup(text), out);
                 given = true;
             }
-        } else if (!quiet && talked_to) {
+        } else if (!quiet && talked_to && *l->text) {
             // Held for its turn's end; one held before it was a note along the way, given now.
             if (f->held) give_held(f, out), given = true;
             f->held = l, f->held_at = SDL_GetTicks(), l = NULL;
-        } else {
+        } else if (*l->text) {  // (a line without text or files, such as a marker this client does not know, is passed over)
             post_of(l, GEAR_POST_MESSAGE, quiet, false, l->text, out);
             l->text = NULL, given = true;
         }
