@@ -16,3 +16,12 @@ float gp_rich(gs_ui *ui, gs_rect at, const char *text, const gp_rich_style *s, b
 // words brighter on a tint (a table's whole rows tinted). *mark_y gets the top of the line the mark
 // starts on, or is left alone when nothing is marked.
 float gp_rich_marked(gs_ui *ui, gs_rect at, const char *text, const gp_rich_style *s, int start, int end, float *mark_y);
+
+// Selecting and links: a finger held still on a message's text for half a second and dragged selects
+// (across messages too), and a tap on a web address opens it. The texts of a frame are drawn between
+// gp_rich_begin and gp_rich_end; gp_rich_selection is what is selected in them, in order (NULL for
+// nothing), and gp_rich_unselect drops it.
+void gp_rich_begin(gs_ui *ui);
+void gp_rich_end(gs_ui *ui);
+const char *gp_rich_selection(void);
+void gp_rich_unselect(void);

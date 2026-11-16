@@ -232,6 +232,85 @@ static layout *lay_out(gs_ui *ui, const char *text, float width, const gp_rich_s
     return l;
 }
 
+// ---- Selecting and links ----
+
+// What is selected in each paragraph drawn (by its id: the text's address and the piece's place), kept
+// between frames; the group spans every message, so a selection can run from one into the next.
+enum { PICKED = 128 };
+typedef struct { char id[40]; int from, to; Uint64 frame; } picked;
+static picked picks[PICKED];
+static Uint64 frame;
+static char *selection;  // what is selected across the frame's texts, in order, or NULL
+static size_t selection_len;
+
+static picked *pick_of(const char *id) {
+    int oldest = 0;
+    for (int i = 0; i < PICKED; i++) {
+        if (!SDL_strcmp(picks[i].id, id)) return &picks[i];
+        if (picks[i].frame < picks[oldest].frame) oldest = i;
+    }
+    picked *p = &picks[oldest];
+    SDL_zerop(p);
+    SDL_strlcpy(p->id, id, sizeof p->id);
+    return p;
+}
+
+void gp_rich_begin(gs_ui *ui) {
+    frame++;
+    SDL_free(selection), selection = NULL, selection_len = 0;
+    gs_ui_select_group(ui, "messages");
+}
+
+void gp_rich_end(gs_ui *ui) {
+    gs_ui_select_group(ui, NULL);
+    // A new selection began: the texts not drawn this frame give up theirs.
+    if (gs_ui_select_began(ui, "messages"))
+        for (int i = 0; i < PICKED; i++)
+            if (picks[i].frame != frame) picks[i].from = picks[i].to = 0;
+}
+
+const char *gp_rich_selection(void) { return selection; }
+
+void gp_rich_unselect(void) {
+    for (int i = 0; i < PICKED; i++) picks[i].from = picks[i].to = 0;
+}
+
+static void add_selected(const char *text, int from, int to) {
+    if (from > to) { int t = from; from = to, to = t; }
+    if (from == to) return;
+    size_t n = (size_t)(to - from);
+    selection = SDL_realloc(selection, selection_len + n + 2);
+    if (selection_len) selection[selection_len++] = '\n';
+    SDL_memcpy(selection + selection_len, text + from, n);
+    selection_len += n;
+    selection[selection_len] = 0;
+}
+
+// A paragraph, selectable, its web addresses links (a tap opens one), and the bytes [a, b) of it
+// marked as the sentence heard (from - 1 for none).
+static void paragraph(gs_ui *ui, gs_rect r, const char *id, const char *text, const gp_rich_style *s, int a, int b) {
+    enum { MOST = 32 };
+    gs_ui_styled links[MOST];
+    gs_ui_text_span spans[2 * MOST + 4];
+    int link_of[2 * MOST + 4];
+    int nl = gs_ui_find_links(text, links, MOST);
+    int n = nl ? gs_ui_styled_spans(ui, text, links, nl, spans, 2 * MOST, link_of) : 0;
+    // (a link over the mark keeps its colour, the first of two that overlap counting)
+    if (a < b && n < (int)SDL_arraysize(spans)) spans[n] = (gs_ui_text_span){ a, b, 0, s->marked, s->mark, false }, link_of[n++] = -1;
+    picked *p = pick_of(id);
+    p->frame = frame;
+    int clicked = -1;
+    gs_ui_text_spans(ui, r, id, text, s->px, s->text, NULL, 0, spans, n, &p->from, &p->to, &clicked);
+    add_selected(text, p->from, p->to);
+    if (clicked >= 0 && link_of[clicked] >= 0) {
+        const gs_ui_styled *l = &links[link_of[clicked]];
+        char url[1024];
+        bool www = !SDL_strncmp(text + l->start, "www.", 4);
+        SDL_snprintf(url, sizeof url, "%s%.*s", www ? "https://" : "", l->end - l->start, text + l->start);
+        SDL_OpenURL(url);
+    }
+}
+
 float gp_rich(gs_ui *ui, gs_rect at, const char *text, const gp_rich_style *s, bool draw) {
     if (!draw) return lay_out(ui, text, at.w, s)->height;
     return gp_rich_marked(ui, at, text, s, 0, 0, NULL);
@@ -255,8 +334,9 @@ float gp_rich_marked(gs_ui *ui, gs_rect at, const char *text, const gp_rich_styl
         } else if (a < b) {
             // (bytes of the piece's own copy, which begins at p->from)
             gs_ui_text_span span = { a - p->from, b - p->from, 0, s->marked, s->mark, false };
-            int from = 0, to = 0, clicked;
-            gs_ui_text_spans(ui, (gs_rect){ at.x, y, at.w, p->height }, "spoken", p->text, s->px, s->text, NULL, 0, &span, 1, &from, &to, &clicked);
+            char id[40];
+            SDL_snprintf(id, sizeof id, "%p.%d", (const void *)text, i);
+            paragraph(ui, (gs_rect){ at.x, y, at.w, p->height }, id, p->text, s, span.start, span.end);
             if (mark_y && !placed) {
                 // The line the mark starts on: below the text before it, less a line when that text
                 // runs on into the line.
@@ -265,7 +345,11 @@ float gp_rich_marked(gs_ui *ui, gs_rect at, const char *text, const gp_rich_styl
                 *mark_y = y + SDL_max(0, h - line), placed = true;
                 SDL_free(before);
             }
-        } else gs_ui_text_wrapped(ui, (gs_rect){ at.x, y, at.w, p->height }, p->text, s->px, s->text);
+        } else {
+            char id[40];
+            SDL_snprintf(id, sizeof id, "%p.%d", (const void *)text, i);
+            paragraph(ui, (gs_rect){ at.x, y, at.w, p->height }, id, p->text, s, 0, 0);
+        }
         y += p->height + gap;
     }
     return l->height;
