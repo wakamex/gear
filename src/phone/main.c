@@ -86,6 +86,8 @@ typedef struct {
     // until a finger moves it.
     struct { int start, end; double at; } lines[512];
     int line_count;
+    const char *lines_of;  // the message (a history entry's text) those sentences are of
+    double lines_base;     // where its speech starts in the player's count of seconds
     bool following;
     // New messages waiting to be read aloud (the history's texts), each once nothing else is.
     const char *to_read[32];
@@ -343,6 +345,13 @@ static void parse_agents(app *a, const char *json) {
     gs_json_free(doc);
 }
 
+// A text's identity, FNV-1a over its bytes, as the computer names the message it speaks ('L').
+static Uint32 text_id(const char *t) {
+    Uint32 h = 2166136261u;
+    for (; *t; t++) h = (h ^ (Uint8)*t) * 16777619u;
+    return h;
+}
+
 // The reply's speech comes far faster than it plays (a minute of it in two seconds), and with no end
 // to how long a reply is read: it waits as it came, 16-bit at 24 kHz, and goes to the player a few
 // seconds ahead of what is heard.
@@ -358,7 +367,7 @@ static double speech_left(app *a) { return gs_stream_buffered(a->play) + SDL_Get
 static void stop_speaking(app *a) {
     gs_stream_flush(a->play);
     SDL_ClearAudioStream(a->conv);
-    a->saying = NULL, a->line_count = 0;
+    a->saying = NULL, a->line_count = 0, a->lines_of = NULL;
 }
 
 // A message's speaker tapped: the message spoken, in place of what was; tapped while it is spoken, stopped.
@@ -369,7 +378,7 @@ static void say_again(app *a, const entry *e) {
     if (same) return;
     gp_link_send(a->link, 'U', e->text, (uint32_t)SDL_strlen(e->text));
     a->saying = e->text, a->reply_done = false, a->audio_at = SDL_GetTicks();  // (its speech has 2 s to start)
-    a->line_count = 0, a->following = true;
+    a->following = true;
     a->reply_base = gs_stream_position(a->play) + speech_left(a);
 }
 
@@ -450,7 +459,6 @@ static void take_frames(app *a) {
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0, a->audio_at = SDL_GetTicks();
             add_message(a, data, here(a), false);
             if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text, a->following = true;  // (spoken as it comes)
-            a->line_count = 0;
             a->reply_base = gs_stream_position(a->play) + speech_left(a);
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
@@ -460,7 +468,17 @@ static void take_frames(app *a) {
         case 'G': parse_agents(a, data); break;
         case 'L': {  // a sentence of what is being spoken, before its speech
             gs_json *doc = gs_json_parse(data, len);
-            if (doc && a->line_count < (int)SDL_arraysize(a->lines)) {
+            if (doc && gs_json_num(gs_json_get(gs_json_root(doc), "at"), 0) < 0.001) {
+                // A speech's first sentence: of the message whose text it names, its speech starting
+                // after what the player holds now. (Its reply may have come while another still played.)
+                Uint32 of = (Uint32)gs_json_num(gs_json_get(gs_json_root(doc), "of"), 0);
+                a->lines_of = NULL, a->line_count = 0;
+                for (int i = a->count - 1; i >= 0 && !a->lines_of; i--)
+                    if (text_id(a->history[i].text) == of) a->lines_of = a->history[i].text;
+                a->lines_base = gs_stream_position(a->play) + speech_left(a);
+                if (a->lines_of) a->saying = a->lines_of;  // (its square, to stop it)
+            }
+            if (doc && a->lines_of && a->line_count < (int)SDL_arraysize(a->lines)) {
                 gs_jv o = gs_json_root(doc);
                 a->lines[a->line_count].start = (int)gs_json_num(gs_json_get(o, "start"), 0);
                 a->lines[a->line_count].end = (int)gs_json_num(gs_json_get(o, "end"), 0);
@@ -882,8 +900,8 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
 // The sentence of `text` heard now, as bytes [*start, *end) of it: the last whose speech has begun,
 // its end brought back over the spaces and list marks before the next. False when none is.
 static bool heard_now(app *a, const char *text, int *start, int *end) {
-    if (!a->saying || a->saying != text || !a->line_count) return false;
-    double t = gs_stream_position(a->play) - a->reply_base;
+    if (a->lines_of != text || !a->line_count || a->mood != SPEAKING) return false;
+    double t = gs_stream_position(a->play) - a->lines_base;
     int k = -1;
     for (int i = 0; i < a->line_count; i++)
         if (a->lines[i].at <= t) k = i;
@@ -1261,7 +1279,7 @@ static void sound_out(app *a, const char *text, bool as_written) {
     if (!*text || !a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
     if (a->saying || a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a), a->mood = IDLE;
     gp_link_send(a->link, as_written ? 'W' : 'U', text, (uint32_t)SDL_strlen(text));
-    a->reply_done = false, a->audio_at = SDL_GetTicks(), a->line_count = 0;
+    a->reply_done = false, a->audio_at = SDL_GetTicks();
     a->reply_base = gs_stream_position(a->play) + speech_left(a);
 }
 
@@ -1599,7 +1617,7 @@ int main(int argc, char **argv) {
             if (!a.history[i].mine && !SDL_strcmp(a.history[i].who, a.open)) {
                 a.saying = a.history[i].text, a.mood = SPEAKING, a.following = true;
                 const char *t = a.saying, *heard = SDL_strstr(t, "The transcribe agent"), *next = heard ? SDL_strstr(heard, "Trading3") : NULL;
-                if (next) a.lines[0].start = (int)(heard - t), a.lines[0].end = (int)(next - t), a.lines[0].at = 0, a.line_count = 1;
+                if (next) a.lines[0].start = (int)(heard - t), a.lines[0].end = (int)(next - t), a.lines[0].at = 0, a.line_count = 1, a.lines_of = t;
                 break;
             }
     if (shot && !SDL_strcmp(argv[3], "type")) SDL_strlcpy(a.typed, "Can you check whether the phone build passed, and if it did, install it on the PC too?", sizeof a.typed), gs_ui_focus(ui, "compose");

@@ -45,6 +45,7 @@ typedef struct {
     SDL_Condition *wake;
     char *speak, *next_voice;
     int *speak_from;  // for each byte of `speak`, its place in the reply (gear_pronounce_reply_map)
+    Uint32 speak_of;  // the reply's text, as text_id has it, for the phone to know which message is heard
     bool quit;
     SDL_AtomicInt generation;  // advanced by a stop; a synthesis of an older one gives up
     struct pt_context *pocket;
@@ -130,6 +131,7 @@ static int synthesize(void *user) {
         if (s->quit) break;
         char *voice = s->next_voice, *text = s->speak;
         int *from = s->speak_from;
+        Uint32 of = s->speak_of;
         s->next_voice = NULL, s->speak = NULL, s->speak_from = NULL;
         job j = { s, SDL_GetAtomicInt(&s->generation), 0 };
         SDL_UnlockMutex(s->lock);
@@ -155,7 +157,7 @@ static int synthesize(void *user) {
                 while (next < n && text[next] == ' ') next++;
                 if (from) {
                     char line[96];
-                    SDL_snprintf(line, sizeof line, "{\"start\":%d,\"end\":%d,\"at\":%.3f}", from[a], SDL_max(from[a], from[next]), (double)j.samples / SPEECH_RATE);
+                    SDL_snprintf(line, sizeof line, "{\"of\":%u,\"start\":%d,\"end\":%d,\"at\":%.3f}", (unsigned)of, from[a], SDL_max(from[a], from[next]), (double)j.samples / SPEECH_RATE);
                     send_text(s, 'L', line);
                 }
                 char kept = text[e];
@@ -182,6 +184,13 @@ static int synthesize(void *user) {
     return 0;
 }
 
+// A text's identity, FNV-1a over its bytes, as the phone works it out for the message it shows.
+static Uint32 text_id(const char *t) {
+    Uint32 h = 2166136261u;
+    for (; *t; t++) h = (h ^ (Uint8)*t) * 16777619u;
+    return h;
+}
+
 // What is said of `reply` spoken: with the words taught their way, or with `as_written` without them.
 static void speak_as(server *s, const char *reply, bool as_written) {
     int *from = NULL;
@@ -191,7 +200,7 @@ static void speak_as(server *s, const char *reply, bool as_written) {
     s->reply16_len = 0, s->phone_at = 0, s->since_at = 0;
     SDL_ClearAudioStream(s->to16);
     SDL_free(s->speak), SDL_free(s->speak_from);
-    s->speak = spoken, s->speak_from = from;
+    s->speak = spoken, s->speak_from = from, s->speak_of = text_id(reply);
     SDL_SignalCondition(s->wake);
     SDL_UnlockMutex(s->lock);
 }

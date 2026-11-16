@@ -33,8 +33,9 @@
 //   'M' the message sent, as transcribed
 //   'R' the agent's reply, as written
 //   'P' speech of the reply: 16-bit little-endian samples, 24 kHz mono
-//   'L' before each sentence's speech: {"start", "end": the bytes of the reply or message being spoken
-//       it was read from, "at": seconds into that speech where it starts}, for showing what is heard
+//   'L' before each sentence's speech: {"of": the message being spoken (FNV-1a of its text), "start",
+//       "end": the bytes of it the sentence was read from, "at": seconds into its speech where the
+//       sentence starts}, for showing what is heard
 //   'D' the reply has been spoken
 //   'Z' a message to show and not speak: {"seq", "who", "at", "text", "mine" when the user's, "again" when given
 //       again after 'K'}: a
