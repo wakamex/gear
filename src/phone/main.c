@@ -1047,7 +1047,6 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
 }
 
 // The talk screen of the conversation `key`: the open one, or with `preview` set, the one beside it.
-static gs_rect copy_area;    // the button to copy what is selected, when it shows
 static gs_rect follow_area;  // the button to follow what is heard again, when it shows
 static gs_rect compose_area;  // the box to type in and its send button
 static gs_rect chat_area;  // where the open conversation's page and the box to type in were, which a swipe does not start on
@@ -1164,16 +1163,8 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     gs_cut_top(&r, 10);
     if (!preview) chat_area = (gs_rect){ r.x, r.y, r.w, chat_area.y + chat_area.h - r.y };
     conversation(ui, a, r, key);
-    // Text selected in the messages: a button to copy it.
-    if (!preview && gp_rich_selection()) {
-        float w = gs_ui_text_width(ui, "copy", small) + 28, h = small * 2.2f;
-        gs_rect pill = { r.x + r.w - w - 8, r.y + r.h - h - 8, w, h };
-        gs_ui_round(ui, pill, h / 2, ACCENT);
-        gs_ui_text(ui, pill, "copy", small, BACKGROUND, 0);
-        // (the button, or Copy in Android's toolbar over the selection, which comes as Ctrl+C)
-        if (gs_ui_clicked(ui, pill) || gs_ui_key(ui, SDLK_C, SDL_KMOD_CTRL)) gs_clipboard_set(gp_rich_selection()), gp_rich_unselect();
-        copy_area = pill;
-    } else copy_area = (gs_rect){ 0 };
+    // Text selected in the messages, copied by Copy in Android's toolbar over it, which comes as Ctrl+C.
+    if (!preview && gp_rich_selection() && gs_ui_key(ui, SDLK_C, SDL_KMOD_CTRL)) gs_clipboard_set(gp_rich_selection()), gp_rich_unselect();
     // Scrolled away from what is being heard: a button to follow it again.
     if (!preview && a->saying && !a->following && a->line_count) {
         float w = gs_ui_text_width(ui, "follow", small) + 28, h = small * 2.2f;
@@ -1756,7 +1747,7 @@ int main(int argc, char **argv) {
         bool was_picking = a.picking;
         // A finger on the conversation takes it from following what is heard (the follow button excepted).
         if (went_down && !a.setup && !a.picking && gs_rect_contains(chat_area, press_x, press_y) && !gs_rect_contains(compose_area, press_x, press_y) &&
-            !gs_rect_contains(follow_area, press_x, press_y) && !gs_rect_contains(copy_area, press_x, press_y))
+            !gs_rect_contains(follow_area, press_x, press_y))
             a.following = false;
         // A press outside the box to type in (and its send button) puts the keyboard away.
         if (went_down && !a.setup && !a.picking && !gs_rect_contains(compose_area, press_x, press_y) && gs_ui_focused(ui, "compose")) gs_ui_focus(ui, NULL);
