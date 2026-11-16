@@ -409,7 +409,7 @@ static void test_transcript(const char *tmp) {
 static void test_agent_refused(void) {
     char error[512], id[37];
     gear_agent nobody = { .name = "nobody", .id = "gear-test-no-such-agent", .incarnation = "none" };
-    bool sent = gear_agent_send(&nobody, "test", id, error, sizeof error);
+    bool sent = gear_agent_send(&nobody, "test", id, error, sizeof error) == GEAR_SENT;
     if (SDL_strstr(error, "Could not run")) { printf("agent test skipped: %s\n", error); return; }
     CHECK(!sent);
     CHECK(SDL_strstr(error, "not available") != NULL);

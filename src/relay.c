@@ -47,11 +47,21 @@ static int run(void *user) {
         SDL_UnlockMutex(r->lock);
         char id[37], error[512];
         // Whatever runs under the name now; a send refused because it restarted in between is tried
-        // once more with a fresh look.
+        // once more with a fresh look. One refused because the agent is in the middle of a turn waits
+        // for it, tried every 2 s, as Panetone queues a message (up to an hour).
         gear_agent agent;
         bool sent = false;
-        for (int attempt = 0; attempt < 2 && !sent; attempt++)
-            sent = gear_agent_find(r->name, &agent, error, sizeof error) && gear_agent_send(&agent, m->text, id, error, sizeof error);
+        Uint64 queued = SDL_GetTicks();
+        for (int attempt = 0; attempt < 2 && !sent;) {
+            gear_send_result result = gear_agent_find(r->name, &agent, error, sizeof error) ? gear_agent_send(&agent, m->text, id, error, sizeof error) : GEAR_SEND_FAILED;
+            sent = result == GEAR_SENT;
+            if (result == GEAR_SEND_BUSY && SDL_GetTicks() - queued < 3600 * 1000) {
+                for (int k = 0; k < 20 && !quitting(r); k++) SDL_Delay(100);
+                if (quitting(r)) { SDL_free(m->text), SDL_free(m); return 0; }
+                continue;
+            }
+            attempt++;
+        }
         SDL_free(m->text);
         SDL_free(m);
         if (!sent) { deliver(r, SDL_strdup(error), true); continue; }

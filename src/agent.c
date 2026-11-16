@@ -303,23 +303,24 @@ static void uuid(char out[37]) {
     SDL_snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
 }
 
-bool gear_agent_send(const gear_agent *a, const char *text, char request_id[37], char *error, size_t error_size) {
+gear_send_result gear_agent_send(const gear_agent *a, const char *text, char request_id[37], char *error, size_t error_size) {
     static bool seeded;
     if (!seeded) { SDL_srand(0); seeded = true; }
     uuid(request_id);
-    if (is_endchat(a)) return endchat_say(a, text, error, error_size);
+    if (is_endchat(a)) return endchat_say(a, text, error, error_size) ? GEAR_SENT : GEAR_SEND_FAILED;
     // Locally the text goes on standard input, so nothing said shows in the process list. Over SSH it
     // is the last argument: the Windows ssh client never passes on the end of piped input.
     bool ssh = host() != NULL;
     const char *argv[] = { wakterm(), "cli", "--no-auto-start", "agent", "admit", "--exact-agent-id", "--incarnation", a->incarnation, "--request-id", request_id, "--return-final", a->id, ssh ? text : NULL, NULL };
     gs_json *doc = run_json(argv, ssh ? NULL : text, error, error_size);
-    if (!doc) return false;
+    if (!doc) return GEAR_SEND_FAILED;
     // A refusal still exits 0: the answer says whether the prompt was written, and why not.
     gs_jv r = gs_json_root(doc);
     bool written = gs_json_bool(gs_json_get(r, "prompt_written"), false);
+    bool busy = !SDL_strcmp(gs_json_str(gs_json_get(r, "status"), ""), "busy");
     if (!written) SDL_snprintf(error, error_size, "%s did not take the message: %s", a->name, gs_json_str(gs_json_get(r, "detail"), gs_json_str(gs_json_get(r, "status"), "no reason given")));
     gs_json_free(doc);
-    return written;
+    return written ? GEAR_SENT : busy ? GEAR_SEND_BUSY : GEAR_SEND_FAILED;
 }
 
 gear_reply_state gear_agent_reply(const char *request_id, char **reply, char *error, size_t error_size) {

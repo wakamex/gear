@@ -22,8 +22,11 @@ void gear_agent_tabs(gear_agent *agents, int n);
 // reason in `error`.
 bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t error_size);
 // Sends `text` to the agent as a prompt and asks for its final reply, under a new request id
-// written to `request_id`. False with the reason in `error`.
-bool gear_agent_send(const gear_agent *a, const char *text, char request_id[37], char *error, size_t error_size);
+// written to `request_id`. GEAR_SEND_BUSY when the agent is in the middle of a turn, which Wakterm
+// refuses (a Claude Code or Codex agent takes a prompt only while waiting for the user), to be tried
+// again once it is done; GEAR_SEND_FAILED for any other refusal; each with the reason in `error`.
+typedef enum { GEAR_SENT, GEAR_SEND_BUSY, GEAR_SEND_FAILED } gear_send_result;
+gear_send_result gear_agent_send(const gear_agent *a, const char *text, char request_id[37], char *error, size_t error_size);
 
 // Whether the agent's reply comes back through gear_agent_reply. An endchat profile's agent (listed with
 // Wakterm's, harness "endchat", status "busy" or "idle") posts each message it writes through Panetone
