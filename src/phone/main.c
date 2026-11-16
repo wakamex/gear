@@ -747,7 +747,7 @@ static const char *hint(app *a, char *buf, size_t size) {
     switch (a->mood) {
     case LISTENING: return "listening: let go to send";
     case THINKING: return a->note[0] ? a->note : "hearing…";
-    case SPEAKING: return "speaking: hold to interrupt";
+    case SPEAKING: return "speaking: tap to stop, hold to talk over it";
     default: return a->note[0] ? a->note : "hold to talk";
     }
 }
@@ -1659,7 +1659,11 @@ int main(int argc, char **argv) {
                 if (went_up && !moved && !was_picking && !a.picking && gs_rect_contains(character_area, press_x, press_y)) tap_always(&a);
             } else {
                 if (on_character && !a.holding) begin_press(&a);
-                if (a.pressing && (moved || !down)) drop_press(&a);
+                if (a.pressing && (moved || !down)) {
+                    // (a tap, let go before it was a hold and without moving, stops what is being spoken)
+                    if (!moved && (a.saying || a.mood == SPEAKING) && a.link) gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
+                    drop_press(&a);
+                }
                 else if (a.pressing && SDL_GetTicks() - a.held_at >= HOLD_MS) start_holding(&a);
                 if (!down && a.holding) stop_holding(&a);
             }
