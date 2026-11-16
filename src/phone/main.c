@@ -59,6 +59,7 @@ typedef struct {
     // The conversations: the one shown, the agent sent to (its name, and its tab's title naming its
     // conversation), and the agent last asked for, once per conversation opened.
     char open[128], target[128], tab[128], asked[128], voice[16], note[300];
+    char note_for[128];   // the conversation the note is about ("waiting for X", a failure), or "" for any
     unread unread[CONVERSATIONS];
     long long seen;       // the newest message's number in the computer's log, kept in seen.txt
     int unread_count;
@@ -224,6 +225,8 @@ static void open_conversation(app *a, const char *who) {
 static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine, bool quiet) {
     remember(a, text, who, at, mine);
     a->history[a->count - 1].quiet = quiet;
+    // (an answer in the conversation the note is about ends its "waiting for")
+    if (!mine && !quiet && *a->note_for && !SDL_strcmp(who, a->note_for)) a->note[0] = 0;
     if (!SDL_strcmp(who, a->open)) a->fresh = true;
     else if (!mine && !quiet) {
         int *n = unread_of(a, who, true);
@@ -451,8 +454,9 @@ static void take_frames(app *a) {
             a->reply_base = gs_stream_position(a->play) + speech_left(a);
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
-        case 'S': SDL_strlcpy(a->note, data, sizeof a->note); break;
-        case 'F': SDL_strlcpy(a->note, data, sizeof a->note), a->mood = IDLE; break;
+        // (what is happening in the conversation sent to; what failed in the one open)
+        case 'S': SDL_strlcpy(a->note, data, sizeof a->note), SDL_strlcpy(a->note_for, here(a), sizeof a->note_for); break;
+        case 'F': SDL_strlcpy(a->note, data, sizeof a->note), SDL_strlcpy(a->note_for, a->open, sizeof a->note_for), a->mood = IDLE; break;
         case 'G': parse_agents(a, data); break;
         case 'L': {  // a sentence of what is being spoken, before its speech
             gs_json *doc = gs_json_parse(data, len);
@@ -575,7 +579,7 @@ static bool open_mic(app *a) {
     if (a->mic) return true;
     const SDL_AudioSpec spec = { SDL_AUDIO_S16, 1, MIC_RATE };
     if (!(a->mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, NULL, NULL))) {
-        SDL_snprintf(a->note, sizeof a->note, "no microphone: %s", SDL_GetError());
+        SDL_snprintf(a->note, sizeof a->note, "no microphone: %s", SDL_GetError()), a->note_for[0] = 0;
         return false;
     }
     return true;
@@ -620,7 +624,7 @@ static void stop_holding(app *a) {
     a->holding = false;
     a->level = 0;
     // A tap is not speech: under half a second is dropped there too, and said here.
-    if (SDL_GetTicks() - a->held_at < 400) { gp_link_send(a->link, 'X', NULL, 0); SDL_strlcpy(a->note, "hold to talk", sizeof a->note); a->mood = IDLE; return; }
+    if (SDL_GetTicks() - a->held_at < 400) { gp_link_send(a->link, 'X', NULL, 0); SDL_strlcpy(a->note, "hold to talk", sizeof a->note), a->note_for[0] = 0; a->mood = IDLE; return; }
     gp_link_send(a->link, 'E', NULL, 0);
     a->mood = THINKING;
 }
@@ -732,6 +736,9 @@ static bool avatar(gs_ui *ui, int which, float cx, float cy, float r, mood m, fl
     return true;
 }
 
+// The note, when it is about the conversation open (or about none in particular).
+static const char *note_here(app *a) { return a->note[0] && (!a->note_for[0] || !SDL_strcmp(a->note_for, a->open)) ? a->note : NULL; }
+
 static const char *hint(app *a, char *buf, size_t size) {
     char why[256] = "";
     gp_link_state st = a->link ? gp_link_status(a->link, why, sizeof why) : GP_FAILED;
@@ -740,15 +747,15 @@ static const char *hint(app *a, char *buf, size_t size) {
     if (st == GP_FAILED) return SDL_snprintf(buf, size, "%s", why), buf;
     if (a->always) {
         if (a->mood == SPEAKING) return "speaking: talk or tap to stop";
-        if (a->mood == THINKING) return a->note[0] ? a->note : "sent";
+        if (a->mood == THINKING) return note_here(a) ? note_here(a) : "sent";
         if (a->left >= 0) return SDL_snprintf(buf, size, "sending in %.0f s: tap to send now", SDL_ceil(a->left)), buf;
-        return a->note[0] ? a->note : "listening";
+        return note_here(a) ? note_here(a) : "listening";
     }
     switch (a->mood) {
     case LISTENING: return "listening: let go to send";
-    case THINKING: return a->note[0] ? a->note : "hearing…";
+    case THINKING: return note_here(a) ? note_here(a) : "hearing…";
     case SPEAKING: return "speaking: tap to stop, hold to talk over it";
-    default: return a->note[0] ? a->note : "hold to talk";
+    default: return note_here(a) ? note_here(a) : "hold to talk";
     }
 }
 
@@ -1012,7 +1019,7 @@ static void send_typed(gs_ui *ui, app *a) {
     while (*s == ' ' || *s == '\n') s++;
     while (e > s && (e[-1] == ' ' || e[-1] == '\n')) e--;
     if (s == e) return;
-    if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) { SDL_strlcpy(a->note, "not connected: the message waits here", sizeof a->note); return; }
+    if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) { SDL_strlcpy(a->note, "not connected: the message waits here", sizeof a->note), a->note_for[0] = 0; return; }
     gp_link_send(a->link, 'M', s, (uint32_t)(e - s));
     a->typed[0] = 0;
     gs_ui_edited(ui, "compose", a->typed, 0);
