@@ -9,8 +9,8 @@
             .hash = "hearsay-0.0.0-qFXHiG2fAgANBlsfJKkZOq3yRzPO1a0kggWsZxrFiMgN",
         },
         .gesso = .{
-            .url = "git+https://github.com/wakamex/gesso.git#597b3d7eb425c8460f6caf3fcf681e74341b6b06",
-            .hash = "gesso-0.0.0-LFvUr-r3TgBEVIv-7hil-yzbWmdB1Pd7OE-nJkdbmJSc",
+            .url = "git+https://github.com/wakamex/gesso.git#645d779fee166c5eb73032756ad09ffada7f7d6c",
+            .hash = "gesso-0.0.0-LFvUr2n9TgAiw0h9VQCbQz6rRD85gmejlZqvpvC1-8_s",
         },
         .libssh2 = .{
             .url = "https://github.com/libssh2/libssh2/releases/download/libssh2-1.11.1/libssh2-1.11.1.tar.gz",
