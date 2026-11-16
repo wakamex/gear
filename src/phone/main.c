@@ -754,6 +754,21 @@ static bool avatar(gs_ui *ui, int which, float cx, float cy, float r, mood m, fl
     return true;
 }
 
+// The conversation of the message being read aloud, or NULL when none is (or it is not known).
+static const char *read_in(app *a) {
+    const char *text = a->lines_of ? a->lines_of : a->saying;
+    if (a->mood != SPEAKING || !text) return NULL;
+    for (int i = a->count - 1; i >= 0; i--)
+        if (a->history[i].text == text) return a->history[i].who;
+    return NULL;
+}
+
+// Whether what is being read aloud is of another conversation than the one open.
+static bool read_elsewhere(app *a) {
+    const char *who = read_in(a);
+    return who && SDL_strcmp(who, a->open);
+}
+
 // The note, when it is about the conversation open (or about none in particular).
 static const char *note_here(app *a) { return a->note[0] && (!a->note_for[0] || !SDL_strcmp(a->note_for, a->open)) ? a->note : NULL; }
 
@@ -764,6 +779,7 @@ static const char *hint(app *a, char *buf, size_t size) {
     if (st == GP_CONNECTING) return SDL_snprintf(buf, size, "%s…", why), buf;
     if (st == GP_FAILED) return SDL_snprintf(buf, size, "%s", why), buf;
     if (a->always) {
+        if (a->mood == SPEAKING && read_elsewhere(a)) return SDL_snprintf(buf, size, "reading %s: talk or tap to stop", read_in(a)), buf;
         if (a->mood == SPEAKING) return "speaking: talk or tap to stop";
         if (a->mood == THINKING) return note_here(a) ? note_here(a) : "sent";
         if (a->left >= 0) return SDL_snprintf(buf, size, "sending in %.0f s: tap to send now", SDL_ceil(a->left)), buf;
@@ -772,7 +788,9 @@ static const char *hint(app *a, char *buf, size_t size) {
     switch (a->mood) {
     case LISTENING: return "listening: let go to send";
     case THINKING: return note_here(a) ? note_here(a) : "hearing…";
-    case SPEAKING: return "speaking: tap to stop, hold to talk over it";
+    case SPEAKING:
+        if (read_elsewhere(a)) return SDL_snprintf(buf, size, "reading %s: tap to stop", read_in(a)), buf;
+        return "speaking: tap to stop, hold to talk over it";
     default: return note_here(a) ? note_here(a) : "hold to talk";
     }
 }
@@ -1121,6 +1139,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         gs_rect stage = gs_cut_top(&r, block);
         float cx = stage.x + stage.w / 2, cy = stage.y + stage.h / 2;
         mood shown = preview ? IDLE : a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood;
+        if (shown == SPEAKING && read_elsewhere(a)) shown = IDLE;  // (another conversation's message is being read)
         if (!avatar(ui, avatar_index(a->avatar), cx, cy, radius * 1.25f, shown, t, a->level)) character(ui, cx, cy, radius, shown, t, a->level);
         if (!preview) character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
         char buf[300];
