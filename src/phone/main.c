@@ -528,7 +528,7 @@ enum { HOLD_MS = 250 };
 
 static void begin_press(app *a) {
     if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
-    // (opened here when it could not be at the start, before the system's question about the microphone was answered)
+    // (the microphone is opened for each press, and closed again when it is let go)
     if (!open_mic(a)) return;
     SDL_ClearAudioStream(a->mic);
     SDL_ResumeAudioStreamDevice(a->mic);
@@ -538,7 +538,7 @@ static void begin_press(app *a) {
 
 static void drop_press(app *a) {
     a->pressing = false;
-    if (!a->always) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic);
+    if (!a->always) close_mic(a);
 }
 
 static void start_holding(app *a) {
@@ -563,6 +563,13 @@ static void send_audio(app *a) {
 }
 
 // Always-on: the microphone streams while nothing is being spoken, so the reply is not heard as the user.
+// The microphone is open only while listening: Android counts a paused one as in use, which kept it
+// from other apps (a screen recorder said so) and showed it in use.
+static void close_mic(app *a) {
+    if (a->mic) SDL_DestroyAudioStream(a->mic), a->mic = NULL;
+    a->level = 0;
+}
+
 static bool open_mic(app *a) {
     if (a->mic) return true;
     const SDL_AudioSpec spec = { SDL_AUDIO_S16, 1, MIC_RATE };
@@ -580,7 +587,7 @@ static void always_listen(app *a) {
     bool listen = a->always && open && !SDL_GetAtomicInt(&behind) && open_mic(a);
     if (!a->mic) return;
     if (listen && SDL_AudioStreamDevicePaused(a->mic)) SDL_ClearAudioStream(a->mic), SDL_ResumeAudioStreamDevice(a->mic);
-    if (!listen && !a->holding && !a->pressing && !SDL_AudioStreamDevicePaused(a->mic)) SDL_PauseAudioStreamDevice(a->mic), SDL_ClearAudioStream(a->mic), a->level = 0;
+    if (!listen && !a->holding && !a->pressing) { close_mic(a); return; }
     if (listen) {
         char at[48];
         bool playing = a->mood == SPEAKING && speech_left(a) > 0;
@@ -608,7 +615,7 @@ static void tap_always(app *a) {
 static void stop_holding(app *a) {
     if (!a->holding) return;
     send_audio(a);
-    SDL_PauseAudioStreamDevice(a->mic);
+    if (!a->always) close_mic(a);
     a->holding = false;
     a->level = 0;
     // A tap is not speech: under half a second is dropped there too, and said here.
@@ -1050,7 +1057,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         float send_w = gs_ui_text_width(ui, "send", px) + 24;
         float h = gs_ui_textarea_height(ui, a->typed, r.w - send_w - 8, 5) + 12;
         gs_rect box = gs_cut_bottom(&r, h);
-        if (!preview) compose_area = box;
+        if (!preview) compose_area = box;  // (the box and its send button)
         gs_rect send = gs_cut_right(&box, send_w);
         gs_cut_right(&box, 8);
         if (preview) {
@@ -1537,9 +1544,6 @@ int main(int argc, char **argv) {
     gs_mix_add(gs_stream_render, a.play);
     const SDL_AudioSpec speech = { SDL_AUDIO_S16, 1, SPEECH_RATE }, mix = { SDL_AUDIO_F32, 2, MIX_RATE };
     a.conv = SDL_CreateAudioStream(&speech, &mix);
-    const SDL_AudioSpec mic = { SDL_AUDIO_S16, 1, MIC_RATE };
-    a.mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &mic, NULL, NULL);
-    if (a.mic) SDL_PauseAudioStreamDevice(a.mic);
 
     a.setup = shot ? !SDL_strcmp(argv[3], "setup") || !SDL_strcmp(argv[3], "pronounce") : !a.host[0] || !a.user[0];
     if (shot && !SDL_strcmp(argv[3], "pronounce")) {
@@ -1633,6 +1637,8 @@ int main(int argc, char **argv) {
         if (went_down && !a.setup && !a.picking && gs_rect_contains(chat_area, press_x, press_y) && !gs_rect_contains(compose_area, press_x, press_y) &&
             !gs_rect_contains(follow_area, press_x, press_y))
             a.following = false;
+        // A press outside the box to type in (and its send button) puts the keyboard away.
+        if (went_down && !a.setup && !a.picking && !gs_rect_contains(compose_area, press_x, press_y) && gs_ui_focused(ui, "compose")) gs_ui_focus(ui, NULL);
         // A press in the box to type in stops what is being spoken, as typing over it would.
         if (went_down && !a.setup && !a.picking && gs_rect_contains(compose_area, press_x, press_y) && (a.saying || a.mood == SPEAKING) && a.link)
             gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
