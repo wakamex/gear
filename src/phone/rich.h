@@ -24,4 +24,5 @@ float gp_rich_marked(gs_ui *ui, gs_rect at, const char *text, const gp_rich_styl
 void gp_rich_begin(gs_ui *ui);
 void gp_rich_end(gs_ui *ui);
 const char *gp_rich_selection(void);
+bool gp_rich_began(void);  // whether a new selection began in the messages this frame
 void gp_rich_unselect(void);

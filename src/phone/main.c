@@ -1528,6 +1528,53 @@ static void window_points(SDL_Window *win, gs_ui *ui, float x, float y, float *p
     *px_out = x * to_pixels / per_point, *py_out = y * to_pixels / per_point;
 }
 
+// ---- What happens around a press, for finding a fault ----
+
+// Each event from a press until 4 s after the finger lifts, sent to the computer's phone-debug.log
+// ('D') once a frame: its type, window, which pointer or finger, button, place and time.
+static char debug_buf[16384];
+static size_t debug_len;
+static Uint64 debug_until;
+
+static void debug_line(const char *line) {
+    if (SDL_GetTicks() > debug_until) return;
+    int n = SDL_snprintf(debug_buf + debug_len, sizeof debug_buf - debug_len, "%s%s", debug_len ? "\n" : "", line);
+    if (n > 0 && debug_len + (size_t)n < sizeof debug_buf) debug_len += (size_t)n;
+}
+
+static void debug_event(const SDL_Event *e) {
+    bool press = e->type == SDL_EVENT_MOUSE_BUTTON_DOWN || e->type == SDL_EVENT_FINGER_DOWN;
+    if (press || e->type == SDL_EVENT_MOUSE_BUTTON_UP || e->type == SDL_EVENT_FINGER_UP) debug_until = SDL_GetTicks() + 4000;
+    char line[300];
+    double t = (double)e->common.timestamp / 1e9;
+    switch (e->type) {
+    case SDL_EVENT_MOUSE_BUTTON_DOWN:
+    case SDL_EVENT_MOUSE_BUTTON_UP:
+        SDL_snprintf(line, sizeof line, "%.3f %s win=%u which=%u button=%d x=%.0f y=%.0f clicks=%d", t, e->type == SDL_EVENT_MOUSE_BUTTON_DOWN ? "mouse-down" : "mouse-up",
+                     (unsigned)e->button.windowID, (unsigned)e->button.which, e->button.button, e->button.x, e->button.y, e->button.clicks);
+        break;
+    case SDL_EVENT_MOUSE_MOTION:
+        SDL_snprintf(line, sizeof line, "%.3f mouse-motion win=%u which=%u x=%.0f y=%.0f", t, (unsigned)e->motion.windowID, (unsigned)e->motion.which, e->motion.x, e->motion.y);
+        break;
+    case SDL_EVENT_FINGER_DOWN:
+    case SDL_EVENT_FINGER_UP:
+    case SDL_EVENT_FINGER_MOTION:
+    case SDL_EVENT_FINGER_CANCELED:
+        SDL_snprintf(line, sizeof line, "%.3f finger-%s win=%u finger=%llu x=%.3f y=%.3f", t,
+                     e->type == SDL_EVENT_FINGER_DOWN ? "down" : e->type == SDL_EVENT_FINGER_UP ? "up" : e->type == SDL_EVENT_FINGER_MOTION ? "motion" : "canceled",
+                     (unsigned)e->tfinger.windowID, (unsigned long long)e->tfinger.fingerID, e->tfinger.x, e->tfinger.y);
+        break;
+    case SDL_EVENT_KEY_DOWN:
+    case SDL_EVENT_KEY_UP:
+        SDL_snprintf(line, sizeof line, "%.3f key-%s win=%u key=%s mod=%x", t, e->type == SDL_EVENT_KEY_DOWN ? "down" : "up", (unsigned)e->key.windowID, SDL_GetKeyName(e->key.key), (unsigned)e->key.mod);
+        break;
+    case SDL_EVENT_TEXT_INPUT: SDL_snprintf(line, sizeof line, "%.3f text-input win=%u text=%s", t, (unsigned)e->text.windowID, e->text.text); break;
+    case SDL_EVENT_TEXT_EDITING: SDL_snprintf(line, sizeof line, "%.3f text-editing win=%u text=%s start=%d length=%d", t, (unsigned)e->edit.windowID, e->edit.text, e->edit.start, e->edit.length); break;
+    default: SDL_snprintf(line, sizeof line, "%.3f event type=0x%x win=%u", t, (unsigned)e->type, (unsigned)e->window.windowID); break;
+    }
+    debug_line(line);
+}
+
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
     // `gear-phone --shot FILE setup|talk|pick|table|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
@@ -1672,9 +1719,13 @@ int main(int argc, char **argv) {
                     swipe_move(&sw, &a, x, y, last_area);
                 }
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) down = false, went_up = true, swipe_up(&sw, &a);
+                debug_event(&e);
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
+        if (gp_rich_began()) debug_line("frame: a new selection began in the messages");
+        if (debug_len && a.link && SDL_GetTicks() < debug_until + 500) gp_link_send(a.link, 'D', debug_buf, (uint32_t)debug_len);
+        debug_len = 0;
         take_frames(&a);
         // A notification tapped opens its conversation.
         char opened[128];

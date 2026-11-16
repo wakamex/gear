@@ -241,6 +241,7 @@ typedef struct { char id[40]; int from, to; Uint64 frame; } picked;
 static picked picks[PICKED];
 static Uint64 frame;
 static char *selection;  // what is selected across the frame's texts, in order, or NULL
+static bool began;       // a new selection began in the messages this frame
 static size_t selection_len;
 
 static picked *pick_of(const char *id) {
@@ -264,12 +265,15 @@ void gp_rich_begin(gs_ui *ui) {
 void gp_rich_end(gs_ui *ui) {
     gs_ui_select_group(ui, NULL);
     // A new selection began: the texts not drawn this frame give up theirs.
-    if (gs_ui_select_began(ui, "messages"))
+    began = gs_ui_select_began(ui, "messages");
+    if (began)
         for (int i = 0; i < PICKED; i++)
             if (picks[i].frame != frame) picks[i].from = picks[i].to = 0;
 }
 
 const char *gp_rich_selection(void) { return selection; }
+
+bool gp_rich_began(void) { return began; }
 
 void gp_rich_unselect(void) {
     for (int i = 0; i < PICKED; i++) picks[i].from = picks[i].to = 0;
