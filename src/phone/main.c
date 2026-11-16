@@ -4,6 +4,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_main.h>
 #include <stdio.h>
+#include <string.h>
 #include "gs_draw.h"
 #include "gs_background.h"
 #include "gs_json.h"
@@ -41,7 +42,8 @@ static const char *const read_names[] = { "replies to me", "this conversation", 
 // The conversations, both sides, kept on the phone in history.jsonl so they outlast a restart: what was
 // sent and what each agent replied, with when, newest last. A conversation is one agent's, named by
 // the title of its tab (`who`), as Telegram has one topic for each.
-typedef struct { char *text; char who[128]; char at[8]; bool mine, quiet; } entry;  // quiet: Panetone's own receipt or notice
+// quiet: Panetone's own receipt or notice, shown folded to its first line; unfolded: opened by a tap
+typedef struct { char *text; char who[128]; char at[8]; bool mine, quiet, unfolded; } entry;
 enum { HISTORY = 2000, CONVERSATIONS = 64 };
 typedef struct { char who[128]; int n; } unread;  // the replies in a conversation not yet seen
 
@@ -946,15 +948,25 @@ static bool preview;
 static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool live, bool draw) {
     float head = small * 1.7f, pad = 8, w = at.w - pad - 4;
     const char *text = e->text;
-    // Panetone's receipt or notice: small and dim, without a mark, a header or a speaker.
+    // Panetone's receipt or notice: dim, without a mark, a header or a speaker, folded to its first
+    // line ("…" when there is more), which a tap unfolds and folds again.
     if (e->quiet) {
-        float time_w = gs_ui_text_width(ui, e->at, small * 0.9f) + 8;
-        gp_rich_style q = { small, 10, DIM, DIM, BORDER, (SDL_FColor){ 1, 1, 1, 0.03f }, DIM, (SDL_FColor){ 0, 0, 0, 0 } };
-        float h = gp_rich(ui, (gs_rect){ 0, 0, w - time_w, 0 }, text, &q, false) + 6;
+        float time_w = gs_ui_text_width(ui, e->at, small * 0.9f) + 8, line = gs_ui_text_height(ui, "0", px, 1e6f) + 4;
+        size_t first = strcspn(text, "\n");
+        const char *rest = text + first;
+        while (*rest == '\n') rest++;
+        gp_rich_style q = { px, 11, DIM, DIM, BORDER, (SDL_FColor){ 1, 1, 1, 0.03f }, DIM, (SDL_FColor){ 0, 0, 0, 0 } };
+        float more = e->unfolded && *rest ? gp_rich(ui, (gs_rect){ 0, 0, w, 0 }, rest, &q, false) + 4 : 0;
+        float h = line + more + 6;
         if (!draw) return h;
         gs_ui_fill(ui, (gs_rect){ at.x, at.y, 2, h - 4 }, BORDER);
-        gp_rich(ui, (gs_rect){ at.x + pad, at.y, w - time_w, 0 }, text, &q, true);
-        gs_ui_text(ui, (gs_rect){ at.x + pad + w - time_w, at.y, time_w, small * 1.3f }, e->at, small * 0.9f, DIM, 1);
+        char head[400];
+        SDL_snprintf(head, sizeof head, "%.*s%s", (int)SDL_min(first, sizeof head - 8), text, *rest && !e->unfolded ? " …" : "");
+        gs_rect top = { at.x + pad, at.y, w - time_w, line };
+        gs_ui_text(ui, top, head, px, DIM, -1);
+        gs_ui_text(ui, (gs_rect){ at.x + pad + w - time_w, at.y, time_w, line }, e->at, small * 0.9f, DIM, 1);
+        if (!preview && *rest && gs_ui_clicked(ui, (gs_rect){ at.x, at.y, at.w, line })) ((entry *)e)->unfolded = !e->unfolded;
+        if (more) gp_rich(ui, (gs_rect){ at.x + pad, at.y + line + 2, w, 0 }, rest, &q, true);
         return h;
     }
     gp_rich_style style = { e->mine ? small + 1 : px, 11, e->mine ? DIM : (live ? BRIGHT : TEXT), ACCENT, BORDER, (SDL_FColor){ 1, 1, 1, 0.04f },
@@ -1612,6 +1624,10 @@ int main(int argc, char **argv) {
         remember(&a, "Can you check whether the build finished?", "voice", "10:40", true);
         a.reply = NULL;
         remember(&a, "The build finished at 4:12 and all 31 tests passed. I published it and restarted gear on your PC; the notes are at https://github.com/wakamex/gear/blob/main/README.md.\n\nThe transcribe agent found that the production model drifts into English on every long Spanish and French recording it tested, and switching back to base Parakeet fixes it. Trading3's walk-forward test came back positive for large non-vault accounts but failed for vaults.\n\nYou also started prep for something with nine days left, with the progcomp agent planning around Python basics. The fellows agent built a study site, and gear's Android app got a scrollable agent picker with search.", "voice", "10:41", false);
+        remember(&a, "[pending] agent-job -> voice\nRequest ID: 0adc9d1e-a328-58de-b80e-e3b27826e207\n\nJob t54-measure succeeded, exited 0, after 3m.", "voice", "10:42", false);
+        a.history[a.count - 1].quiet = true;
+        remember(&a, "[submitted] agent-job -> voice\nRequest ID: 0adc9d1e-a328-58de-b80e-e3b27826e207\nprompt accepted by Wakterm", "voice", "10:42", false);
+        a.history[a.count - 1].quiet = true, a.history[a.count - 1].unfolded = true;
         if (!SDL_strcmp(argv[3], "pick")) {
             static const char *names[][2] = { { "voice", "voice" }, { "personal_claude", "personal" }, { "gear_claude", "gear" }, { "gesso", "gesso" },
                                               { "hearsay_claude", "hearsay" }, { "hyperliquid_participant_feed_re_claude", "re-opus" }, { "aeroplan_claude", "aeroplan" } };
