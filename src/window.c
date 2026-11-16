@@ -14,7 +14,7 @@
 #include "listen.h"
 #include "models.h"
 #include "pipeline.h"
-#include "relay.h"
+#include "panetone.h"
 #include "say.h"
 #include "pronounce.h"
 #include "speakable.h"
@@ -522,8 +522,11 @@ typedef struct {
     gear_vad *vad;
     gear_hear *hear;
     gear_say *say;
-    gear_relay *relay;
-    gear_relay *earlier[4];  // relays to agents sent to before, kept until the replies they owe are in
+    // The agent talked to, through Panetone: its route, whether its reply is awaited, and the feed it
+    // comes through.
+    char route[128];
+    bool waiting;
+    gear_feed *feed;
     lister *list;            // the agents for the target menu, while it is asked for and after
     gear_pipeline *pipe;
     SDL_AudioStream *mic;
@@ -608,7 +611,7 @@ static void fill(app *a, view *v) {
     bool speaking = a->say && gear_say_busy(a->say);
     double left = gear_pipeline_countdown(a->pipe);
     bool hearing = gear_pipeline_hearing(a->pipe), pending = gear_pipeline_pending(a->pipe);
-    bool waiting = a->relay && gear_relay_waiting(a->relay);
+    bool waiting = a->waiting;
     if (a->muted) v->state = "MUTED", v->state_color = OVER;
     else if (speaking) v->state = "SPEAKING", v->state_color = ACCENT;
     else if (left >= 0) v->state = "SENDING", v->state_color = ACCENT;
@@ -736,8 +739,11 @@ static void deliver(app *a, char *message) {
     printf("> %s\n", message);
     fflush(stdout);
     gear_transcript_add(a->transcript, message, a->to_name);
-    if (a->relay) gear_relay_send(a->relay, message);
-    else {  // no agent: the message is the reply, read back
+    char error[512];
+    if (*a->route) {
+        if (gear_panetone_say(a->route, message, "gear-window", error, sizeof error)) a->waiting = true, a->fault[0] = 0;
+        else SDL_strlcpy(a->fault, error, sizeof a->fault);
+    } else {  // no agent: the message is the reply, read back
         SDL_free(a->reply);
         a->reply = SDL_strdup(message);
         gear_say_speak(a->say, message);
@@ -745,42 +751,30 @@ static void deliver(app *a, char *message) {
     SDL_free(message);
 }
 
-static void take_from(app *a, gear_relay *relay) {
-    char error[512];
-    bool failed;
-    for (char *r; relay && ((r = gear_relay_take(relay, &failed, error, sizeof error)) || failed);) {
-        if (failed) { SDL_strlcpy(a->fault, error, sizeof a->fault); break; }
-        a->fault[0] = 0;
-        printf("%s\n", r);
-        fflush(stdout);
-        SDL_free(a->reply);
-        a->reply = r;
-        char *spoken = gear_pronounce_reply(r);
+// The reply of the agent talked to, through Panetone's feed: the post that ends its turn, shown and
+// read (one shown already, its turn's end having come late, read only). The window shows that
+// conversation alone, so other posts are passed over.
+static void take_replies(app *a) {
+    for (gear_post p; a->feed && gear_feed_next(a->feed, a->route, &p); SDL_free(p.text)) {
+        if (p.kind != GEAR_POST_REPLY) continue;
+        a->waiting = false;
+        if (!p.shown) {
+            printf("%s\n", p.text);
+            fflush(stdout);
+            SDL_free(a->reply);
+            a->reply = SDL_strdup(p.text);
+        }
+        char *spoken = gear_pronounce_reply(p.text);
         gear_say_speak(a->say, spoken);
         SDL_free(spoken);
     }
 }
 
-// Replies from the agent sent to now, and from those sent to before that still owed one.
-static void take_replies(app *a) {
-    take_from(a, a->relay);
-    for (int i = 0; i < 4; i++) {
-        if (!a->earlier[i]) continue;
-        take_from(a, a->earlier[i]);
-        if (!gear_relay_waiting(a->earlier[i])) gear_relay_free(a->earlier[i]), a->earlier[i] = NULL;
-    }
-}
-
 // The agent chosen in the target menu: messages go to it from now on, and a start without --to comes
-// back to it. A reply the agent before still owes is read when it comes.
+// back to it. A reply the agent before still owes goes on to its conversation, in Panetone.
 static void switch_target(app *a, const gear_agent *agent) {
-    if (a->relay && gear_relay_waiting(a->relay)) {
-        int i = 0;
-        while (i < 4 && a->earlier[i]) i++;
-        if (i == 4) gear_relay_free(a->earlier[0]), SDL_memmove(a->earlier, a->earlier + 1, 3 * sizeof *a->earlier), i = 3;
-        a->earlier[i] = a->relay;
-    } else gear_relay_free(a->relay);
-    a->relay = gear_relay_new(agent->name);
+    gear_agent_route(agent, a->route, sizeof a->route);
+    a->waiting = false;
     SDL_strlcpy(a->to_name, agent->name, sizeof a->to_name);
     if (*agent->tab && SDL_strcasecmp(agent->tab, agent->name)) SDL_snprintf(a->target, sizeof a->target, "→ %s (%s, %s)", agent->tab, agent->name, agent->harness);
     else SDL_snprintf(a->target, sizeof a->target, "→ %s (%s)", agent->name, agent->harness);
@@ -847,10 +841,13 @@ static bool open_loop(app *a, char *error, size_t error_size) {
         if (!gear_agent_find(o->to, &agent, error, error_size)) return false;
         // (found, it is where a start without --to goes next time, on the same host)
         if (!o->shot) gear_target_remember(o->models, o->to, gear_agent_host());
-        a->relay = gear_relay_new(agent.name);
+        gear_agent_route(&agent, a->route, sizeof a->route);
         SDL_strlcpy(a->to_name, agent.name, sizeof a->to_name);
         SDL_snprintf(a->target, sizeof a->target, "→ %s (%s)", agent.name, agent.harness);
     } else SDL_strlcpy(a->target, "→ nobody: each message is read back", sizeof a->target);
+    // Panetone's feed, where the agents' answers come, from now on: replies that came while the window
+    // was closed are not read when it opens.
+    if (!o->shot) a->feed = gear_feed_open("", "gear-window");
     const SDL_AudioSpec spec = { SDL_AUDIO_F32, 1, GEAR_RATE };
     if (!(a->mic = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_RECORDING, &spec, NULL, NULL))) { SDL_snprintf(error, error_size, "No microphone: %s", SDL_GetError()); return false; }
     a->muted = o->muted, a->muted_at = SDL_GetTicks();
@@ -931,8 +928,7 @@ static void close_loop(app *a) {
     gear_transcript_close(a->transcript);
     gs_loopback_close(a->loopback);
     gear_vad_free(a->vad);
-    gear_relay_free(a->relay);
-    for (int i = 0; i < 4; i++) gear_relay_free(a->earlier[i]);
+    gear_feed_close(a->feed);
     if (a->list) SDL_WaitThread(a->list->thread, NULL), SDL_free(a->list);
     gear_say_close(a->say);
     if (a->say) gs_mix_close();
@@ -1027,7 +1023,7 @@ int gear_window(const gear_window_options *o) {
             // Busy: reading a reply, hearing or transcribing speech, a message not yet sent, or a
             // reply still awaited; gs_update_due also waits for two minutes without a key or click.
             busy |= reading || gear_pipeline_countdown(a.pipe) >= 0 || gear_pipeline_hearing(a.pipe) || gear_pipeline_pending(a.pipe) ||
-                    *gear_pipeline_text(a.pipe) || (a.relay && gear_relay_waiting(a.relay));
+                    *gear_pipeline_text(a.pipe) || a.waiting;
         }
         if (gs_update_due(a.update, busy, input_at)) restart = true, running = false;
         // Drawn twenty times a second: the meter and countdown move by themselves.

@@ -4,7 +4,6 @@
 #include "gs_http.h"
 #include "gs_json.h"
 #ifndef _WIN32
-#include <poll.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -96,7 +95,7 @@ static char *read_answer(SDL_Process *p, size_t *len, int *exit, bool *ended) {
 // With GEAR_WAKTERM_HOST, the command runs there through ssh as one shell line. Its output goes to a
 // file that is then printed: wakterm's prompt admission leaves the SSH session's output open after it
 // exits, and the ssh client would wait on it.
-static char *run(const char *const *argv, const char *input, size_t *len, int *code) {
+char *gear_host_run(const char *const *argv, const char *input, size_t *len, int *code) {
     const char *remote[5] = { "ssh", "-T", host(), NULL, NULL };  // -T: no terminal, which would stay open
     char *line = NULL;
     if (remote[2]) {
@@ -135,7 +134,7 @@ static char *run(const char *const *argv, const char *input, size_t *len, int *c
 static gs_json *run_json(const char *const *argv, const char *input, char *error, size_t error_size) {
     size_t len = 0;
     int code = 0;
-    char *out = run(argv, input, &len, &code);
+    char *out = gear_host_run(argv, input, &len, &code);
     if (!out) { SDL_snprintf(error, error_size, "Could not run %s: %s", argv[0], SDL_GetError()); return NULL; }
     gs_json *doc = code == 0 ? gs_json_parse(out, len) : NULL;
     if (!doc) SDL_snprintf(error, error_size, "%s %s %s failed (exit %d)", argv[0], argv[3], argv[4], code);
@@ -148,9 +147,8 @@ static void copy(char *dst, size_t size, gs_jv v) { SDL_strlcpy(dst, gs_json_str
 // ---- endchat ----
 
 // endchat's profiles (https://github.com/wakamex/endchat), each a chat with an agent in ~/.endchat/NAME,
-// served by `endchat serve NAME` on the profile's control.sock. Its agent is reached through that
-// socket rather than through Wakterm, and posts each message it writes through Panetone, which gear's
-// hub follows, so gear only hands a message over (gear_agent_replies says so).
+// served by `endchat serve NAME` on the profile's control.sock: listed while served, named for the
+// profile, which is also its route's title in Panetone.
 
 #ifndef _WIN32
 // A connection to the profile's control socket, or -1 when nothing serves it.
@@ -194,52 +192,11 @@ static int endchat_agents(gear_agent *out, int n, int max) {
     return n;
 }
 
-// `say` on the profile's socket, as Panetone sends it: refused with an answer of ok false, or taken
-// when it answers otherwise, or keeps working past 5 s (a turn under way).
-static bool endchat_say(const gear_agent *a, const char *text, char *error, size_t error_size) {
-    int fd = endchat_connect(a->id);
-    if (fd < 0) { SDL_snprintf(error, error_size, "endchat is not serving %s", a->name); return false; }
-    gs_jval *o = gs_jval_object();
-    gs_jval_set(o, "cmd", gs_jval_str("say"));
-    gs_jval_set(o, "text", gs_jval_str(text));
-    char *json = gs_jval_write(o, false);
-    gs_jval_free(o);
-    size_t len = SDL_strlen(json);
-    json = SDL_realloc(json, len + 2), json[len++] = '\n';
-    bool ok = write(fd, json, len) == (ssize_t)len;
-    SDL_free(json);
-    if (!ok) { SDL_snprintf(error, error_size, "could not write to %s's endchat", a->name); close(fd); return false; }
-    char answer[2048];
-    size_t got = 0;
-    struct pollfd p = { .fd = fd, .events = POLLIN };
-    Uint64 until = SDL_GetTicks() + 5000;
-    while (got < sizeof answer - 1 && !memchr(answer, '\n', got)) {
-        int left = (int)(until - SDL_GetTicks());
-        if (left <= 0 || poll(&p, 1, left) <= 0) break;
-        ssize_t r = read(fd, answer + got, sizeof answer - 1 - got);
-        if (r <= 0) break;
-        got += (size_t)r;
-    }
-    close(fd);
-    answer[got] = 0;
-    gs_json *doc = got ? gs_json_parse(answer, strcspn(answer, "\n")) : NULL;
-    bool refused = doc && gs_json_get(gs_json_root(doc), "ok") && !gs_json_bool(gs_json_get(gs_json_root(doc), "ok"), true);
-    if (refused) SDL_snprintf(error, error_size, "%s's endchat refused the message: %s", a->name, gs_json_str(gs_json_get(gs_json_root(doc), "text"), ""));
-    gs_json_free(doc);
-    return !refused;
-}
 #else
 static int endchat_agents(gear_agent *out, int n, int max) { (void)out, (void)max; return n; }
-static bool endchat_say(const gear_agent *a, const char *text, char *error, size_t error_size) {
-    (void)a, (void)text;
-    SDL_snprintf(error, error_size, "endchat is reached on Unix systems only");
-    return false;
-}
 #endif
 
 static bool is_endchat(const gear_agent *a) { return !SDL_strcmp(a->harness, "endchat"); }
-
-bool gear_agent_replies(const gear_agent *a) { return !is_endchat(a); }
 
 int gear_agents_list(gear_agent *out, int max, char *error, size_t error_size) {
     const char *argv[] = { wakterm(), "cli", "--no-auto-start", "agent", "catalog", NULL };
@@ -294,51 +251,14 @@ bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t erro
     return found;
 }
 
-// A random (version 4) UUID, for a request id.
-static void uuid(char out[37]) {
-    Uint8 b[16];
-    for (int i = 0; i < 16; i++) b[i] = (Uint8)SDL_rand_bits();
-    b[6] = (Uint8)((b[6] & 0x0f) | 0x40);
-    b[8] = (Uint8)((b[8] & 0x3f) | 0x80);
-    SDL_snprintf(out, 37, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
-}
-
-gear_send_result gear_agent_send(const gear_agent *a, const char *text, char request_id[37], char *error, size_t error_size) {
-    static bool seeded;
-    if (!seeded) { SDL_srand(0); seeded = true; }
-    uuid(request_id);
-    if (is_endchat(a)) return endchat_say(a, text, error, error_size) ? GEAR_SENT : GEAR_SEND_FAILED;
-    // Locally the text goes on standard input, so nothing said shows in the process list. Over SSH it
-    // is the last argument: the Windows ssh client never passes on the end of piped input.
-    bool ssh = host() != NULL;
-    const char *argv[] = { wakterm(), "cli", "--no-auto-start", "agent", "admit", "--exact-agent-id", "--incarnation", a->incarnation, "--request-id", request_id, "--return-final", a->id, ssh ? text : NULL, NULL };
-    gs_json *doc = run_json(argv, ssh ? NULL : text, error, error_size);
-    if (!doc) return GEAR_SEND_FAILED;
-    // A refusal still exits 0: the answer says whether the prompt was written, and why not.
-    gs_jv r = gs_json_root(doc);
-    bool written = gs_json_bool(gs_json_get(r, "prompt_written"), false);
-    bool busy = !SDL_strcmp(gs_json_str(gs_json_get(r, "status"), ""), "busy");
-    if (!written) SDL_snprintf(error, error_size, "%s did not take the message: %s", a->name, gs_json_str(gs_json_get(r, "detail"), gs_json_str(gs_json_get(r, "status"), "no reason given")));
-    gs_json_free(doc);
-    return written ? GEAR_SENT : busy ? GEAR_SEND_BUSY : GEAR_SEND_FAILED;
-}
-
-gear_reply_state gear_agent_reply(const char *request_id, char **reply, char *error, size_t error_size) {
-    *reply = NULL;
-    const char *argv[] = { wakterm(), "cli", "--no-auto-start", "agent", "request", "get", request_id, NULL };
-    gs_json *doc = run_json(argv, NULL, error, error_size);
-    if (!doc) return GEAR_REPLY_FAILED;
-    gs_jv r = gs_json_root(doc);
-    const char *state = gs_json_str(gs_json_get(r, "state"), "");
-    gear_reply_state s = GEAR_REPLY_PENDING;
-    if (!SDL_strcmp(state, "completed")) {
-        *reply = SDL_strdup(gs_json_str(gs_json_get(r, "final_message"), ""));
-        s = GEAR_REPLY_DONE;
-    } else if (!SDL_strcmp(state, "failed") || !SDL_strcmp(state, "cancelled") || !SDL_strcmp(state, "timed_out") || !SDL_strcmp(state, "expired")) {
-        const char *detail = gs_json_str(gs_json_get(r, "detail"), "");
-        SDL_snprintf(error, error_size, "The agent's reply %s%s%s", state, *detail ? ": " : "", detail);
-        s = GEAR_REPLY_FAILED;
-    }
-    gs_json_free(doc);
-    return s;
+void gear_agent_route(const gear_agent *a, char *out, size_t size) {
+    SDL_strlcpy(out, a->name, size);
+    if (a->tab[0]) { SDL_strlcpy(out, a->tab, size); return; }
+    gear_agent all[256];
+    char error[256];
+    int n = gear_agents_list(all, 256, error, sizeof error);
+    if (n <= 0) return;
+    gear_agent_tabs(all, n);
+    for (int i = 0; i < n; i++)
+        if (!SDL_strcmp(all[i].name, a->name) && all[i].tab[0]) SDL_strlcpy(out, all[i].tab, size);
 }

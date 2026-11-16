@@ -9,7 +9,7 @@ const std = @import("std");
 const gesso_build = @import("gesso");
 
 const flags: []const []const u8 = &.{ "-std=c11", "-Wall", "-Wextra", "-Wno-unused-parameter", "-Wno-missing-field-initializers" };
-const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "serve.c", "wav.c", "pipeline.c", "agent.c", "relay.c", "record.c", "speakable.c", "pronounce.c", "panetone.c", "speech.c", "transcript.c", "vad.c", "window.c" };
+const sources: []const []const u8 = &.{ "models.c", "listen.c", "hear.c", "say.c", "serve.c", "wav.c", "pipeline.c", "agent.c", "record.c", "speakable.c", "pronounce.c", "panetone.c", "speech.c", "transcript.c", "vad.c", "window.c" };
 
 // The phone app's own sources (src/phone), and what it needs of mbedTLS: its cryptography, for libssh2
 // and the phone's key, without TLS and certificates.

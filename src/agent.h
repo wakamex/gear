@@ -1,8 +1,7 @@
-// Coding agents reached through Wakterm's Agent API, and endchat's profiles (below), by running the wakterm command (GEAR_WAKTERM
-// names another; GEAR_WAKTERM_HOST runs it on another machine through ssh): its catalog for the agents there are, `agent admit --return-final` to send a
-// message as a prompt, and `agent request get` for the agent's final reply to it. Wakterm knows each
-// harness (Claude Code, Codex, ...), so gear has no logic for any one agent. Each call starts a
-// process and waits for it: call these from a worker thread or a command-line mode.
+// The user's coding agents: Wakterm's, from its catalog (`wakterm cli agent catalog`, GEAR_WAKTERM
+// naming another command), and endchat's profiles (below), on this machine or on another through ssh
+// (GEAR_WAKTERM_HOST). Messages to them go through Panetone (panetone.h). Each call starts a process
+// and waits for it: call these from a worker thread or a command-line mode.
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
@@ -21,22 +20,14 @@ void gear_agent_tabs(gear_agent *agents, int n);
 // The live agent called `name`, or else the one running in a tab titled `name`. False with the
 // reason in `error`.
 bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t error_size);
-// Sends `text` to the agent as a prompt and asks for its final reply, under a new request id
-// written to `request_id`. GEAR_SEND_BUSY when the agent is in the middle of a turn, which Wakterm
-// refuses (a Claude Code or Codex agent takes a prompt only while waiting for the user), to be tried
-// again once it is done; GEAR_SEND_FAILED for any other refusal; each with the reason in `error`.
-typedef enum { GEAR_SENT, GEAR_SEND_BUSY, GEAR_SEND_FAILED } gear_send_result;
-gear_send_result gear_agent_send(const gear_agent *a, const char *text, char request_id[37], char *error, size_t error_size);
+// The title of Panetone's route for the agent, which is its tab's (an endchat profile's name), or its
+// name when its tab has none: where gear sends to it and what names its conversation.
+void gear_agent_route(const gear_agent *a, char *out, size_t size);
 
-// Whether the agent's reply comes back through gear_agent_reply. An endchat profile's agent (listed with
-// Wakterm's, harness "endchat", status "busy" or "idle") posts each message it writes through Panetone
-// instead, which gear's hub follows: it is only handed the message.
-bool gear_agent_replies(const gear_agent *a);
-
-typedef enum { GEAR_REPLY_PENDING, GEAR_REPLY_DONE, GEAR_REPLY_FAILED } gear_reply_state;
-// Where the request stands. DONE sets *reply to the agent's final message (SDL_free it); FAILED
-// puts the reason in `error`.
-gear_reply_state gear_agent_reply(const char *request_id, char **reply, char *error, size_t error_size);
+// Runs the command here, or on the agents' machine (gear_agent_host) through ssh, with `input` on
+// its standard input here; what it wrote to its standard output (SDL_free it), or NULL when it could
+// not start. *code is its exit code.
+char *gear_host_run(const char *const *argv, const char *input, size_t *len, int *code);
 
 // The machine wakterm runs on over SSH: GEAR_WAKTERM_HOST, else the one set here (a remembered
 // target's), else NULL for this machine.

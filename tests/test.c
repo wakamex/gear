@@ -8,7 +8,7 @@
 #include "hear.h"
 #include "listen.h"
 #include "models.h"
-#include "relay.h"
+#include "panetone.h"
 #include "pipeline.h"
 #include "say.h"
 #include "pronounce.h"
@@ -404,33 +404,40 @@ static void test_transcript(const char *tmp) {
     SDL_RemovePath(path);
 }
 
-// Against the real wakterm, with an agent that does not exist, so nothing is delivered: the refusal
-// (which wakterm reports with exit code 0) must come back as a failure with its reason.
+// Against the real Panetone, to a route that does not exist, so nothing is delivered: the refusal
+// must come back as a failure with its reason; and an agent that does not exist is not found.
 static void test_agent_refused(void) {
-    char error[512], id[37];
-    gear_agent nobody = { .name = "nobody", .id = "gear-test-no-such-agent", .incarnation = "none" };
-    bool sent = gear_agent_send(&nobody, "test", id, error, sizeof error) == GEAR_SENT;
-    if (SDL_strstr(error, "Could not run")) { printf("agent test skipped: %s\n", error); return; }
+    char error[512];
+    bool sent = gear_panetone_say("gear-test-no-such-route", "test", "gear-test", error, sizeof error);
+    if (SDL_strstr(error, "could not run")) { printf("panetone test skipped: %s\n", error); return; }
     CHECK(!sent);
-    CHECK(SDL_strstr(error, "not available") != NULL);
+    CHECK(SDL_strstr(error, "not_found") || SDL_strstr(error, "not found"));
     gear_agent found;
     CHECK(!gear_agent_find("gear-test-no-such-agent", &found, error, sizeof error));
 }
 
-// A real round trip, when GEAR_AGENT names an agent kept for tests: a message out, its reply back.
+// A real round trip, when GEAR_AGENT names an agent kept for tests: a message out through Panetone,
+// the reply ending its turn back through the feed.
 static void test_agent_round_trip(const char *name) {
-    char error[512];
+    char error[512], route[128];
     gear_agent a;
     CHECK(gear_agent_find(name, &a, error, sizeof error));
-    if (!a.id[0]) { fprintf(stderr, "%s\n", error); return; }
-    gear_relay *r = gear_relay_new(a.name);
-    gear_relay_send(r, "Reply with exactly the word ready.");
+    if (!a.name[0]) { fprintf(stderr, "%s\n", error); return; }
+    gear_agent_route(&a, route, sizeof route);
+    gear_feed *feed = gear_feed_open("", "gear-test");
+    SDL_Delay(1000);
     char *reply = NULL;
-    bool failed = false;
-    Uint64 deadline = SDL_GetTicks() + 120000;
-    while (!(reply = gear_relay_take(r, &failed, error, sizeof error)) && !failed && SDL_GetTicks() < deadline) SDL_Delay(100);
-    gear_relay_free(r);
-    if (failed) fprintf(stderr, "%s\n", error);
+    if (gear_panetone_say(route, "Reply with exactly the word ready.", "gear-test", error, sizeof error)) {
+        Uint64 deadline = SDL_GetTicks() + 120000;
+        while (!reply && SDL_GetTicks() < deadline) {
+            gear_post p;
+            while (!reply && gear_feed_next(feed, route, &p))
+                if (p.kind == GEAR_POST_REPLY) reply = p.text;
+                else SDL_free(p.text);
+            SDL_Delay(100);
+        }
+    } else fprintf(stderr, "%s\n", error);
+    gear_feed_close(feed);
     CHECK(reply && SDL_strcasestr(reply, "ready"));
     printf("%s replied: %s\n", name, reply ? reply : "(nothing)");
     SDL_free(reply);

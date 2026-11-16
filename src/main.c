@@ -13,7 +13,7 @@
 #include "listen.h"
 #include "models.h"
 #include "pipeline.h"
-#include "relay.h"
+#include "panetone.h"
 #include "say.h"
 #include "serve.h"
 #include "pronounce.h"
@@ -127,20 +127,21 @@ static int agents(const char *name) {
     return 0;
 }
 
+// The message through Panetone, and the reply that ends the agent's turn from its feed, which is
+// followed from a second before the message goes.
 static int send_text(const char *text) {
     gear_agent a;
-    char error[512];
+    char error[512], route[128];
     if (!opt.to) { fputs("gear: send needs --to AGENT\n", stderr); return 2; }
     if (!gear_agent_find(opt.to, &a, error, sizeof error)) { fprintf(stderr, "gear: %s\n", error); return 1; }
-    gear_relay *r = gear_relay_new(a.name);
-    gear_relay_send(r, text);
-    char *reply = NULL;
-    bool failed = false;
-    while (!(reply = gear_relay_take(r, &failed, error, sizeof error)) && !failed) SDL_Delay(100);
-    gear_relay_free(r);
-    if (failed) { fprintf(stderr, "gear: %s\n", error); return 1; }
-    printf("%s\n", reply);
-    SDL_free(reply);
+    gear_agent_route(&a, route, sizeof route);
+    gear_feed *feed = gear_feed_open("", "gear-cli");
+    SDL_Delay(1000);
+    if (!gear_panetone_say(route, text, "gear-cli", error, sizeof error)) { fprintf(stderr, "gear: %s\n", error); gear_feed_close(feed); return 1; }
+    for (bool done = false; !done; SDL_Delay(100))
+        for (gear_post p; !done && gear_feed_next(feed, route, &p); SDL_free(p.text))
+            if (p.kind == GEAR_POST_REPLY) printf("%s\n", p.text), done = true;
+    gear_feed_close(feed);
     return 0;
 }
 
@@ -170,15 +171,17 @@ static int listen_live(void) {
     gear_hear *hear = open_hear(dir);
     gear_say *say = NULL;
     if (!hear) return 1;
-    gear_relay *relay = NULL;
+    gear_feed *feed = NULL;  // the answers of the agent talked to, through Panetone
+    char route[128] = "";
     if (opt.to) {
         gear_agent a;
         char error[512];
         if (!gear_agent_find(opt.to, &a, error, sizeof error)) { fprintf(stderr, "gear: %s\n", error); return 1; }
-        relay = gear_relay_new(a.name);
+        gear_agent_route(&a, route, sizeof route);
+        feed = gear_feed_open("", "gear-cli");
         fprintf(stderr, "gear: talking to %s (%s)\n", a.name, a.harness);
     }
-    if (opt.speak_back || relay) {
+    if (opt.speak_back || feed) {
         if (!gs_mix_open(MIX_RATE)) { fprintf(stderr, "gear: no playback device: %s\n", SDL_GetError()); return 1; }
         if (!(say = open_say(dir, !opt.no_echo && gs_voice_has_echo() ? voice : NULL))) return 1;
     }
@@ -213,26 +216,23 @@ static int listen_live(void) {
         if (message) {
             printf("> %s\n", message);
             fflush(stdout);
-            if (relay) gear_relay_send(relay, message);
-            else if (say) gear_say_speak(say, message);
+            char error[512];
+            if (feed && !gear_panetone_say(route, message, "gear-cli", error, sizeof error)) fprintf(stderr, "gear: %s\n", error);
+            else if (!feed && say) gear_say_speak(say, message);
             SDL_free(message);
         }
-        char error[512];
-        bool failed;
-        for (char *reply; relay && ((reply = gear_relay_take(relay, &failed, error, sizeof error)) || failed);) {
-            if (failed) { fprintf(stderr, "gear: %s\n", error); break; }
-            printf("%s\n", reply);
-            fflush(stdout);
-            char *spoken = gear_pronounce_reply(reply);
+        for (gear_post r; feed && gear_feed_next(feed, route, &r); SDL_free(r.text)) {
+            if (r.kind != GEAR_POST_REPLY) continue;
+            if (!r.shown) printf("%s\n", r.text), fflush(stdout);
+            char *spoken = gear_pronounce_reply(r.text);
             gear_say_speak(say, spoken);
             SDL_free(spoken);
-            SDL_free(reply);
         }
         SDL_Delay(10);
     }
     gear_pipeline_free(p);
     gear_vad_free(vad);
-    gear_relay_free(relay);
+    gear_feed_close(feed);
     SDL_DestroyAudioStream(mic);
     gear_say_close(say);
     gear_hear_close(hear);
