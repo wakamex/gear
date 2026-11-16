@@ -1076,6 +1076,18 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
             gs_ui_text(ui, gs_inset(box, 8), "type a message", small, DIM, -1);
         } else {
             gs_ui_textarea(ui, box, "compose", a->typed, sizeof a->typed, "type a message");
+            // Where the box's cursor is, sent to the computer's phone-debug.log each time it or the text
+            // changes ('D'), for finding where a caret drawn at the end comes from.
+            static int was_from = -1, was_to = -1;
+            static size_t was_len;
+            int from = 0, to = 0;
+            gs_ui_textarea_selection(ui, "compose", &from, &to);
+            if (typing && (from != was_from || to != was_to || SDL_strlen(a->typed) != was_len) && a->link) {
+                char line[4200];
+                SDL_snprintf(line, sizeof line, "compose from=%d to=%d len=%d text=%s", from, to, (int)SDL_strlen(a->typed), a->typed);
+                gp_link_send(a->link, 'D', line, (uint32_t)SDL_strlen(line));
+                was_from = from, was_to = to, was_len = SDL_strlen(a->typed);
+            }
             bool any = a->typed[0] != 0;
             gs_ui_round(ui, send, 6, any ? ACCENT : RAISED);
             gs_ui_text(ui, send, "send", px, any ? BACKGROUND : DIM, 0);

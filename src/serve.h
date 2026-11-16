@@ -10,6 +10,7 @@
 //   'U' a message to speak (UTF-8), in place of what is being spoken: its speech comes as a reply's
 //   'W' the same as 'U' without the words taught ('Y'): how the speech says it by itself
 //   'J' a word, to ask how it is said: answered with 'J'
+//   'D' a line for finding a fault (UTF-8), kept in phone-debug.log in gear's data folder
 //   'Y' {"word", "say"}: the word taught to be said so from now on (an empty "say" forgets it), or ""
 //       to ask for the list; answered with 'Y'
 //   'L' the agents there are, answered with 'G'

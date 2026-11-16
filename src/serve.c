@@ -641,6 +641,15 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'M':  // a message typed: sent as one said
                 if (*f->data) deliver_text(&s, f->data);
                 break;
+            case 'D': {  // a line from the phone, for finding a fault: kept in phone-debug.log
+                char *pref = SDL_GetPrefPath("wakamex", "gear"), at[8], file[1100];
+                SDL_snprintf(file, sizeof file, "%sphone-debug.log", pref ? pref : "");
+                SDL_free(pref);
+                stamp(at);
+                SDL_IOStream *io = SDL_IOFromFile(file, "ab");
+                if (io) SDL_IOprintf(io, "%s %s\n", at, f->data), SDL_CloseIO(io);
+                break;
+            }
             case 'J': {  // a word to say rightly: how it is taught to be said, and CMUdict's way
                 char said[128] = "", suggested[128] = "";
                 gear_pronounce_get(f->data, said, sizeof said);
