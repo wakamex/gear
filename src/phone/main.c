@@ -1170,7 +1170,8 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         gs_rect pill = { r.x + r.w - w - 8, r.y + r.h - h - 8, w, h };
         gs_ui_round(ui, pill, h / 2, ACCENT);
         gs_ui_text(ui, pill, "copy", small, BACKGROUND, 0);
-        if (gs_ui_clicked(ui, pill)) gs_clipboard_set(gp_rich_selection()), gp_rich_unselect();
+        // (the button, or Copy in Android's toolbar over the selection, which comes as Ctrl+C)
+        if (gs_ui_clicked(ui, pill) || gs_ui_key(ui, SDLK_C, SDL_KMOD_CTRL)) gs_clipboard_set(gp_rich_selection()), gp_rich_unselect();
         copy_area = pill;
     } else copy_area = (gs_rect){ 0 };
     // Scrolled away from what is being heard: a button to follow it again.
