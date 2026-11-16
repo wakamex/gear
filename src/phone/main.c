@@ -441,7 +441,7 @@ static void take_frames(app *a) {
         case 'M':
             add_message(a, data, here(a), true);
             SDL_free(a->said), a->said = NULL, a->note[0] = 0, a->left = -1;
-            if (a->always) a->mood = THINKING;
+            if (a->always && a->mood != SPEAKING) a->mood = THINKING;  // (what is being spoken goes on)
             break;
         case 'R':
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0, a->audio_at = SDL_GetTicks();
@@ -1003,7 +1003,7 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
 
 // The talk screen of the conversation `key`: the open one, or with `preview` set, the one beside it.
 static gs_rect follow_area;  // the button to follow what is heard again, when it shows
-static gs_rect compose_area;  // the box to type in, a press on which stops what is being spoken
+static gs_rect compose_area;  // the box to type in and its send button
 static gs_rect chat_area;  // where the open conversation's page and the box to type in were, which a swipe does not start on
 
 // The typed message, to the agent of the open conversation: shown when the computer sends it back ('M').
@@ -1640,9 +1640,6 @@ int main(int argc, char **argv) {
             a.following = false;
         // A press outside the box to type in (and its send button) puts the keyboard away.
         if (went_down && !a.setup && !a.picking && !gs_rect_contains(compose_area, press_x, press_y) && gs_ui_focused(ui, "compose")) gs_ui_focus(ui, NULL);
-        // A press in the box to type in stops what is being spoken, as typing over it would.
-        if (went_down && !a.setup && !a.picking && gs_rect_contains(compose_area, press_x, press_y) && (a.saying || a.mood == SPEAKING) && a.link)
-            gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
         tapped_outside = a.picking && went_up && !moved && !gs_rect_contains(picker_area, press_x, press_y);
         if (a.setup) setup_screen(ui, &a, area);
         else {
