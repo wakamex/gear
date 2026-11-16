@@ -1,4 +1,4 @@
-// Coding agents reached through Wakterm's Agent API, by running the wakterm command (GEAR_WAKTERM
+// Coding agents reached through Wakterm's Agent API, and endchat's profiles (below), by running the wakterm command (GEAR_WAKTERM
 // names another; GEAR_WAKTERM_HOST runs it on another machine through ssh): its catalog for the agents there are, `agent admit --return-final` to send a
 // message as a prompt, and `agent request get` for the agent's final reply to it. Wakterm knows each
 // harness (Claude Code, Codex, ...), so gear has no logic for any one agent. Each call starts a
@@ -24,6 +24,11 @@ bool gear_agent_find(const char *name, gear_agent *out, char *error, size_t erro
 // Sends `text` to the agent as a prompt and asks for its final reply, under a new request id
 // written to `request_id`. False with the reason in `error`.
 bool gear_agent_send(const gear_agent *a, const char *text, char request_id[37], char *error, size_t error_size);
+
+// Whether the agent's reply comes back through gear_agent_reply. An endchat profile's agent (listed with
+// Wakterm's, harness "endchat", status "busy" or "idle") posts each message it writes through Panetone
+// instead, which gear's hub follows: it is only handed the message.
+bool gear_agent_replies(const gear_agent *a);
 
 typedef enum { GEAR_REPLY_PENDING, GEAR_REPLY_DONE, GEAR_REPLY_FAILED } gear_reply_state;
 // Where the request stands. DONE sets *reply to the agent's final message (SDL_free it); FAILED

@@ -264,15 +264,21 @@ static void words(server *s, gear_pipeline *p) {
 
 // The title of the tab the agent `name` runs in, which names its conversation on the phone (and its
 // Panetone route); the name itself when there is no such tab.
+static bool target_posts;  // the agent sent to now replies through Panetone (an endchat profile's)
+
 static void tab_of(const char *name, char *out, size_t size) {
     gear_agent all[256];
     char error[256];
     int n = gear_agents_list(all, 256, error, sizeof error);
     SDL_strlcpy(out, name, size);
+    target_posts = false;
     if (n <= 0 || !*name) return;
     gear_agent_tabs(all, n);
     for (int i = 0; i < n; i++)
-        if (!SDL_strcmp(all[i].name, name) && all[i].tab[0]) SDL_strlcpy(out, all[i].tab, size);
+        if (!SDL_strcmp(all[i].name, name)) {
+            if (all[i].tab[0]) SDL_strlcpy(out, all[i].tab, size);
+            target_posts = !gear_agent_replies(&all[i]);
+        }
 }
 
 static char target_tab[128];  // the conversation of the agent sent to now
@@ -806,9 +812,16 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             if (p) posts = p->next;
             SDL_UnlockMutex(posts_lock);
             if (!p) break;
-            if (!already_given(p->text)) {
-                log_message(&s, p->who, p->at, false, !SDL_strcmp(p->kind, "request") || !SDL_strcmp(p->kind, "notice"), p->text, true);
-            }
+            bool quiet = !SDL_strcmp(p->kind, "request") || !SDL_strcmp(p->kind, "notice");
+            if (already_given(p->text)) {
+            } else if (!quiet && target_posts && !SDL_strcmp(p->who, target_tab)) {
+                // What the agent sent to now writes, when its replies come this way: a reply, shown and
+                // spoken as one (sent as text alone to a phone in the background).
+                send_text(&s, 'R', p->text);
+                log_message(&s, p->who, p->at, false, false, p->text, false);
+                if (frames_out && !s.background) speak(&s, p->text);
+            } else
+                log_message(&s, p->who, p->at, false, quiet, p->text, true);
             char seq[32];
             SDL_snprintf(seq, sizeof seq, "%lld", p->seq);
             SDL_SaveFile(seq_path, seq, SDL_strlen(seq));

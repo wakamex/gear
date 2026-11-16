@@ -55,6 +55,13 @@ static int run(void *user) {
         SDL_free(m->text);
         SDL_free(m);
         if (!sent) { deliver(r, SDL_strdup(error), true); continue; }
+        // An agent whose replies come another way (endchat's, through Panetone) owes none here.
+        if (!gear_agent_replies(&agent)) {
+            SDL_LockMutex(r->lock);
+            r->waiting--;
+            SDL_UnlockMutex(r->lock);
+            continue;
+        }
         // The agent works for seconds to minutes; asking twice a second costs a short process each time.
         for (;;) {
             if (quitting(r)) return 0;

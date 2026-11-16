@@ -1,7 +1,14 @@
 #include "agent.h"
 #include <SDL3/SDL.h>
+#include <string.h>
 #include "gs_http.h"
 #include "gs_json.h"
+#ifndef _WIN32
+#include <poll.h>
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
+#endif
 
 static const char *wakterm(void) {
     const char *w = SDL_getenv("GEAR_WAKTERM");
@@ -138,6 +145,102 @@ static gs_json *run_json(const char *const *argv, const char *input, char *error
 
 static void copy(char *dst, size_t size, gs_jv v) { SDL_strlcpy(dst, gs_json_str(v, ""), size); }
 
+// ---- endchat ----
+
+// endchat's profiles (https://github.com/wakamex/endchat), each a chat with an agent in ~/.endchat/NAME,
+// served by `endchat serve NAME` on the profile's control.sock. Its agent is reached through that
+// socket rather than through Wakterm, and posts each message it writes through Panetone, which gear's
+// hub follows, so gear only hands a message over (gear_agent_replies says so).
+
+#ifndef _WIN32
+// A connection to the profile's control socket, or -1 when nothing serves it.
+static int endchat_connect(const char *profile) {
+    struct sockaddr_un at = { .sun_family = AF_UNIX };
+    if (SDL_snprintf(at.sun_path, sizeof at.sun_path, "%s/control.sock", profile) >= (int)sizeof at.sun_path) return -1;
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd >= 0 && connect(fd, (struct sockaddr *)&at, sizeof at) != 0) close(fd), fd = -1;
+    return fd;
+}
+
+// Each profile served now, as agents after `n` of `max` (named for the profile, in a "tab" of that name,
+// which is also its route's in Panetone), busy while its state.json says a turn runs.
+static int endchat_agents(gear_agent *out, int n, int max) {
+    const char *home = SDL_getenv("HOME");
+    char dir[1024];
+    if (!home || host()) return n;  // (its profiles are on this machine)
+    SDL_snprintf(dir, sizeof dir, "%s/.endchat", home);
+    int count = 0;
+    char **names = SDL_GlobDirectory(dir, "*", 0, &count);
+    for (int i = 0; names && i < count && n < max; i++) {
+        char profile[1200], state[1300];
+        SDL_snprintf(profile, sizeof profile, "%s/%s", dir, names[i]);
+        int fd = endchat_connect(profile);
+        if (fd < 0) continue;
+        close(fd);
+        gear_agent *g = &out[n++];
+        SDL_zerop(g);
+        SDL_strlcpy(g->name, names[i], sizeof g->name);
+        SDL_strlcpy(g->id, profile, sizeof g->id);
+        SDL_strlcpy(g->harness, "endchat", sizeof g->harness);
+        SDL_snprintf(state, sizeof state, "%s/state.json", profile);
+        char *text = SDL_LoadFile(state, NULL);
+        gs_json *doc = text ? gs_json_parse(text, SDL_strlen(text)) : NULL;
+        SDL_strlcpy(g->status, doc && gs_json_bool(gs_json_get(gs_json_root(doc), "busy"), false) ? "busy" : "idle", sizeof g->status);
+        gs_json_free(doc), SDL_free(text);
+        SDL_strlcpy(g->tab, g->name, sizeof g->tab);
+        g->pane = -1;
+    }
+    SDL_free(names);
+    return n;
+}
+
+// `say` on the profile's socket, as Panetone sends it: refused with an answer of ok false, or taken
+// when it answers otherwise, or keeps working past 5 s (a turn under way).
+static bool endchat_say(const gear_agent *a, const char *text, char *error, size_t error_size) {
+    int fd = endchat_connect(a->id);
+    if (fd < 0) { SDL_snprintf(error, error_size, "endchat is not serving %s", a->name); return false; }
+    gs_jval *o = gs_jval_object();
+    gs_jval_set(o, "cmd", gs_jval_str("say"));
+    gs_jval_set(o, "text", gs_jval_str(text));
+    char *json = gs_jval_write(o, false);
+    gs_jval_free(o);
+    size_t len = SDL_strlen(json);
+    json = SDL_realloc(json, len + 2), json[len++] = '\n';
+    bool ok = write(fd, json, len) == (ssize_t)len;
+    SDL_free(json);
+    if (!ok) { SDL_snprintf(error, error_size, "could not write to %s's endchat", a->name); close(fd); return false; }
+    char answer[2048];
+    size_t got = 0;
+    struct pollfd p = { .fd = fd, .events = POLLIN };
+    Uint64 until = SDL_GetTicks() + 5000;
+    while (got < sizeof answer - 1 && !memchr(answer, '\n', got)) {
+        int left = (int)(until - SDL_GetTicks());
+        if (left <= 0 || poll(&p, 1, left) <= 0) break;
+        ssize_t r = read(fd, answer + got, sizeof answer - 1 - got);
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    close(fd);
+    answer[got] = 0;
+    gs_json *doc = got ? gs_json_parse(answer, strcspn(answer, "\n")) : NULL;
+    bool refused = doc && gs_json_get(gs_json_root(doc), "ok") && !gs_json_bool(gs_json_get(gs_json_root(doc), "ok"), true);
+    if (refused) SDL_snprintf(error, error_size, "%s's endchat refused the message: %s", a->name, gs_json_str(gs_json_get(gs_json_root(doc), "text"), ""));
+    gs_json_free(doc);
+    return !refused;
+}
+#else
+static int endchat_agents(gear_agent *out, int n, int max) { (void)out, (void)max; return n; }
+static bool endchat_say(const gear_agent *a, const char *text, char *error, size_t error_size) {
+    (void)a, (void)text;
+    SDL_snprintf(error, error_size, "endchat is reached on Unix systems only");
+    return false;
+}
+#endif
+
+static bool is_endchat(const gear_agent *a) { return !SDL_strcmp(a->harness, "endchat"); }
+
+bool gear_agent_replies(const gear_agent *a) { return !is_endchat(a); }
+
 int gear_agents_list(gear_agent *out, int max, char *error, size_t error_size) {
     const char *argv[] = { wakterm(), "cli", "--no-auto-start", "agent", "catalog", NULL };
     gs_json *doc = run_json(argv, NULL, error, error_size);
@@ -154,11 +257,12 @@ int gear_agents_list(gear_agent *out, int max, char *error, size_t error_size) {
         g->pane = (int)gs_json_num(gs_json_get(a, "pane_id"), -1);
     }
     gs_json_free(doc);
-    return n;
+    return endchat_agents(out, n, max);
 }
 
 void gear_agent_tabs(gear_agent *agents, int n) {
-    for (int i = 0; i < n; i++) agents[i].tab[0] = 0;
+    for (int i = 0; i < n; i++)
+        if (!is_endchat(&agents[i])) agents[i].tab[0] = 0;  // (an endchat profile's is its name)
     const char *argv[] = { wakterm(), "cli", "--no-auto-start", "list", "--format", "json", NULL };
     char ignored[256];
     gs_json *panes = n > 0 ? run_json(argv, NULL, ignored, sizeof ignored) : NULL;
@@ -203,6 +307,7 @@ bool gear_agent_send(const gear_agent *a, const char *text, char request_id[37],
     static bool seeded;
     if (!seeded) { SDL_srand(0); seeded = true; }
     uuid(request_id);
+    if (is_endchat(a)) return endchat_say(a, text, error, error_size);
     // Locally the text goes on standard input, so nothing said shows in the process list. Over SSH it
     // is the last argument: the Windows ssh client never passes on the end of piped input.
     bool ssh = host() != NULL;
