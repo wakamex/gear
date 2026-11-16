@@ -234,8 +234,10 @@ static layout *lay_out(gs_ui *ui, const char *text, float width, const gp_rich_s
 
 // ---- Selecting and links ----
 
-// What is selected in each paragraph drawn (by its id: the text's address and the piece's place), kept
-// between frames; the group spans every message, so a selection can run from one into the next.
+// What is selected in the paragraphs pressed (by id: the text's address and the piece's place), kept
+// between frames; the group spans every message, so a selection can run from one into the next. A
+// paragraph never pressed keeps no place here, as a conversation draws more paragraphs each frame than
+// the table holds.
 enum { PICKED = 128 };
 typedef struct { char id[40]; int from, to; Uint64 frame; } picked;
 static picked picks[PICKED];
@@ -244,10 +246,16 @@ static char *selection;  // what is selected across the frame's texts, in order,
 static bool began;       // a new selection began in the messages this frame
 static size_t selection_len;
 
-static picked *pick_of(const char *id) {
+static picked *find_pick(const char *id) {
+    for (int i = 0; i < PICKED; i++)
+        if (picks[i].id[0] && !SDL_strcmp(picks[i].id, id)) return &picks[i];
+    return NULL;
+}
+
+static picked *new_pick(const char *id) {
     int oldest = 0;
     for (int i = 0; i < PICKED; i++) {
-        if (!SDL_strcmp(picks[i].id, id)) return &picks[i];
+        if (!picks[i].id[0]) { oldest = i; break; }
         if (picks[i].frame < picks[oldest].frame) oldest = i;
     }
     picked *p = &picks[oldest];
@@ -268,7 +276,7 @@ void gp_rich_end(gs_ui *ui) {
     began = gs_ui_select_began(ui, "messages");
     if (began)
         for (int i = 0; i < PICKED; i++)
-            if (picks[i].frame != frame) picks[i].from = picks[i].to = 0;
+            if (picks[i].frame != frame) picks[i].id[0] = 0;
 }
 
 const char *gp_rich_selection(void) { return selection; }
@@ -276,7 +284,7 @@ const char *gp_rich_selection(void) { return selection; }
 bool gp_rich_began(void) { return began; }
 
 void gp_rich_unselect(void) {
-    for (int i = 0; i < PICKED; i++) picks[i].from = picks[i].to = 0;
+    for (int i = 0; i < PICKED; i++) picks[i].id[0] = 0;
 }
 
 static void add_selected(const char *text, int from, int to) {
@@ -301,11 +309,16 @@ static void paragraph(gs_ui *ui, gs_rect r, const char *id, const char *text, co
     int n = nl ? gs_ui_styled_spans(ui, text, links, nl, spans, 2 * MOST, link_of) : 0;
     // (a link over the mark keeps its colour, the first of two that overlap counting)
     if (a < b && n < (int)SDL_arraysize(spans)) spans[n] = (gs_ui_text_span){ a, b, 0, s->marked, s->mark, false }, link_of[n++] = -1;
-    picked *p = pick_of(id);
-    p->frame = frame;
-    int clicked = -1;
-    gs_ui_text_spans(ui, r, id, text, s->px, s->text, NULL, 0, spans, n, &p->from, &p->to, &clicked);
-    add_selected(text, p->from, p->to);
+    picked *p = find_pick(id);
+    int from = p ? p->from : 0, to = p ? p->to : 0, clicked = -1;
+    gs_ui_text_spans(ui, r, id, text, s->px, s->text, NULL, 0, spans, n, &from, &to, &clicked);
+    // (a place once gs_ui has set the pair, a press, where a drag keeps its start; until a new
+    // selection begins elsewhere, or the oldest gives way)
+    if (p || from || to) {
+        if (!p) p = new_pick(id);
+        p->from = from, p->to = to, p->frame = frame;
+    }
+    add_selected(text, from, to);
     if (clicked >= 0 && link_of[clicked] >= 0) {
         const gs_ui_styled *l = &links[link_of[clicked]];
         char url[1024];
