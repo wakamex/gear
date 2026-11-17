@@ -1109,6 +1109,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     if (elsewhere) SDL_snprintf(count_text, sizeof count_text, "%d", elsewhere);
     SDL_snprintf(label, sizeof label, "→ %s", key[0] ? key : "nobody: read back");
     // (the name cut short, when long, to leave the count its room)
+    bool to_next = false;
     float d = small * 1.5f, badge_w = elsewhere ? SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10) : 0;
     gs_rect name = { who.x, who.y, SDL_max(0, who.w - (elsewhere ? badge_w + 10 : 0)), who.h };
     float label_w = gs_ui_text(ui, name, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
@@ -1117,8 +1118,11 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         gs_rect badge = { who.x + SDL_min(label_w, name.w) + 10, who.y + (who.h - d) / 2, w, d };
         gs_ui_round(ui, badge, d / 2, ACCENT);
         gs_ui_text(ui, badge, count_text, small, BACKGROUND, 0);
+        // (a tap on the count opens the next conversation with replies unseen, as the swipe goes)
+        char next[128];
+        if (!preview && gs_ui_clicked(ui, gs_inset(badge, -8)) && next_unread(a, next, sizeof next)) open_conversation(a, next), to_next = true;
     }
-    if (!preview && gs_ui_clicked(ui, who)) {
+    if (!preview && !to_next && gs_ui_clicked(ui, who)) {
         a->picking = true;
         if (st == GP_OPEN) gp_link_send(a->link, 'L', NULL, 0);
     }
@@ -1241,6 +1245,20 @@ typedef struct {
     Uint64 began;
     char next[128];          // the conversation it lands on, when it goes on
 } swipe;
+
+// The next conversation in the list after the open one, going round, with replies unseen.
+static bool next_unread(app *a, char *out, size_t size) {
+    static topic list[256];
+    int n = topics(a, list, 256), at = 0;
+    for (int i = 0; i < n; i++)
+        if (!SDL_strcmp(list[i].who, a->open)) at = i;
+    for (int k = 1; k <= n; k++) {
+        const char *who = list[(at + k) % n].who;
+        int *unseen = unread_of(a, who, false);
+        if (unseen && *unseen && SDL_strcmp(who, a->open)) return SDL_strlcpy(out, who, size), true;
+    }
+    return false;
+}
 
 // The conversation `step` from the open one in the list (1 the next, -1 the one before).
 static bool beside(app *a, int step, char *out, size_t size) {
