@@ -840,6 +840,20 @@ static int topics(app *a, topic *out, int max) {
     return n;
 }
 
+// The next conversation in the list after the open one, going round, with replies unseen.
+static bool next_unread(app *a, char *out, size_t size) {
+    static topic list[256];
+    int n = topics(a, list, 256), at = 0;
+    for (int i = 0; i < n; i++)
+        if (!SDL_strcmp(list[i].who, a->open)) at = i;
+    for (int k = 1; k <= n; k++) {
+        const char *who = list[(at + k) % n].who;
+        int *unseen = unread_of(a, who, false);
+        if (unseen && *unseen && SDL_strcmp(who, a->open)) return SDL_strlcpy(out, who, size), true;
+    }
+    return false;
+}
+
 // How well a conversation matches what is typed: 0 not at all, 2 at the start of its name or its
 // agent's, 1 inside.
 static int topic_rank(app *a, const topic *c, const char *typed) {
@@ -1245,20 +1259,6 @@ typedef struct {
     Uint64 began;
     char next[128];          // the conversation it lands on, when it goes on
 } swipe;
-
-// The next conversation in the list after the open one, going round, with replies unseen.
-static bool next_unread(app *a, char *out, size_t size) {
-    static topic list[256];
-    int n = topics(a, list, 256), at = 0;
-    for (int i = 0; i < n; i++)
-        if (!SDL_strcmp(list[i].who, a->open)) at = i;
-    for (int k = 1; k <= n; k++) {
-        const char *who = list[(at + k) % n].who;
-        int *unseen = unread_of(a, who, false);
-        if (unseen && *unseen && SDL_strcmp(who, a->open)) return SDL_strlcpy(out, who, size), true;
-    }
-    return false;
-}
 
 // The conversation `step` from the open one in the list (1 the next, -1 the one before).
 static bool beside(app *a, int step, char *out, size_t size) {
