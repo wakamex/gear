@@ -46,7 +46,10 @@ pub fn build(b: *std.Build) void {
         const android_ndk = b.option([]const u8, "android_ndk", "Android NDK root, for building for Android") orelse @panic("-Dandroid_ndk=PATH is needed to build for Android");
         const gesso_dep = b.dependency("gesso", .{ .target = target, .optimize = optimize, .android_ndk = android_ndk });
         const mod = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .strip = optimize != .debug, .pic = true });
-        mod.addCSourceFiles(.{ .root = b.path("src/phone"), .files = phone_sources, .flags = flags });
+        // The commit it was built from, given by tools/android-apk, which the app shows in its top line.
+        const build_name = b.option([]const u8, "build", "The commit this is built from (tools/android-apk)");
+        const phone_flags = if (build_name) |name| std.mem.concat(b.allocator, []const u8, &.{ flags, &.{b.fmt("-DGEAR_BUILD=\"{s}\"", .{name})} }) catch @panic("OOM") else flags;
+        mod.addCSourceFiles(.{ .root = b.path("src/phone"), .files = phone_sources, .flags = phone_flags });
         mod.linkLibrary(gesso_dep.artifact("gesso"));
         const ssh = sshLibrary(b, target, optimize);
         gesso_build.useNdk(ssh, gesso_dep);  // (the NDK's C library, which libssh2 and mbedTLS need as SDL does)
@@ -87,7 +90,7 @@ pub fn build(b: *std.Build) void {
     // The phone app built for this computer too, to try it against a server without a phone.
     if (target.result.os.tag != .windows) {
         const phone = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .strip = optimize != .debug });
-        phone.addCSourceFiles(.{ .root = b.path("src/phone"), .files = phone_sources, .flags = flags });
+        phone.addCSourceFiles(.{ .root = b.path("src/phone"), .files = phone_sources, .flags = app_flags });
         phone.linkLibrary(gesso);
         phone.linkLibrary(sshLibrary(b, target, optimize));
         b.installArtifact(b.addExecutable(.{ .name = "gear-phone", .root_module = phone }));

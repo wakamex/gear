@@ -1101,6 +1101,11 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     gs_rect voice = gs_cut_right(&top, gs_ui_text_width(ui, "mary", small) + 8);
     gs_ui_text(ui, voice, a->voice[0] ? a->voice : "alba", small, gs_ui_hovered(ui, voice) ? ACCENT : DIM, 1);
     if (!preview && gs_ui_clicked(ui, voice) && st == GP_OPEN) gp_link_send(a->link, 'V', !SDL_strcmp(a->voice, "mary") ? "alba" : "mary", 4);
+#ifdef GEAR_BUILD
+    // (the commit the app was built from, faint)
+    gs_cut_right(&top, 12);
+    gs_ui_text(ui, gs_cut_right(&top, gs_ui_text_width(ui, GEAR_BUILD, small) + 4), GEAR_BUILD, small, DIM, 1);
+#endif
     gs_rect who = { top.x + 18, top.y, top.w - 18, top.h };
     // (with the count of replies unseen in the other conversations)
     int elsewhere = 0;

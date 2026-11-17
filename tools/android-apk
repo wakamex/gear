@@ -2,7 +2,7 @@
 # Builds the gear phone app (src/phone) for Android and packs it into an APK, with the Android SDK's command-line tools and no Gradle:
 #   tools/android-apk [ABI...]        (default: arm64-v8a x86_64) -> zig-out/android/gear.apk
 # ANDROID_HOME names the SDK (default ~/Android/Sdk), with build-tools, a platform and the NDK in it.
-# The APK is debuggable and signed with the SDK's debug key (~/.android/debug.keystore, made if missing): a build to
+# The app shows the commit it was built from in its top line, with a + when the tree had changes. The APK is debuggable and signed with the SDK's debug key (~/.android/debug.keystore, made if missing): a build to
 # try on a phone or the emulator, `adb install -r zig-out/android/gear.apk`.
 set -eu
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,7 +24,7 @@ for abi; do
     x86_64) target=x86_64-linux-android ;;
     *) echo "error: unknown ABI $abi (arm64-v8a or x86_64)" >&2; exit 1 ;;
     esac
-    (cd "$root" && zig build -Doptimize=ReleaseSmall "-Dtarget=$target.$api" "-Dandroid_ndk=$ndk" -p "$work/zig-$abi")
+    (cd "$root" && zig build -Doptimize=ReleaseSmall "-Dtarget=$target.$api" "-Dandroid_ndk=$ndk" "-Dbuild=$(git describe --always --abbrev=7 --dirty=+)" -p "$work/zig-$abi")
     mkdir -p "$work/apk/lib/$abi"
     cp "$work/zig-$abi/lib/libmain.so" "$work/apk/lib/$abi/"
 done
