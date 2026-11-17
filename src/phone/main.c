@@ -1195,12 +1195,18 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     if (!preview && gp_rich_selection() && gs_ui_key(ui, SDLK_C, SDL_KMOD_CTRL)) gs_clipboard_set(gp_rich_selection()), gp_rich_unselect();
     // Scrolled away from what is being heard: a button to follow it again.
     if (!preview && a->saying && !a->following && a->line_count) {
-        float w = gs_ui_text_width(ui, "follow", small) + 28, h = small * 2.2f;
+        char follow[160] = "follow";
+        if (read_elsewhere(a)) SDL_snprintf(follow, sizeof follow, "follow in %s", read_in(a));
+        float w = SDL_min(gs_ui_text_width(ui, follow, small) + 28, r.w - 16), h = small * 2.2f;
         gs_rect pill = { r.x + (r.w - w) / 2, r.y + r.h - h - 8, w, h };
         gs_ui_round(ui, pill, h / 2, RAISED);
         gs_ui_outline(ui, pill, h / 2, 1, ACCENT);
-        gs_ui_text(ui, pill, "follow", small, ACCENT, 0);
-        if (gs_ui_clicked(ui, pill)) a->following = true;
+        gs_ui_text(ui, pill, follow, small, ACCENT, 0);
+        // (what is heard being another conversation's, that conversation opened to follow it there)
+        if (gs_ui_clicked(ui, pill)) {
+            if (read_elsewhere(a)) open_conversation(a, read_in(a));
+            a->following = true;
+        }
         follow_area = pill;
     } else follow_area = (gs_rect){ 0 };
     gs_ui_wake(ui, 16);
