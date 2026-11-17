@@ -27,7 +27,7 @@ static SDL_FColor hex(Uint32 c) { return (SDL_FColor){ (float)(c >> 16 & 255) / 
 #define BORDER hex(0x3d3428)
 #define TEXT hex(0xb6aa99)
 #define BRIGHT hex(0xe0e0e0)
-#define DIM hex(0x7a6e5e)
+#define DIM hex(0x948672)  // (5.7:1 on BACKGROUND, past the 4.5:1 WCAG asks of small text)
 #define ACCENT hex(0xc4862c)
 #define OK hex(0x6b8f5e)
 #define OVER hex(0xb84a3a)
