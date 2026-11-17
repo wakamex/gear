@@ -1088,7 +1088,12 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     gs_rect top = gs_cut_top(&r, px * 2.2f);
     char why[8];
     gp_link_state st = a->link ? gp_link_status(a->link, why, sizeof why) : GP_FAILED;
-    gs_ui_circle(ui, top.x + 6, top.y + top.h / 2, 5, st == GP_OPEN ? OK : st == GP_CONNECTING ? ACCENT : OVER);
+    // At the left, while connected, whether the agent is mid-turn as the conversation list shows it
+    // (pulsing amber) or done (green); otherwise the connection: amber while connecting, rust down.
+    int agent = key[0] ? agent_of(a, key) : -1;
+    if (st == GP_OPEN && agent >= 0) turn_dot(ui, top.x + 6, top.y + top.h / 2, a->busy[agent]);
+    else gs_ui_circle(ui, top.x + 6, top.y + top.h / 2, 5, st == GP_OPEN ? OK : st == GP_CONNECTING ? ACCENT : OVER);
+    if (key[0] && !preview) keep_agents_current(a);  // (also before the list has come, to have it)
     gs_rect settings = gs_cut_right(&top, gs_ui_text_width(ui, "settings", small) + 8);
     gs_ui_text(ui, settings, "settings", small, gs_ui_hovered(ui, settings) ? ACCENT : DIM, 1);
     if (!preview && gs_ui_clicked(ui, settings)) a->setup = true;
@@ -1104,13 +1109,6 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     if (elsewhere) SDL_snprintf(count_text, sizeof count_text, "%d", elsewhere);
     SDL_snprintf(label, sizeof label, "→ %s", key[0] ? key : "nobody: read back");
     float label_w = gs_ui_text(ui, who, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
-    // (and whether its agent is mid-turn, as the conversation list shows it)
-    int agent = key[0] ? agent_of(a, key) : -1;
-    if (agent >= 0) {
-        turn_dot(ui, who.x + SDL_min(label_w, who.w) + 10 + px * 0.3f, who.y + who.h / 2, a->busy[agent]);
-        label_w += 10 + px * 0.6f;
-        if (!preview) keep_agents_current(a);
-    }
     if (elsewhere) {
         float d = small * 1.5f, w = SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10);
         gs_rect badge = { who.x + SDL_min(label_w, who.w) + 10, who.y + (who.h - d) / 2, w, d };
