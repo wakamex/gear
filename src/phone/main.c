@@ -809,6 +809,21 @@ static int agent_of(app *a, const char *who) {
     return -1;
 }
 
+// Whether an agent is mid-turn (a dot pulsing) or done (a still one), centred on (cx, cy).
+static void turn_dot(gs_ui *ui, float cx, float cy, bool busy) {
+    if (busy) {
+        float pulse = 0.5f + 0.5f * SDL_sinf((float)SDL_GetTicks() / 1000.0f * 5.0f);
+        gs_ui_circle(ui, cx, cy, px * 0.3f, (SDL_FColor){ ACCENT.r, ACCENT.g, ACCENT.b, 0.25f + 0.35f * pulse });
+        gs_ui_circle(ui, cx, cy, px * 0.18f, ACCENT);
+    } else gs_ui_circle(ui, cx, cy, px * 0.18f, OK);
+}
+
+// The agent list asked for again every 3 s while what is shown has turn dots, for which are mid-turn.
+static void keep_agents_current(app *a) {
+    if (a->link && SDL_GetTicks() - a->asked_agents >= 3000 && gp_link_status(a->link, NULL, 0) == GP_OPEN)
+        gp_link_send(a->link, 'L', NULL, 0), a->asked_agents = SDL_GetTicks();
+}
+
 static int topics(app *a, topic *out, int max) {
     int n = 0;
     for (int i = a->count - 1; i >= 0 && n < max; i--) {
@@ -860,9 +875,7 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
     gs_ui_field(ui, gs_cut_top(&in, px * 2.4f), "pick", typed, sizeof typed, "search conversations and agents");
     gs_cut_top(&in, 8);
     bool done = gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0) || tapped_outside;
-    // (the agents asked for again every 3 s while the list shows, for which are mid-turn)
-    if (a->link && SDL_GetTicks() - a->asked_agents >= 3000 && gp_link_status(a->link, NULL, 0) == GP_OPEN)
-        gp_link_send(a->link, 'L', NULL, 0), a->asked_agents = SDL_GetTicks();
+    keep_agents_current(a);
     const char *chosen = NULL;
     if (!n) gs_ui_text(ui, gs_cut_top(&in, px * 2), count ? "nothing matches" : "looking for agents…", px, DIM, -1);
     else {
@@ -886,14 +899,7 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
             gs_rect top = gs_cut_top(&row, px * 1.4f);
             // Whether its agent is mid-turn (a dot pulsing) or done (a still one); none without an agent.
             gs_rect mark = gs_cut_left(&top, px);
-            if (c->agent >= 0) {
-                float cy = mark.y + mark.h / 2, cx = mark.x + px * 0.3f;
-                if (a->busy[c->agent]) {
-                    float pulse = 0.5f + 0.5f * SDL_sinf((float)SDL_GetTicks() / 1000.0f * 5.0f);
-                    gs_ui_circle(ui, cx, cy, px * 0.3f, (SDL_FColor){ ACCENT.r, ACCENT.g, ACCENT.b, 0.25f + 0.35f * pulse });
-                    gs_ui_circle(ui, cx, cy, px * 0.18f, ACCENT);
-                } else gs_ui_circle(ui, cx, cy, px * 0.18f, OK);
-            }
+            if (c->agent >= 0) turn_dot(ui, mark.x + px * 0.3f, mark.y + mark.h / 2, a->busy[c->agent]);
             // The conversation's name first; its agent's, dim, in what is left of the line (cut short to
             // fit, and left out with less than a few letters' room).
             float title_w = gs_ui_text(ui, top, c->who, px, !SDL_strcmp(c->who, a->open) ? ACCENT : unseen && *unseen ? BRIGHT : TEXT, -1);
@@ -1098,6 +1104,13 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     if (elsewhere) SDL_snprintf(count_text, sizeof count_text, "%d", elsewhere);
     SDL_snprintf(label, sizeof label, "→ %s", key[0] ? key : "nobody: read back");
     float label_w = gs_ui_text(ui, who, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
+    // (and whether its agent is mid-turn, as the conversation list shows it)
+    int agent = key[0] ? agent_of(a, key) : -1;
+    if (agent >= 0) {
+        turn_dot(ui, who.x + SDL_min(label_w, who.w) + 10 + px * 0.3f, who.y + who.h / 2, a->busy[agent]);
+        label_w += 10 + px * 0.6f;
+        if (!preview) keep_agents_current(a);
+    }
     if (elsewhere) {
         float d = small * 1.5f, w = SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10);
         gs_rect badge = { who.x + SDL_min(label_w, who.w) + 10, who.y + (who.h - d) / 2, w, d };
@@ -1628,12 +1641,12 @@ int main(int argc, char **argv) {
         a.history[a.count - 1].quiet = true;
         remember(&a, "[submitted] agent-job -> voice\nRequest ID: 0adc9d1e-a328-58de-b80e-e3b27826e207\nprompt accepted by Wakterm", "voice", "10:42", false);
         a.history[a.count - 1].quiet = true, a.history[a.count - 1].unfolded = true;
-        if (!SDL_strcmp(argv[3], "pick")) {
-            static const char *names[][2] = { { "voice", "voice" }, { "personal_claude", "personal" }, { "gear_claude", "gear" }, { "gesso", "gesso" },
-                                              { "hearsay_claude", "hearsay" }, { "hyperliquid_participant_feed_re_claude", "re-opus" }, { "aeroplan_claude", "aeroplan" } };
-            for (int i = 0; i < 7; i++) SDL_strlcpy(a.agents[i][0], names[i][0], 128), SDL_strlcpy(a.agents[i][1], names[i][1], 128);
-            a.agent_count = 7, a.picking = true, a.busy[2] = a.busy[4] = true;
-        }
+        // (the agents, voice's mid-turn as gear's and hearsay's are, and the list of them open for "pick")
+        static const char *names[][2] = { { "voice", "voice" }, { "personal_claude", "personal" }, { "gear_claude", "gear" }, { "gesso", "gesso" },
+                                          { "hearsay_claude", "hearsay" }, { "hyperliquid_participant_feed_re_claude", "re-opus" }, { "aeroplan_claude", "aeroplan" } };
+        for (int i = 0; i < 7; i++) SDL_strlcpy(a.agents[i][0], names[i][0], 128), SDL_strlcpy(a.agents[i][1], names[i][1], 128);
+        a.agent_count = 7, a.busy[0] = a.busy[2] = a.busy[4] = true;
+        a.picking = !SDL_strcmp(argv[3], "pick");
     }
     if (argc >= 3 && !SDL_strcmp(argv[1], "--say")) {
         if (argc >= 5) SDL_strlcpy(a.host, argv[3], sizeof a.host), SDL_strlcpy(a.user, argv[4], sizeof a.user);
