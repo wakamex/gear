@@ -797,7 +797,7 @@ static const char *hint(app *a, char *buf, size_t size) {
     }
 }
 
-static float px = 18, small = 14;
+static float px = 18, small = 18;  // (small: the secondary text, dim, at the same size as the rest to be read easily)
 static gs_rect character_area;  // where the character was drawn, which holding down on starts listening
 
 // The conversations to open: those with messages, the newest first, then the agents without one yet.
@@ -957,7 +957,7 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
     // Panetone's receipt or notice: dim, without a mark, a header or a speaker, folded to its first
     // line ("…" when there is more), which a tap unfolds and folds again.
     if (e->quiet) {
-        float time_w = gs_ui_text_width(ui, e->at, small * 0.9f) + 8, line = gs_ui_text_height(ui, "0", px, 1e6f) + 4;
+        float time_w = gs_ui_text_width(ui, e->at, small) + 8, line = gs_ui_text_height(ui, "0", px, 1e6f) + 4;
         size_t first = strcspn(text, "\n");
         const char *rest = text + first;
         while (*rest == '\n') rest++;
@@ -970,7 +970,7 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
         SDL_snprintf(head, sizeof head, "%.*s%s", (int)SDL_min(first, sizeof head - 8), text, *rest && !e->unfolded ? " …" : "");
         gs_rect top = { at.x + pad, at.y, w - time_w, line };
         gs_ui_text(ui, top, head, px, DIM, -1);
-        gs_ui_text(ui, (gs_rect){ at.x + pad + w - time_w, at.y, time_w, line }, e->at, small * 0.9f, DIM, 1);
+        gs_ui_text(ui, (gs_rect){ at.x + pad + w - time_w, at.y, time_w, line }, e->at, small, DIM, 1);
         if (!preview && *rest && gs_ui_clicked(ui, (gs_rect){ at.x, at.y, at.w, line })) ((entry *)e)->unfolded = !e->unfolded;
         if (more) gp_rich(ui, (gs_rect){ at.x + pad, at.y + line + 2, w, 0 }, rest, &q, true);
         return h;
@@ -994,7 +994,7 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
     gs_ui_text(ui, line, label, small, e->mine ? DIM : ACCENT, -1);
     // (what is being said now has no time yet, nor a speaker)
     bool said_now = !e->at[0];
-    float time_w = gs_ui_text(ui, line, said_now ? "now" : e->at, small * 0.9f, DIM, 1);
+    float time_w = gs_ui_text(ui, line, said_now ? "now" : e->at, small, DIM, 1);
     // To the left of the time, a speaker: three bars to speak the message, a square to stop it.
     if (!said_now) {
         float s = small * 1.05f, ix = line.x + line.w - time_w - 10 - s, iy = at.y + (head - s) / 2;
@@ -1675,6 +1675,9 @@ int main(int argc, char **argv) {
     SDL_snprintf(font, sizeof font, "%sClankerMono-Regular.ttf", SDL_GetBasePath());
     gs_fontset_prepend(fonts, font);
     gs_ui *ui = gs_ui_new(win, ren, fonts);
+    // (gesso's controls, buttons, fields and the box to type in, with text the size of the rest)
+    gs_ui_style *style = gs_ui_style_of(ui);
+    style->text_px = style->small_px = px, style->row = px * 2.2f;
     load_avatars(ren);
     who_lock = SDL_CreateMutex();
     if (!shot) gs_notify_init("gear", "org.wakamex.gear", NULL, notification_clicked);
