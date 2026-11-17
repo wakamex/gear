@@ -1101,22 +1101,20 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     gs_rect voice = gs_cut_right(&top, gs_ui_text_width(ui, "mary", small) + 8);
     gs_ui_text(ui, voice, a->voice[0] ? a->voice : "alba", small, gs_ui_hovered(ui, voice) ? ACCENT : DIM, 1);
     if (!preview && gs_ui_clicked(ui, voice) && st == GP_OPEN) gp_link_send(a->link, 'V', !SDL_strcmp(a->voice, "mary") ? "alba" : "mary", 4);
-#ifdef GEAR_BUILD
-    // (the commit the app was built from)
-    gs_cut_right(&top, 12);
-    gs_ui_text(ui, gs_cut_right(&top, gs_ui_text_width(ui, GEAR_BUILD, small) + 4), GEAR_BUILD, small, TEXT, 1);
-#endif
-    gs_rect who = { top.x + 18, top.y, top.w - 18, top.h };
+    gs_rect who = { top.x + 18, top.y, top.w - 18 - 12, top.h };  // (12 clear of the voice)
     // (with the count of replies unseen in the other conversations)
     int elsewhere = 0;
     for (int i = 0; i < a->unread_count; i++) elsewhere += SDL_strcmp(a->unread[i].who, key) ? a->unread[i].n : 0;
     char label[200], count_text[16] = "";
     if (elsewhere) SDL_snprintf(count_text, sizeof count_text, "%d", elsewhere);
     SDL_snprintf(label, sizeof label, "→ %s", key[0] ? key : "nobody: read back");
-    float label_w = gs_ui_text(ui, who, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
+    // (the name cut short, when long, to leave the count its room)
+    float d = small * 1.5f, badge_w = elsewhere ? SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10) : 0;
+    gs_rect name = { who.x, who.y, SDL_max(0, who.w - (elsewhere ? badge_w + 10 : 0)), who.h };
+    float label_w = gs_ui_text(ui, name, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
     if (elsewhere) {
-        float d = small * 1.5f, w = SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10);
-        gs_rect badge = { who.x + SDL_min(label_w, who.w) + 10, who.y + (who.h - d) / 2, w, d };
+        float w = badge_w;
+        gs_rect badge = { who.x + SDL_min(label_w, name.w) + 10, who.y + (who.h - d) / 2, w, d };
         gs_ui_round(ui, badge, d / 2, ACCENT);
         gs_ui_text(ui, badge, count_text, small, BACKGROUND, 0);
     }
@@ -1127,6 +1125,14 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     // The box to type in, at the bottom, growing to five lines, with its send button. While it has the
     // keyboard the character and what is under it fold away, for the conversation to have the room.
     bool typing = !preview && gs_ui_focused(ui, "compose");
+#ifdef GEAR_BUILD
+    // The commit the app was built from, under settings (left out while typing, the conversation then
+    // starting right under the top line).
+    if (!typing) {
+        float w = gs_ui_text_width(ui, GEAR_BUILD, small) + 4;
+        gs_ui_text(ui, (gs_rect){ settings.x + settings.w - w, top.y + top.h - 4, w, small * 1.4f }, GEAR_BUILD, small, DIM, 1);
+    }
+#endif
     {
         float send_w = gs_ui_text_width(ui, "send", px) + 24;
         float h = gs_ui_textarea_height(ui, a->typed, r.w - send_w - 8, 5) + 12;
