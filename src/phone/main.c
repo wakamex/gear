@@ -14,6 +14,9 @@
 #include "gs_stream.h"
 #include "gs_text.h"
 #include "gs_ui.h"
+#ifdef SDL_PLATFORM_ANDROID
+#include "gs_android.h"
+#endif
 #include "key.h"
 #include "link.h"
 #include "rich.h"
@@ -1690,6 +1693,8 @@ int main(int argc, char **argv) {
     // The microphone as for a call (AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION): with the phone's own echo
     // cancelling, before the computer's.
     SDL_SetHint(SDL_HINT_ANDROID_AAUDIO_INPUT_PRESET, "7");
+    char ime[1024];
+    gs_android_keyboard_log(ime, sizeof ime);  // (the first call starts recording the keyboard's calls)
 #endif
     SDL_PropertiesID p = SDL_CreateProperties();
     SDL_SetStringProperty(p, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "gear");
@@ -1782,6 +1787,16 @@ int main(int argc, char **argv) {
         if (gp_rich_began()) debug_line("frame: a new selection began in the messages");
         if (debug_len && a.link && SDL_GetTicks() < debug_until + 500) gp_link_send(a.link, 'D', debug_buf, (uint32_t)debug_len);
         debug_len = 0;
+#ifdef SDL_PLATFORM_ANDROID
+        // Each call the on-screen keyboard made on SDL's input connection, with SDL's text after it,
+        // to the computer's phone-debug.log as the compose lines go, for faults in typing.
+        while (gs_android_keyboard_log(ime, sizeof ime))
+            if (a.link && gp_link_status(a.link, NULL, 0) == GP_OPEN) {
+                char line[1100];
+                int n = SDL_snprintf(line, sizeof line, "ime %s", ime);
+                gp_link_send(a.link, 'D', line, (uint32_t)SDL_min(n, (int)sizeof line - 1));
+            }
+#endif
         take_frames(&a);
         // A notification tapped opens its conversation.
         char opened[128];
