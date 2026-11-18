@@ -1750,6 +1750,7 @@ int main(int argc, char **argv) {
             }
     if (shot && !SDL_strcmp(argv[3], "type")) SDL_strlcpy(a.typed, "Can you check whether the phone build passed, and if it did, install it on the PC too?", sizeof a.typed), gs_ui_focus(ui, "compose");
     if (shot && !SDL_strcmp(argv[3], "swipe")) sw.axis = 1, sw.size = 400, sw.off = -170;  // (40% of the way to the next)
+    Uint64 typed_at = 0, frame_at = 0;  // (in ns: the frame's first key event, and when the frame took it)
     for (bool running = true; running;) {
         SDL_Event e;
         int wait = a.holding || a.mood != IDLE || sw.settling || sw.axis ? 5 : 30;
@@ -1781,6 +1782,8 @@ int main(int argc, char **argv) {
                 }
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) down = false, went_up = true, swipe_up(&sw, &a);
                 debug_event(&e);
+                // (the oldest key or typed text of the frame, for timing what typing waits for)
+                if ((e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_KEY_DOWN) && !typed_at) typed_at = e.common.timestamp, frame_at = SDL_GetTicksNS();
                 gs_ui_event(ui, &e);
             } while (SDL_PollEvent(&e));
         }
@@ -1862,7 +1865,18 @@ int main(int argc, char **argv) {
         }
         gs_ui_end(ui);
         if (shot && ++frames >= 4) { gs_draw_save_png(ren, shot); running = false; }
+        Uint64 drawn = SDL_GetTicksNS();
         SDL_RenderPresent(ren);
+        // Typing's delay, to the computer's phone-debug.log: from the key's event to the frame showing
+        // it, of which the frame's drawing and its presenting.
+        if (typed_at && a.link && gp_link_status(a.link, NULL, 0) == GP_OPEN) {
+            Uint64 now = SDL_GetTicksNS();
+            char line[160];
+            int n = SDL_snprintf(line, sizeof line, "typing: %.1f ms from the key to the frame shown (waiting %.1f, drawing %.1f, presenting %.1f)",
+                                 (now - typed_at) / 1e6, (frame_at - typed_at) / 1e6, (drawn - frame_at) / 1e6, (now - drawn) / 1e6);
+            gp_link_send(a.link, 'D', line, (uint32_t)n);
+        }
+        typed_at = 0;
     }
     stop_holding(&a);
     gp_link_close(a.link);
