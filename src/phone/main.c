@@ -1871,9 +1871,9 @@ int main(int argc, char **argv) {
         // it, of which the frame's drawing and its presenting.
         if (typed_at && a.link && gp_link_status(a.link, NULL, 0) == GP_OPEN) {
             Uint64 now = SDL_GetTicksNS();
-            char line[160];
-            int n = SDL_snprintf(line, sizeof line, "typing: %.1f ms from the key to the frame shown (waiting %.1f, drawing %.1f, presenting %.1f)",
-                                 (now - typed_at) / 1e6, (frame_at - typed_at) / 1e6, (drawn - frame_at) / 1e6, (now - drawn) / 1e6);
+            char line[200];
+            int n = SDL_snprintf(line, sizeof line, "typing: key at %.3f ms, %.1f ms from it to the frame shown (waiting %.1f, drawing %.1f, presenting %.1f)",
+                                 typed_at / 1e6, (now - typed_at) / 1e6, (frame_at - typed_at) / 1e6, (drawn - frame_at) / 1e6, (now - drawn) / 1e6);
             gp_link_send(a.link, 'D', line, (uint32_t)n);
         }
         typed_at = 0;
