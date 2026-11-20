@@ -46,7 +46,9 @@ static const char *const read_names[] = { "replies to me", "this conversation", 
 // sent and what each agent replied, with when, newest last. A conversation is one agent's, named by
 // the title of its tab (`who`), as Telegram has one topic for each.
 // quiet: Panetone's own receipt or notice, shown folded to its first line; unfolded: opened by a tap
-typedef struct { char *text; char who[128]; char at[8]; bool mine, quiet, unfolded; } entry;
+// laid_w, laid_h, laid_unfolded: its height when last laid out at that width and folding, kept so
+// that a long conversation lays out only what is near the screen
+typedef struct { char *text; char who[128]; char at[8]; bool mine, quiet, unfolded, laid_unfolded; float laid_w, laid_h; } entry;
 enum { HISTORY = 2000, CONVERSATIONS = 64 };
 typedef struct { char who[128]; int n; } unread;  // the replies in a conversation not yet seen
 
@@ -154,6 +156,7 @@ static void save_settings(app *a) {
 static void remember(app *a, const char *text, const char *who, const char *at, bool mine) {
     if (a->count == HISTORY) SDL_free(a->history[0].text), SDL_memmove(a->history, a->history + 1, (HISTORY - 1) * sizeof *a->history), a->count--;
     entry *e = &a->history[a->count++];
+    *e = (entry){ 0 };  // (a slot taken again after the oldest went holds a copy of the one before it)
     e->text = SDL_strdup(text), e->mine = mine;
     SDL_strlcpy(e->who, who, sizeof e->who), SDL_strlcpy(e->at, at, sizeof e->at);
 }
@@ -369,6 +372,10 @@ static void feed_speech(app *a) {
 // Seconds of the reply's speech still to be heard.
 static double speech_left(app *a) { return gs_stream_buffered(a->play) + SDL_GetAudioStreamQueued(a->conv) / (2.0 * SPEECH_RATE); }
 
+static bool chat_at_end = true;  // the open conversation's page is at its end (not read further back)
+static int unseen_below;  // messages come in it while it was read further back
+static bool to_newest;    // asked to go to the page's end
+
 // What speech is about to be heard, to the computer's phone-debug.log: why (`how`), and the message it
 // is of, its conversation, whether it is folded and how it starts; for finding what was read when it
 // should not have been.
@@ -482,7 +489,8 @@ static void take_frames(app *a) {
         case 'R':
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0, a->audio_at = SDL_GetTicks();
             add_message(a, data, here(a), false);
-            if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text, a->following = true;  // (spoken as it comes)
+            // (spoken as it comes; followed unless the page is being read further back)
+            if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text, a->following = chat_at_end;
             speech_note(a, "the reply, spoken by the computer", a->history[a->count - 1].text);
             a->reply_base = gs_stream_position(a->play) + speech_left(a);
             break;
@@ -566,6 +574,7 @@ static void take_frames(app *a) {
         entry e = { (char *)a->to_read[0], "", "", false };
         SDL_memmove(a->to_read, a->to_read + 1, (size_t)--a->to_read_count * sizeof *a->to_read);
         say_again(a, &e);
+        a->following = chat_at_end;  // (not pulled away from what is being read further back)
     }
 }
 
@@ -1073,15 +1082,27 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
     for (int i = 0; i < a->count; i++)
         if (!SDL_strcmp(a->history[i].who, key)) shown++;
     if (!preview) a->mark_y = -1;  // (set again where the sentence heard is drawn)
+    // (at its end while its newest message shows, by where that started last frame)
+    static float heights[2] = { 0, 0 }, newest_at[2] = { 0, 0 };
+    float scroll = gs_ui_page_scroll(ui, id);
+    bool at_end = scroll + r.h >= newest_at[preview];
+    if (!preview) chat_at_end = at_end;
     gs_rect page = gs_ui_page_begin(ui, r, id);
     if (!preview) gp_rich_begin(ui);
     float y = page.y, newest = page.y;
+    // Laid out and drawn only near the screen, a screen's height either way, and the message being
+    // heard wherever it is (its sentence's place is followed); the rest only take their kept height.
+    float near_top = page.y + scroll - r.h, near_end = page.y + scroll + 2 * r.h;
     for (int i = 0; i < a->count; i++) {
-        const entry *e = &a->history[i];
+        entry *e = &a->history[i];
         if (SDL_strcmp(e->who, key)) continue;
         bool speaking = !preview && a->saying == e->text && a->mood == SPEAKING;
         newest = y;
-        y += message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, e, speaking, true) + 8;
+        if (e->laid_w != page.w || e->laid_unfolded != e->unfolded)
+            e->laid_h = message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, e, speaking, false), e->laid_w = page.w, e->laid_unfolded = e->unfolded;
+        float h = e->laid_h;
+        if (speaking || (y + h >= near_top && y <= near_end)) h = message_block(ui, a, (gs_rect){ page.x, y, page.w, 0 }, e, speaking, true), e->laid_h = h;
+        y += h + 8;
     }
     if (!preview && a->said && *a->said) {
         entry now = { a->said, "", "", true };
@@ -1093,9 +1114,14 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
     if (!preview) gp_rich_end(ui);
     if (!shown && (preview || !(a->said && *a->said))) gs_ui_text(ui, (gs_rect){ page.x, y, page.w, px * 2 }, "what you say and the replies show here", small, DIM, -1);
     gs_ui_page_end(ui, y);
-    // (to the newest message's start when one came, and to the end on opening)
-    bool fresh = !preview && a->fresh;
+    heights[preview] = y - page.y, newest_at[preview] = newest - page.y;
+    // (to the newest message's start when one came, unless the page is being read further back, and to
+    // the end on opening)
+    bool fresh = !preview && a->fresh && at_end;
+    if (!preview && a->fresh && !at_end) unseen_below++;
+    if (!preview && at_end) unseen_below = 0;
     if (fresh || *last_count < 0) gs_ui_page_scroll_to(ui, id, (newest - page.y), *last_count >= 0);
+    if (!preview && to_newest) gs_ui_page_scroll_to(ui, id, SDL_max(0, heights[0] - r.h), true), to_newest = false, unseen_below = 0;
     // Following what is heard: each new sentence glides to a third of the way down.
     static float followed = -1;  // (where in the page, which the screen's place of the mark is not while it glides)
     if (!preview && a->following && a->mark_y >= 0 && SDL_fabsf(a->mark_y - page.y - followed) > 1) {
@@ -1108,6 +1134,7 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
 
 // The talk screen of the conversation `key`: the open one, or with `preview` set, the one beside it.
 static gs_rect follow_area;  // the button to follow what is heard again, when it shows
+static gs_rect newest_area;  // the button to the conversation's newest message, when it shows
 static gs_rect compose_area;  // the box to type in and its send button
 static gs_rect chat_area;  // where the open conversation's page and the box to type in were, which a swipe does not start on
 
@@ -1261,6 +1288,18 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         }
         follow_area = pill;
     } else follow_area = (gs_rect){ 0 };
+    // Read further back: a button to the newest, with how many came meanwhile.
+    if (!preview && !chat_at_end) {
+        char label[32] = "↓ newest";
+        if (unseen_below) SDL_snprintf(label, sizeof label, "↓ %d new", unseen_below);
+        float w = gs_ui_text_width(ui, label, small) + 28, h = small * 2.2f;
+        gs_rect pill = { r.x + r.w - w - 12, r.y + r.h - h - 8, w, h };
+        gs_ui_round(ui, pill, h / 2, RAISED);
+        gs_ui_outline(ui, pill, h / 2, 1, unseen_below ? ACCENT : BORDER);
+        gs_ui_text(ui, pill, label, small, unseen_below ? ACCENT : TEXT, 0);
+        if (gs_ui_clicked(ui, pill)) to_newest = true;
+        newest_area = pill;
+    } else newest_area = (gs_rect){ 0 };
     gs_ui_wake(ui, 16);
     // The agents to pick from, over everything.
     if (!preview && a->picking) picker(ui, a, area);
