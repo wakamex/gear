@@ -369,6 +369,24 @@ static void feed_speech(app *a) {
 // Seconds of the reply's speech still to be heard.
 static double speech_left(app *a) { return gs_stream_buffered(a->play) + SDL_GetAudioStreamQueued(a->conv) / (2.0 * SPEECH_RATE); }
 
+// What speech is about to be heard, to the computer's phone-debug.log: why (`how`), and the message it
+// is of, its conversation, whether it is folded and how it starts; for finding what was read when it
+// should not have been.
+static void speech_note(app *a, const char *how, const char *text) {
+    if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
+    const entry *e = NULL;
+    for (int i = a->count - 1; i >= 0 && !e; i--)
+        if (text && (a->history[i].text == text || !SDL_strcmp(a->history[i].text, text))) e = &a->history[i];
+    char start[61] = "";
+    if (text) SDL_strlcpy(start, text, sizeof start);
+    for (char *c = start; *c; c++)
+        if (*c == '\n') *c = ' ';
+    char line[400];
+    int n = SDL_snprintf(line, sizeof line, "speech: %s, open %s, of %s%s%s, \"%s\"", how, a->open, e ? e->who : "no message",
+                         e && e->quiet ? " (folded)" : "", e && e->mine ? " (mine)" : "", start);
+    gp_link_send(a->link, 'D', line, (uint32_t)SDL_min(n, (int)sizeof line - 1));
+}
+
 static void stop_speaking(app *a) {
     gs_stream_flush(a->play);
     SDL_ClearAudioStream(a->conv);
@@ -381,6 +399,7 @@ static void say_again(app *a, const entry *e) {
     bool same = a->saying == e->text;
     if (a->saying || a->mood == SPEAKING) gp_link_send(a->link, 'X', NULL, 0), stop_speaking(a), a->mood = IDLE;
     if (same) return;
+    speech_note(a, e->who[0] ? "tapped" : "read as it came", e->text);
     gp_link_send(a->link, 'U', e->text, (uint32_t)SDL_strlen(e->text));
     a->saying = e->text, a->reply_done = false, a->audio_at = SDL_GetTicks();  // (its speech has 2 s to start)
     a->following = true;
@@ -464,6 +483,7 @@ static void take_frames(app *a) {
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0, a->audio_at = SDL_GetTicks();
             add_message(a, data, here(a), false);
             if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text, a->following = true;  // (spoken as it comes)
+            speech_note(a, "the reply, spoken by the computer", a->history[a->count - 1].text);
             a->reply_base = gs_stream_position(a->play) + speech_left(a);
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
@@ -482,6 +502,11 @@ static void take_frames(app *a) {
                     if (text_id(a->history[i].text) == of) a->lines_of = a->history[i].text;
                 a->lines_base = gs_stream_position(a->play) + speech_left(a);
                 if (a->lines_of) a->saying = a->lines_of;  // (its square, to stop it)
+                if (!a->lines_of) {
+                    char why[64];
+                    SDL_snprintf(why, sizeof why, "first sentence of no message here (%u)", (unsigned)of);
+                    speech_note(a, why, NULL);
+                }
             }
             if (doc && a->lines_of && a->line_count < (int)SDL_arraysize(a->lines)) {
                 gs_jv o = gs_json_root(doc);
