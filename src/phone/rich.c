@@ -8,7 +8,8 @@ typedef struct {
     int rows, cols;
     char *buf;                   // the cells' text, each zero-terminated
     const char *cell[ROWS][COLS];
-    bool number[COLS];           // every cell under the header is a number: set to the right
+    int align[COLS];             // -1 left, 0 centre, 1 right: as the rule line's colons say, or else to
+                                 // the right when every cell under the header is a number
     float font, colw[COLS], rowh[ROWS], line;
 } table;
 
@@ -60,12 +61,28 @@ static bool numeric(const char *s) {
 // The table in lines [s, e): its cells, with backticks and asterisks taken out; the rule line skipped.
 static table *parse_table(const char *s, const char *e) {
     table *t = SDL_calloc(1, sizeof *t);
+    int ruled[COLS];  // the rule line's alignment of each column, 2 for none given
+    for (int c = 0; c < COLS; c++) ruled[c] = 2;
     t->buf = SDL_malloc((size_t)(e - s) + 1);
     char *out = t->buf;
     for (const char *line = s; line < e && t->rows < ROWS;) {
         const char *end = line_end(line);
         if (end > e) end = e;
-        if (!(t->rows == 1 && table_rule(line, end))) {
+        if (t->rows == 1 && table_rule(line, end)) {
+            // (its colons: ":--" left, ":-:" centre, "--:" right, one column between each pair of bars)
+            const char *c = line;
+            while (c < end && blank(*c)) c++;
+            if (c < end && *c == '|') c++;
+            for (int col = 0; c < end && col < COLS; col++) {
+                const char *bar = c;
+                while (bar < end && *bar != '|') bar++;
+                const char *a = c, *b = bar;
+                while (a < b && blank(*a)) a++;
+                while (b > a && blank(b[-1])) b--;
+                if (b > a) ruled[col] = b[-1] == ':' ? (*a == ':' ? 0 : 1) : (*a == ':' ? -1 : 2);
+                c = bar + 1;
+            }
+        } else {
             const char *c = line;
             while (c < end && blank(*c)) c++;
             if (c < end && *c == '|') c++;
@@ -97,11 +114,56 @@ static table *parse_table(const char *s, const char *e) {
         for (int c = 0; c < COLS; c++)
             if (*t->cell[r][c] && c + 1 > t->cols) t->cols = c + 1;
     for (int c = 0; c < t->cols; c++) {
-        t->number[c] = t->rows > 1;
+        bool number = t->rows > 1;
         for (int r = 1; r < t->rows; r++)
-            if (*t->cell[r][c] && !numeric(t->cell[r][c])) t->number[c] = false;
+            if (*t->cell[r][c] && !numeric(t->cell[r][c])) number = false;
+        t->align[c] = ruled[c] != 2 ? ruled[c] : number ? 1 : -1;
     }
     return t;
+}
+
+// The lines `cell` wraps to at `width`, a word at a time (inside a word wider than the line): each
+// one's start and length, for drawing it aligned; returns how many (at most `max`).
+static int wrap(gs_ui *ui, const char *cell, float font, float width, const char **start, int *len, int max) {
+    int n = 0;
+    const char *s = cell;
+    while (*s && n < max) {
+        while (*s == ' ') s++;
+        if (!*s) break;
+        const char *fit = NULL, *p = s;
+        char buf[512];
+        while (*p) {
+            const char *q = p;
+            while (*q == ' ') q++;
+            while (*q && *q != ' ') q++;
+            size_t l = SDL_min((size_t)(q - s), sizeof buf - 1);
+            SDL_memcpy(buf, s, l), buf[l] = 0;
+            if (gs_ui_text_width(ui, buf, font) > width) break;
+            fit = q, p = q;
+        }
+        if (!fit) {  // (a word wider than the line: as many of its characters as fit)
+            fit = s;
+            for (const char *q = s + 1; *q && *q != ' '; q++) {
+                if ((*q & 0xC0) == 0x80) continue;
+                size_t l = SDL_min((size_t)(q - s), sizeof buf - 1);
+                SDL_memcpy(buf, s, l), buf[l] = 0;
+                if (gs_ui_text_width(ui, buf, font) > width) break;
+                fit = q;
+            }
+            if (fit == s) { fit = s + 1; while ((*fit & 0xC0) == 0x80) fit++; }
+        }
+        start[n] = s, len[n] = (int)(fit - s), n++;
+        s = fit;
+    }
+    return n;
+}
+
+// A cell's height at `width`: wrapped by gs_ui, or by `wrap` when it is aligned other than left.
+static float cell_height(gs_ui *ui, const table *t, int r, int c, float width) {
+    if (t->align[c] < 0) return gs_ui_text_height(ui, t->cell[r][c], t->font, width);
+    const char *start[64];
+    int len[64];
+    return SDL_max(1, wrap(ui, t->cell[r][c], t->font, width, start, len, 64)) * t->line;
 }
 
 // The widest word of a cell at `font`, and its whole width on one line.
@@ -153,7 +215,7 @@ static float lay_table(gs_ui *ui, table *t, float width, float px, float small) 
     for (int r = 0; r < t->rows; r++) {
         t->rowh[r] = t->line;
         for (int c = 0; c < t->cols; c++)
-            t->rowh[r] = SDL_max(t->rowh[r], gs_ui_text_height(ui, t->cell[r][c], t->font, t->colw[c] - 2 * PAD - 1));
+            t->rowh[r] = SDL_max(t->rowh[r], cell_height(ui, t, r, c, t->colw[c] - 2 * PAD - 1));
         h += t->rowh[r] + 2 * VPAD;
     }
     return h + 1;  // (and the line under the header)
@@ -171,9 +233,16 @@ static void draw_table(gs_ui *ui, const table *t, float x, float y, const gp_ric
             float inner = t->colw[c] - 2 * PAD - 1;
             gs_rect cell = { cx + PAD, y + VPAD, inner, t->rowh[r] };
             SDL_FColor col = r == 0 ? s->head : s->text;
-            if (t->number[c] && gs_ui_text_width(ui, t->cell[r][c], t->font) <= inner)
-                gs_ui_text(ui, (gs_rect){ cell.x, cell.y, inner, t->line }, t->cell[r][c], t->font, col, 1);
-            else gs_ui_text_wrapped(ui, cell, t->cell[r][c], t->font, col);
+            // (a column aligned other than left, its header too, a line at a time as `wrap` breaks it)
+            if (t->align[c] >= 0) {
+                const char *start[64];
+                int len[64], n = wrap(ui, t->cell[r][c], t->font, inner, start, len, 64);
+                for (int k = 0; k < n; k++) {
+                    char line[512];
+                    SDL_snprintf(line, sizeof line, "%.*s", len[k], start[k]);
+                    gs_ui_text(ui, (gs_rect){ cell.x, cell.y + k * t->line, inner, t->line }, line, t->font, col, t->align[c]);
+                }
+            } else gs_ui_text_wrapped(ui, cell, t->cell[r][c], t->font, col);
             cx += t->colw[c];
         }
         y += h;
