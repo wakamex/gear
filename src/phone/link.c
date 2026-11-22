@@ -1,13 +1,30 @@
 #define _POSIX_C_SOURCE 200809L  // (getaddrinfo)
 #include "link.h"
 #include <SDL3/SDL.h>
+#include <stdlib.h>
+#ifdef _WIN32
+// (Windows' sockets, as the desktop's gear has the same app as the phone)
+#include <winsock2.h>
+#include <ws2tcpip.h>
+typedef SOCKET sock;
+#define NO_SOCK INVALID_SOCKET
+#define close_sock closesocket
+#define poll WSAPoll
+static bool blocking(sock fd, bool on) { u_long nb = !on; return ioctlsocket(fd, FIONBIO, &nb) == 0; }
+static bool connecting(void) { return WSAGetLastError() == WSAEWOULDBLOCK; }
+#else
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
-#include <stdlib.h>
 #include <sys/socket.h>
 #include <unistd.h>
+typedef int sock;
+#define NO_SOCK (-1)
+#define close_sock close
+static bool blocking(sock fd, bool on) { return fcntl(fd, F_SETFL, on ? 0 : O_NONBLOCK) == 0; }
+static bool connecting(void) { return errno == EINPROGRESS; }
+#endif
 #include "key.h"
 #include "libssh2.h"
 
@@ -38,27 +55,32 @@ static void set_state(gp_link *l, gp_link_state state, const char *why) {
     SDL_UnlockMutex(l->lock);
 }
 
-static int dial(const char *host, int port, char *why, size_t size) {
+static sock dial(const char *host, int port, char *why, size_t size) {
+#ifdef _WIN32
+    static bool started;
+    WSADATA wsa;
+    if (!started) started = WSAStartup(MAKEWORD(2, 2), &wsa) == 0;
+#endif
     char service[16];
     SDL_snprintf(service, sizeof service, "%d", port);
     struct addrinfo hints = { .ai_family = AF_UNSPEC, .ai_socktype = SOCK_STREAM }, *found = NULL;
     int err = getaddrinfo(host, service, &hints, &found);
     if (err) { SDL_snprintf(why, size, "cannot find %s: %s", host, gai_strerror(err)); return -1; }
-    int fd = -1;
-    for (struct addrinfo *a = found; a && fd < 0; a = a->ai_next) {
+    sock fd = NO_SOCK;
+    for (struct addrinfo *a = found; a && fd == NO_SOCK; a = a->ai_next) {
         fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-        if (fd < 0) continue;
+        if (fd == NO_SOCK) continue;
         // Ten seconds to answer, then the next address.
-        fcntl(fd, F_SETFL, O_NONBLOCK);
-        if (connect(fd, a->ai_addr, a->ai_addrlen) < 0 && errno != EINPROGRESS) { close(fd), fd = -1; continue; }
+        blocking(fd, false);
+        if (connect(fd, a->ai_addr, (int)a->ai_addrlen) < 0 && !connecting()) { close_sock(fd), fd = NO_SOCK; continue; }
         struct pollfd p = { .fd = fd, .events = POLLOUT };
         int soerr = 0;
         socklen_t sl = sizeof soerr;
-        if (poll(&p, 1, 10000) != 1 || getsockopt(fd, SOL_SOCKET, SO_ERROR, &soerr, &sl) < 0 || soerr) { close(fd), fd = -1; continue; }
-        fcntl(fd, F_SETFL, 0);
+        if (poll(&p, 1, 10000) != 1 || getsockopt(fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl) < 0 || soerr) { close_sock(fd), fd = NO_SOCK; continue; }
+        blocking(fd, true);
     }
     freeaddrinfo(found);
-    if (fd < 0) SDL_snprintf(why, size, "cannot reach %s port %d", host, port);
+    if (fd == NO_SOCK) SDL_snprintf(why, size, "cannot reach %s port %d", host, port);
     return fd;
 }
 
@@ -105,8 +127,8 @@ static void take_frames(gp_link *l, char *buf, size_t *len) {
 static bool session(gp_link *l, char *why, size_t why_size) {
     bool again = true;
     set_state(l, GP_CONNECTING, "connecting");
-    int fd = dial(l->c.host, l->c.port, why, why_size);
-    if (fd < 0) return true;
+    sock fd = dial(l->c.host, l->c.port, why, why_size);
+    if (fd == NO_SOCK) return true;
     LIBSSH2_SESSION *s = libssh2_session_init();
     LIBSSH2_CHANNEL *ch = NULL;
     libssh2_session_set_blocking(s, 1);
@@ -197,7 +219,7 @@ failed:
     if (ch) libssh2_channel_free(ch);
     libssh2_session_disconnect(s, "bye");
     libssh2_session_free(s);
-    close(fd);
+    close_sock(fd);
     return again;
 }
 

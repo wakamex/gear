@@ -25,20 +25,38 @@
 
 enum { SPEECH_RATE = 24000, MAX_AUDIO = 60 * 16000 };
 
-typedef struct frame { struct frame *next; char type; Uint32 len; char *data; } frame;
+typedef struct frame { struct frame *next; char type; Uint32 len; char *data; int from; } frame;  // from: the client it came from
 
 // A message shown to the phone, numbered and kept (in hub-log.jsonl, so a restart keeps it too), for
 // giving again to a phone that missed it.
 typedef struct { long long seq; char *text, *actions; char who[128]; char at[8]; bool mine; bool quiet; } logged;  // actions: a question's answers, "ID\tLABEL\n" each, or NULL
 enum { LOG = 1000 };
 
+// A client: the phone, or the desktop's app, each connected to the hub at once. Its frames are read on
+// a thread of its own from `from`; `closed` once its input ends.
+enum { CLIENTS = 8 };
 typedef struct {
-    // Frames from the client, read on a thread of their own from `from`; `closed` once its input ends.
+    void *server;
+    int index;
+    FILE *out, *from;
+    int fd;              // the hub's connection to it, or -1
+    SDL_Thread *reader;
+    bool live, closed;
+    bool background;     // its app is behind others: new replies go to it as text, not spoken
+    bool always;         // it asked for always-on listening
+    Uint64 used;         // when it last talked, typed or asked for speech
+    char target[128];    // the agent its open conversation sends to ('T'), or "" for the hub's
+} client;
+
+typedef struct {
+    // Frames from the clients, oldest first.
     SDL_Mutex *lock;
     frame *in;
-    bool closed;
-    FILE *from;
-    bool background;   // the phone's app is behind others: new replies go as text, not spoken
+    // The clients. Messages go to all of them; speech and what always-on hears go to and come from
+    // `talker`, the one talked or typed on last (-1 for none). `only`, while not -1, sends the rest to
+    // that one client alone (its greeting, and what it missed).
+    client clients[CLIENTS];
+    int talker, only;
     // What goes out, one frame at a time, from the main thread and the synthesis thread.
     SDL_Mutex *out;
     // Speech: text queued for the synthesis thread, and the voice to load before the next.
@@ -62,30 +80,36 @@ typedef struct {
     long since_at;     // microphone samples since that report
 } server;
 
-static FILE *frames_out;  // the client's end, NULL with none; what the engines print goes to standard error instead
+// Frames of speech and of always-on's listening: for the voice client alone.
+static bool voice_frame(char type) { return type && SDL_strchr("PLDIW", type); }
 
+// (what the engines print goes to standard error instead of a client)
 static void send_frame(server *s, char type, const void *data, Uint32 len) {
     Uint8 head[5] = { (Uint8)type, (Uint8)len, (Uint8)(len >> 8), (Uint8)(len >> 16), (Uint8)(len >> 24) };
     SDL_LockMutex(s->out);
-    if (!frames_out) { SDL_UnlockMutex(s->out); return; }
-    fwrite(head, 1, 5, frames_out);
-    if (len) fwrite(data, 1, len, frames_out);
-    fflush(frames_out);
+    for (int i = 0; i < CLIENTS; i++) {
+        client *c = &s->clients[i];
+        if (!c->out || (voice_frame(type) ? i != s->talker : s->only >= 0 && i != s->only)) continue;
+        fwrite(head, 1, 5, c->out);
+        if (len) fwrite(data, 1, len, c->out);
+        fflush(c->out);
+    }
     SDL_UnlockMutex(s->out);
 }
 
 static void send_text(server *s, char type, const char *text) { send_frame(s, type, text, (Uint32)SDL_strlen(text)); }
 
 static int read_frames(void *user) {
-    server *s = user;
+    client *c = user;
+    server *s = c->server;
     for (;;) {
         Uint8 head[5];
-        if (fread(head, 1, 5, s->from) != 5) break;
+        if (fread(head, 1, 5, c->from) != 5) break;
         Uint32 len = (Uint32)head[1] | (Uint32)head[2] << 8 | (Uint32)head[3] << 16 | (Uint32)head[4] << 24;
         if (len > 8 * 1024 * 1024) break;  // (not a client of this protocol)
         frame *f = SDL_calloc(1, sizeof *f);
-        f->type = (char)head[0], f->len = len, f->data = SDL_malloc(len + 1);
-        if (len && fread(f->data, 1, len, s->from) != len) { SDL_free(f->data), SDL_free(f); break; }
+        f->type = (char)head[0], f->len = len, f->data = SDL_malloc(len + 1), f->from = c->index;
+        if (len && fread(f->data, 1, len, c->from) != len) { SDL_free(f->data), SDL_free(f); break; }
         f->data[len] = 0;
         SDL_LockMutex(s->lock);
         frame **q = &s->in;
@@ -94,9 +118,24 @@ static int read_frames(void *user) {
         SDL_UnlockMutex(s->lock);
     }
     SDL_LockMutex(s->lock);
-    s->closed = true;
+    c->closed = true;
     SDL_UnlockMutex(s->lock);
     return 0;
+}
+
+// The voice client from now on, `which` (-1 for none): what was being said stops, as the device it
+// played on is no longer the one in use.
+static void use_voice(server *s, int which) {
+    if (which == s->talker) return;
+    SDL_AddAtomicInt(&s->generation, 1);
+    SDL_LockMutex(s->out);
+    s->talker = which;
+    SDL_UnlockMutex(s->out);
+    SDL_LockMutex(s->lock);
+    SDL_free(s->speak), s->speak = NULL;
+    SDL_free(s->speak_from), s->speak_from = NULL;
+    s->phone_playing = false, s->stopping = false, s->phone_at = 0, s->since_at = 0, s->reply16_len = 0;
+    SDL_UnlockMutex(s->lock);
 }
 
 typedef struct { server *s; int generation; long long samples; } job;
@@ -271,8 +310,6 @@ static void words(server *s, gear_pipeline *p) {
     gs_jval_free(o);
 }
 
-// The title of the tab the agent `name` runs in, which names its conversation on the phone (and its
-// Panetone route); the name itself when there is no such tab.
 // The route of the agent `name` (its tab's title), which names its conversation on the phone.
 static void tab_of(const char *name, char *out, size_t size) {
     gear_agent a = { 0 };
@@ -284,9 +321,11 @@ static void tab_of(const char *name, char *out, size_t size) {
 static char target_tab[128];  // the conversation of the agent sent to now
 
 static void hello(server *s, const char *target, const char *voice) {
+    char tab[128];
+    tab_of(target, tab, sizeof tab);
     gs_jval *o = gs_jval_object();
     gs_jval_set(o, "target", gs_jval_str(target));
-    gs_jval_set(o, "tab", gs_jval_str(target_tab));
+    gs_jval_set(o, "tab", gs_jval_str(tab));
     gs_jval_set(o, "voice", gs_jval_str(voice));
     char *json = gs_jval_write(o, false);
     send_text(s, 'H', json);
@@ -476,7 +515,8 @@ int gear_serve_proxy(void) { return -1; }
 int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) {
     char path[1200], name[128], error[512];
     server s = { 0 };
-    int listener = -1, client = -1;
+    s.talker = s.only = -1;
+    int listener = -1;
 #ifndef _WIN32
     // The engines print progress to standard output in places: that goes to standard error, and the
     // frames to a copy of standard output kept for them, or to the phone connected to the hub.
@@ -493,15 +533,15 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             fprintf(stderr, "gear: cannot listen at %s\n", at.sun_path);
             return 1;
         }
-        frames_out = NULL, s.closed = true;
     } else {
-        frames_out = fdopen(dup(1), "wb");
-        s.from = stdin;
+        s.clients[0] = (client){ &s, 0, fdopen(dup(1), "wb"), stdin, -1, NULL, true, false, false, false, 0 };
+        s.talker = 0;
     }
     dup2(2, 1);
 #else
     if (hub) { fprintf(stderr, "gear: the hub needs a Unix system\n"); return 1; }
-    frames_out = stdout, s.from = stdin;
+    s.clients[0] = (client){ &s, 0, stdout, stdin, -1, NULL, true, false, false, false, 0 };
+    s.talker = 0;
 #endif
     {
         char *pref = SDL_GetPrefPath("wakamex", "gear");
@@ -539,7 +579,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
     gear_transcript *transcript = gear_transcript_open(path, 1);
     out_to = (delivery){ target, transcript };
     tab_of(target, target_tab, sizeof target_tab);
-    SDL_Thread *reader = hub ? NULL : SDL_CreateThread(read_frames, "gear-serve-in", &s);
+    if (!hub) s.clients[0].reader = SDL_CreateThread(read_frames, "gear-serve-in", &s.clients[0]);
     SDL_Thread *speaker = SDL_CreateThread(synthesize, "gear-serve-say", &s);
     if (!hub) hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
 
@@ -556,47 +596,76 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
     int pending_n = 0;
     for (bool open = true; open;) {
 #ifndef _WIN32
-        // The hub: a phone connecting takes over from the one before, whose connection is closed.
+        // The hub: each phone or desktop connecting is a client beside the others (the voice one, when
+        // there is none yet).
         struct pollfd lp = { .fd = listener, .events = POLLIN };
         if (hub && poll(&lp, 1, 0) == 1) {
-            int fd = accept(listener, NULL, NULL);
-            if (fd >= 0) {
-                if (client >= 0) shutdown(client, SHUT_RDWR);
-                if (reader) SDL_WaitThread(reader, NULL), reader = NULL;
+            int fd = accept(listener, NULL, NULL), i = 0;
+            while (fd >= 0 && i < CLIENTS && s.clients[i].live) i++;
+            if (fd >= 0 && i == CLIENTS) close(fd);  // (a full hub turns the newest away)
+            else if (fd >= 0) {
+                client *c = &s.clients[i];
                 SDL_LockMutex(s.out);
-                if (frames_out) fclose(frames_out);
-                frames_out = fdopen(dup(fd), "wb");
+                *c = (client){ &s, i, fdopen(dup(fd), "wb"), fdopen(dup(fd), "rb"), fd, NULL, true, false, false, false, SDL_GetTicks() };
                 SDL_UnlockMutex(s.out);
-                if (s.from) fclose(s.from);
-                if (client >= 0) close(client);
-                client = fd, s.from = fdopen(dup(fd), "rb");
-                SDL_LockMutex(s.lock);
-                for (frame *g = s.in, *next; g; g = next) next = g->next, SDL_free(g->data), SDL_free(g);
-                s.in = NULL, s.closed = false, s.background = false, s.phone_playing = false, s.stopping = false;
-                SDL_UnlockMutex(s.lock);
-                reader = SDL_CreateThread(read_frames, "gear-hub-in", &s);
-                always = false, samples = 0, pending_n = 0;
-                if (pipe) gear_pipeline_cancel(pipe);
-                hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                c->reader = SDL_CreateThread(read_frames, "gear-hub-in", c);
+                if (s.talker < 0) use_voice(&s, i);
+                SDL_strlcpy(c->target, target, sizeof c->target);
+                s.only = i;
+                hello(&s, c->target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                s.only = -1;
             }
         }
 #endif
         SDL_LockMutex(s.lock);
         frame *f = s.in;
         if (f) s.in = f->next;
-        bool gone = !f && s.closed;
-        open = !gone || hub;
         SDL_UnlockMutex(s.lock);
-        // The hub with its phone gone: what it was saying stops, and replies wait for the next.
-        if (hub && gone && frames_out) {
-            SDL_AddAtomicInt(&s.generation, 1);
+        // A client gone, once its frames are handled: the others go on; the voice moves to the one
+        // used last, and what was being said stops.
+        for (int i = 0; !f && i < CLIENTS; i++) {
+            client *c = &s.clients[i];
+            SDL_LockMutex(s.lock);
+            bool gone = c->live && c->closed;
+            SDL_UnlockMutex(s.lock);
+            if (!gone) continue;
+            SDL_WaitThread(c->reader, NULL);
             SDL_LockMutex(s.out);
-            fclose(frames_out), frames_out = NULL;
+            if (c->out) fclose(c->out);
+            c->out = NULL, c->live = false;
             SDL_UnlockMutex(s.out);
-            always = false;
-            if (pipe) gear_pipeline_cancel(pipe);
+            if (c->from && c->from != stdin) fclose(c->from);
+#ifndef _WIN32
+            if (c->fd >= 0) close(c->fd);
+#endif
+            c->from = NULL, c->fd = -1;
+            if (i == s.talker) {
+                int next = -1;
+                for (int j = 0; j < CLIENTS; j++)
+                    if (s.clients[j].live && (next < 0 || s.clients[j].used > s.clients[next].used)) next = j;
+                use_voice(&s, next);
+                always = next >= 0 && s.clients[next].always, samples = 0, pending_n = 0;
+                if (pipe) gear_pipeline_cancel(pipe);
+            }
         }
+        open = hub || s.clients[0].live;
         if (f) {
+            // (talking, typing or asking for speech on a client makes it the voice one)
+            client *from = &s.clients[f->from];
+            if (SDL_strchr("AEMUW", f->type)) {
+                from->used = SDL_GetTicks();
+                if (f->from != s.talker) {
+                    use_voice(&s, f->from);
+                    always = from->always, samples = 0, pending_n = 0;
+                    if (pipe) gear_pipeline_cancel(pipe);
+                    // (and what it says goes to the agent of its open conversation)
+                    if (*from->target && SDL_strcmp(from->target, target)) {
+                        SDL_strlcpy(target, from->target, sizeof target);
+                        tab_of(target, target_tab, sizeof target_tab);
+                        gear_target_remember(models, target, "");
+                    }
+                }
+            }
             switch (f->type) {
             case 'A':
                 for (Uint32 i = 0; i + 1 < f->len; i += 2) {
@@ -613,8 +682,10 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                     }
                 }
                 break;
-            case 'O':  // always-on, "1" or "0"
-                always = f->data[0] == '1';
+            case 'O':  // always-on, "1" or "0": kept for the client, and heard when it is the voice one
+                from->always = f->data[0] == '1';
+                if (f->from != s.talker) break;
+                always = from->always;
                 if (always && !pipe) {
                     gear_model_path(models, GEAR_MODEL_VAD, path, sizeof path);
                     if (!(vad = gear_vad_open(path, error, sizeof error))) { send_text(&s, 'F', error); always = false; break; }
@@ -630,6 +701,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 pending_n = 0, samples = 0, last_words[0] = 0;
                 break;
             case 'Q': {  // the phone's playback: "1 SECONDS" while it plays the reply, that far in; "0" when not
+                if (f->from != s.talker) break;  // (another client plays nothing)
                 SDL_LockMutex(s.lock);
                 if (f->data[0] != '1') s.stopping = false;
                 s.phone_playing = f->data[0] == '1' && !s.stopping;
@@ -640,7 +712,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             }
             case 'B':  // the phone's app: "1" behind others, "0" in front again
                 SDL_LockMutex(s.lock);
-                s.background = f->data[0] == '1';
+                from->background = f->data[0] == '1';
                 SDL_UnlockMutex(s.lock);
                 break;
             case 'N':  // always-on: send what has been said now
@@ -723,16 +795,24 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 list_agents(&s);
                 break;
             case 'K':  // the phone has the messages up to this number: the rest again
+                s.only = f->from;  // (to the client asking alone)
                 replay(&s, SDL_strtoll(f->data, NULL, 10));
+                s.only = -1;
                 break;
             case 'T': {
                 gear_agent a;
-                if (!gear_agent_find(f->data, &a, error, sizeof error)) { send_text(&s, 'F', error); break; }
-                // (the agent before goes on answering in its own conversation, through the feed)
-                SDL_strlcpy(target, a.name, sizeof target);
-                tab_of(a.name, target_tab, sizeof target_tab);
-                gear_target_remember(models, a.name, "");
-                hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                s.only = f->from;  // (an answer, the greeting, to the client asking alone)
+                if (!gear_agent_find(f->data, &a, error, sizeof error)) { send_text(&s, 'F', error); s.only = -1; break; }
+                // Each client sends to the agent of the conversation it has open; the hub's own is the
+                // voice client's. (The agent before goes on answering in its own conversation, through the feed.)
+                SDL_strlcpy(from->target, a.name, sizeof from->target);
+                if (f->from == s.talker) {
+                    SDL_strlcpy(target, a.name, sizeof target);
+                    tab_of(a.name, target_tab, sizeof target_tab);
+                    gear_target_remember(models, a.name, "");
+                }
+                hello(&s, from->target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                s.only = -1;
                 break;
             }
             case 'V':
@@ -744,7 +824,9 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 s.next_voice = SDL_strdup(path);
                 SDL_SignalCondition(s.wake);
                 SDL_UnlockMutex(s.lock);
-                hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                for (int i = 0; i < CLIENTS; i++)  // (each with its own agent)
+                    if (s.clients[i].live) s.only = i, hello(&s, *s.clients[i].target ? s.clients[i].target : target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                s.only = -1;
                 break;
             }
             SDL_free(f->data);
@@ -764,7 +846,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             if (p.kind == GEAR_POST_REPLY) {
                 // (with answers to press, also as 'Z', which gives the phone's message them)
                 if (!p.shown) send_text(&s, 'R', p.text), log_message(&s, p.who, p.at, false, false, p.text, p.actions, *p.actions);
-                if (frames_out && !s.background) speak(&s, p.text);
+                if (s.talker >= 0 && !s.clients[s.talker].background) speak(&s, p.text);
             } else log_message(&s, p.who, p.at, p.kind == GEAR_POST_MINE, p.quiet, p.text, p.actions, true);
         }
         SDL_Delay(10);
@@ -775,7 +857,8 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
     SDL_SignalCondition(s.wake);
     SDL_UnlockMutex(s.lock);
     SDL_WaitThread(speaker, NULL);
-    if (reader) SDL_DetachThread(reader);  // (it is done, its input closed)
+    for (int i = 0; i < CLIENTS; i++)
+        if (s.clients[i].reader) SDL_DetachThread(s.clients[i].reader);  // (done, or ended with the process)
 #ifndef _WIN32
     if (listener >= 0) close(listener);
 #endif

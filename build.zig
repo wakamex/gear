@@ -27,11 +27,16 @@ fn sshLibrary(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bui
     mod.addCSourceFiles(.{ .root = mbedtls.path("library"), .files = mbedtls_sources, .flags = &.{ "-std=c99", "-w" } });
     mod.addIncludePath(libssh2.path("include"));
     mod.addIncludePath(libssh2.path("src"));
-    mod.addCSourceFiles(.{ .root = libssh2.path("src"), .files = libssh2_sources, .flags = &.{
+    // (on Windows, libssh2's own Winsock code, with none of the POSIX headers)
+    const windows = target.result.os.tag == .windows;
+    mod.addCSourceFiles(.{ .root = libssh2.path("src"), .files = libssh2_sources, .flags = if (windows) &.{
+        "-std=c99", "-w", "-DLIBSSH2_MBEDTLS", "-DHAVE_INTTYPES_H", "-DHAVE_STRTOLL", "-DHAVE_SNPRINTF", "-DWIN32_LEAN_AND_MEAN",
+    } else &.{
         "-std=c99", "-w", "-D_POSIX_C_SOURCE=200809L", "-D_DEFAULT_SOURCE", "-DLIBSSH2_MBEDTLS", "-DHAVE_UNISTD_H", "-DHAVE_INTTYPES_H", "-DHAVE_SYS_SELECT_H",
         "-DHAVE_SYS_UIO_H", "-DHAVE_SYS_SOCKET_H", "-DHAVE_SYS_IOCTL_H", "-DHAVE_SYS_TIME_H", "-DHAVE_SYS_UN_H", "-DHAVE_SYS_PARAM_H", "-DHAVE_ARPA_INET_H",
         "-DHAVE_NETINET_IN_H", "-DHAVE_O_NONBLOCK", "-DHAVE_POLL", "-DHAVE_GETTIMEOFDAY", "-DHAVE_STRTOLL", "-DHAVE_SNPRINTF",
     } });
+    if (windows) for ([_][]const u8{ "ws2_32", "bcrypt", "advapi32" }) |l| mod.linkSystemLibrary(l, .{});
     const lib = b.addLibrary(.{ .linkage = .static, .name = "ssh", .root_module = mod });
     lib.installHeadersDirectory(libssh2.path("include"), "", .{});
     lib.installHeadersDirectory(mbedtls.path("include"), "", .{});
@@ -87,13 +92,20 @@ pub fn build(b: *std.Build) void {
     b.installBinFile("assets/ClankerMono-Regular.ttf", "ClankerMono-Regular.ttf");
     b.installBinFile("assets/ClankerMono-LICENSE.txt", "ClankerMono-LICENSE.txt");
 
-    // The phone app built for this computer too, to try it against a server without a phone.
-    if (target.result.os.tag != .windows) {
+    // The phone app built for this computer too: on Windows the desktop's gear, a client of the hub as
+    // the phone is; elsewhere, to try it against a hub without a phone.
+    {
         const phone = b.createModule(.{ .target = target, .optimize = optimize, .link_libc = true, .strip = optimize != .debug });
         phone.addCSourceFiles(.{ .root = b.path("src/phone"), .files = phone_sources, .flags = app_flags });
         phone.linkLibrary(gesso);
         phone.linkLibrary(sshLibrary(b, target, optimize));
-        b.installArtifact(b.addExecutable(.{ .name = "gear-phone", .root_module = phone }));
+        if (target.result.os.tag == .windows) phone.linkSystemLibrary("ws2_32", .{});
+        const phone_exe = b.addExecutable(.{ .name = "gear-phone", .root_module = phone });
+        if (target.result.os.tag == .windows) {
+            phone_exe.subsystem = .windows;
+            phone.addWin32ResourceFile(.{ .file = b.path("assets/icon/gear.rc") });
+        }
+        b.installArtifact(phone_exe);
         // (its characters' frames, beside it, where it looks for them as the Android app does in its assets)
         b.installDirectory(.{ .source_dir = b.path("assets/avatars"), .install_dir = .bin, .install_subdir = "avatars" });
     }
