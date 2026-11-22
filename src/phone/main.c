@@ -48,7 +48,9 @@ static const char *const read_names[] = { "replies to me", "this conversation", 
 // quiet: Panetone's own receipt or notice, shown folded to its first line; unfolded: opened by a tap
 // laid_w, laid_h, laid_unfolded: its height when last laid out at that width and folding, kept so
 // that a long conversation lays out only what is near the screen
-typedef struct { char *text; char who[128]; char at[8]; bool mine, quiet, unfolded, laid_unfolded; float laid_w, laid_h; } entry;
+// actions: a question's answers, pressed as its Telegram buttons are, "ID\tLABEL\n" each, or NULL;
+// chose: the one pressed, from 1, or 0 for none yet
+typedef struct { char *text, *actions; char who[128]; char at[8]; bool mine, quiet, unfolded, laid_unfolded; float laid_w, laid_h; int chose; } entry;
 enum { HISTORY = 2000, CONVERSATIONS = 64 };
 typedef struct { char who[128]; int n; } unread;  // the replies in a conversation not yet seen
 
@@ -154,11 +156,56 @@ static void save_settings(app *a) {
 }
 
 static void remember(app *a, const char *text, const char *who, const char *at, bool mine) {
-    if (a->count == HISTORY) SDL_free(a->history[0].text), SDL_memmove(a->history, a->history + 1, (HISTORY - 1) * sizeof *a->history), a->count--;
+    if (a->count == HISTORY) SDL_free(a->history[0].text), SDL_free(a->history[0].actions), SDL_memmove(a->history, a->history + 1, (HISTORY - 1) * sizeof *a->history), a->count--;
     entry *e = &a->history[a->count++];
     *e = (entry){ 0 };  // (a slot taken again after the oldest went holds a copy of the one before it)
     e->text = SDL_strdup(text), e->mine = mine;
     SDL_strlcpy(e->who, who, sizeof e->who), SDL_strlcpy(e->at, at, sizeof e->at);
+}
+
+// A message's answers from its JSON's "actions", as "ID\tLABEL\n" each; NULL for none.
+static char *actions_of(gs_jv o) {
+    gs_jv list = gs_json_get(o, "actions");
+    if (!gs_json_count(list)) return NULL;
+    size_t cap = 1;
+    for (gs_jv x = gs_json_first(list); x; x = gs_json_next(x)) cap += SDL_strlen(gs_json_str(gs_json_get(x, "id"), "")) + SDL_strlen(gs_json_str(gs_json_get(x, "label"), "")) + 2;
+    char *out = SDL_calloc(1, cap);
+    for (gs_jv x = gs_json_first(list); x; x = gs_json_next(x))
+        SDL_strlcat(out, gs_json_str(gs_json_get(x, "id"), ""), cap), SDL_strlcat(out, "\t", cap), SDL_strlcat(out, gs_json_str(gs_json_get(x, "label"), ""), cap), SDL_strlcat(out, "\n", cap);
+    return out;
+}
+
+// The newest kept message of `who` with `text`, or NULL.
+static entry *kept_message(app *a, const char *who, const char *text, bool mine) {
+    for (int i = a->count - 1; i >= 0; i--)
+        if (a->history[i].mine == mine && !SDL_strcmp(a->history[i].who, who) && !SDL_strcmp(a->history[i].text, text)) return &a->history[i];
+    return NULL;
+}
+
+// A kept message's answers and the one pressed, written again to the history file as an update to it.
+static void save_answers(app *a, const entry *e) {
+    gs_jval *o = gs_jval_object(), *list = gs_jval_array();
+    gs_jval_set(o, "update", gs_jval_bool(true));
+    gs_jval_set(o, "who", gs_jval_str(e->who));
+    gs_jval_set(o, "text", gs_jval_str(e->text));
+    for (const char *x = e->actions; x && *x;) {
+        const char *tab = SDL_strchr(x, '\t'), *end = SDL_strchr(x, '\n');
+        if (!tab || !end) break;
+        char id[600], label[600];
+        SDL_snprintf(id, sizeof id, "%.*s", (int)(tab - x), x), SDL_snprintf(label, sizeof label, "%.*s", (int)(end - tab - 1), tab + 1);
+        gs_jval *one = gs_jval_object();
+        gs_jval_set(one, "id", gs_jval_str(id)), gs_jval_set(one, "label", gs_jval_str(label));
+        gs_jval_push(list, one);
+        x = end + 1;
+    }
+    gs_jval_set(o, "actions", list);
+    gs_jval_set(o, "chose", gs_jval_num(e->chose));
+    char *line = gs_jval_write(o, false), path[1100];
+    gs_jval_free(o);
+    settings_path(a, path, sizeof path, "history.jsonl");
+    SDL_IOStream *io = line ? SDL_IOFromFile(path, "ab") : NULL;
+    if (io) SDL_WriteIO(io, line, SDL_strlen(line)), SDL_WriteIO(io, "\n", 1), SDL_CloseIO(io);
+    SDL_free(line);
 }
 
 static void load_history(app *a) {
@@ -172,9 +219,17 @@ static void load_history(app *a) {
         if (!doc) continue;
         gs_jv o = gs_json_root(doc);
         const char *text = gs_json_str(gs_json_get(o, "text"), NULL);
-        if (text) {
+        entry *e = NULL;
+        if (text && gs_json_bool(gs_json_get(o, "update"), false)) {  // (a kept message's answers, or the one pressed)
+            if ((e = kept_message(a, gs_json_str(gs_json_get(o, "who"), ""), text, false))) {
+                char *x = actions_of(o);
+                if (x) SDL_free(e->actions), e->actions = x;
+                e->chose = (int)gs_json_num(gs_json_get(o, "chose"), e->chose);
+            }
+        } else if (text) {
             remember(a, text, gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""), gs_json_bool(gs_json_get(o, "mine"), false));
-            a->history[a->count - 1].quiet = gs_json_bool(gs_json_get(o, "quiet"), false);
+            e = &a->history[a->count - 1];
+            e->quiet = gs_json_bool(gs_json_get(o, "quiet"), false), e->actions = actions_of(o);
         }
         gs_json_free(doc);
     }
@@ -448,6 +503,9 @@ static void take_frames(app *a) {
                 for (int i = a->count - 1; i >= 0 && i >= a->count - 200; i--)
                     if (a->history[i].mine == mine && !SDL_strcmp(a->history[i].who, who) && !SDL_strcmp(a->history[i].text, text)) had = true;
                 if (!had) add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine, quiet);
+                // (its answers to press, on it as new or on the one had, such as a reply come as 'R')
+                entry *with = gs_json_count(gs_json_get(o, "actions")) ? kept_message(a, who, text, mine) : NULL;
+                if (with && !with->actions) with->actions = actions_of(o), with->laid_w = 0, save_answers(a, with);
                 // (read aloud when new, as the setting asks: not one given again on connecting)
                 bool wanted = a->read == READ_ALL || (a->read == READ_OPEN && !SDL_strcmp(who, a->open));
                 if (!had && !mine && !quiet && wanted && !gs_json_bool(gs_json_get(o, "again"), false) && !SDL_GetAtomicInt(&behind) &&
@@ -1029,6 +1087,11 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
     gp_rich_style style = { e->mine ? small + 1 : px, 11, e->mine ? DIM : (live ? BRIGHT : TEXT), ACCENT, BORDER, (SDL_FColor){ 1, 1, 1, 0.04f },
                             BRIGHT, (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.22f } };
     float h = head + gp_rich(ui, (gs_rect){ at.x + pad, 0, w, 0 }, text, &style, false) + 8;
+    // A question's answers under it, a button each, as Telegram shows them.
+    int answers = 0;
+    for (const char *x = e->actions; x && *x; x++) answers += *x == '\n';
+    float button_h = px * 2.2f, buttons_at = h;
+    h += answers * (button_h + 6);
     if (!draw) return h;
     gs_ui_fill(ui, (gs_rect){ at.x, at.y, 3, h - 4 }, e->mine ? BORDER : ACCENT);
     if (!e->mine) gs_ui_fill(ui, (gs_rect){ at.x + 3, at.y, at.w - 3, h - 4 }, (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.06f });
@@ -1067,6 +1130,29 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
         style.text = TEXT;  // (the rest of a message being heard stays as it was, the sentence brighter)
         gp_rich_marked(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, from, to, &a->mark_y);
     } else gp_rich(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, true);
+    for (int k = 0; k < answers; k++) {
+        const char *x = e->actions;
+        for (int j = 0; j < k; j++) x = SDL_strchr(x, '\n') + 1;
+        const char *tab = SDL_strchr(x, '\t'), *end = SDL_strchr(x, '\n');
+        if (!tab || tab > end) continue;
+        char id[600], label[600];
+        SDL_snprintf(id, sizeof id, "%.*s", (int)(tab - x), x), SDL_snprintf(label, sizeof label, "%.*s", (int)(end - tab - 1), tab + 1);
+        gs_rect b = { at.x + pad, at.y + buttons_at - 4 + k * (button_h + 6), w, button_h };
+        bool chosen = e->chose == k + 1, open = !e->chose && !preview;
+        gs_ui_round(ui, b, 6, chosen ? (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.25f } : RAISED);
+        gs_ui_outline(ui, b, 6, 1, chosen ? ACCENT : open && gs_ui_hovered(ui, b) ? ACCENT : BORDER);
+        gs_ui_text(ui, gs_inset(b, 8), label, px, chosen ? BRIGHT : open ? TEXT : DIM, 0);
+        if (open && gs_ui_clicked(ui, b) && a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN) {
+            gs_jval *o = gs_jval_object();
+            gs_jval_set(o, "to", gs_jval_str(e->who)), gs_jval_set(o, "action", gs_jval_str(id));
+            char *json = gs_jval_write(o, false);
+            gs_jval_free(o);
+            gp_link_send(a->link, 'C', json, (uint32_t)SDL_strlen(json));
+            SDL_free(json);
+            ((entry *)e)->chose = k + 1;
+            save_answers(a, e);
+        }
+    }
     return h;
 }
 
@@ -1693,7 +1779,7 @@ static void debug_event(const SDL_Event *e) {
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|pick|table|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|pick|table|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -1730,6 +1816,13 @@ int main(int argc, char **argv) {
                      "| Exam strategy | Portuguese | 15.4 | 8% | 1% |\n\n- German shares words like \"in\", \"so\", \"was\" and \"will\" with English, so a clean German transcript scores about 15% here.",
                  "transcribe", "12:53", false);
         if (!SDL_strcmp(argv[3], "table")) SDL_strlcpy(a.open, "transcribe", sizeof a.open);
+        if (!SDL_strcmp(argv[3], "question")) {  // (an agent's question with its answers, the second pressed)
+            remember(&a, "Should this project take on the light client?\n\n1. Build it here (Recommended): build it in this repo next.\n\n2. Feasibility probe first: half a day against one peer, then report.\n\n3. Decline: out of this project's scope.", "re-opus", "18:26", false);
+            a.history[a.count - 1].actions = SDL_strdup("o1\tBuild it here (Recommended)\no2\tFeasibility probe first\no3\tDecline\n");
+            remember(&a, "Should the probe also decode block bodies?", "re-opus", "18:40", false);
+            a.history[a.count - 1].actions = SDL_strdup("p1\tYes\np2\tNo, admission only\n"), a.history[a.count - 1].chose = 2;
+            SDL_strlcpy(a.open, "re-opus", sizeof a.open);
+        }
         remember(&a, "What did the agents get done this morning?", "voice", "09:12", true);
         remember(&a, "[submitted] agent-job -> voice\nRequest ID: 2abb5edd-119b-52e0-b14e-4d9a7a9881c7\nprompt accepted by Wakterm", "voice", "09:12", false);
         a.history[a.count - 1].quiet = true;

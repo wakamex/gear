@@ -29,7 +29,7 @@ typedef struct frame { struct frame *next; char type; Uint32 len; char *data; } 
 
 // A message shown to the phone, numbered and kept (in hub-log.jsonl, so a restart keeps it too), for
 // giving again to a phone that missed it.
-typedef struct { long long seq; char *text; char who[128]; char at[8]; bool mine; bool quiet; } logged;
+typedef struct { long long seq; char *text, *actions; char who[128]; char at[8]; bool mine; bool quiet; } logged;  // actions: a question's answers, "ID\tLABEL\n" each, or NULL
 enum { LOG = 1000 };
 
 typedef struct {
@@ -300,20 +300,20 @@ static void hello(server *s, const char *target, const char *voice) {
 typedef struct { const char *target; gear_transcript *transcript; } delivery;
 static delivery out_to;
 
-static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, bool shown);
+static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, const char *actions, bool shown);
 static const char *conversation_of(const char *tab) { return *tab ? tab : "read back"; }
 
 static void deliver_text(server *s, const char *text) {
     char status[200], error[512];
     send_text(s, 'M', text);
-    log_message(s, conversation_of(target_tab), "", true, false, text, false);
+    log_message(s, conversation_of(target_tab), "", true, false, text, NULL, false);
     gear_transcript_add(out_to.transcript, text, out_to.target);
     if (*out_to.target) {
         if (gear_panetone_say(target_tab, text, "gear", error, sizeof error)) {
             SDL_snprintf(status, sizeof status, "waiting for %s", out_to.target);
             send_text(s, 'S', status);
         } else send_text(s, 'F', error);
-    } else send_text(s, 'R', text), log_message(s, "read back", "", false, false, text, false), speak(s, text);
+    } else send_text(s, 'R', text), log_message(s, "read back", "", false, false, text, NULL, false), speak(s, text);
 }
 
 // ---- What waits for the phone ----
@@ -338,15 +338,29 @@ static char *log_line(const logged *l) {
     if (l->mine) gs_jval_set(o, "mine", gs_jval_bool(true));
     if (l->quiet) gs_jval_set(o, "quiet", gs_jval_bool(true));
     gs_jval_set(o, "text", gs_jval_str(l->text));
+    if (l->actions && *l->actions) {
+        gs_jval *list = gs_jval_array();
+        for (const char *a = l->actions; *a;) {
+            const char *tab = SDL_strchr(a, '\t'), *end = SDL_strchr(a, '\n');
+            if (!tab || !end || tab > end) break;
+            char id[600], label[600];
+            SDL_snprintf(id, sizeof id, "%.*s", (int)(tab - a), a), SDL_snprintf(label, sizeof label, "%.*s", (int)(end - tab - 1), tab + 1);
+            gs_jval *one = gs_jval_object();
+            gs_jval_set(one, "id", gs_jval_str(id)), gs_jval_set(one, "label", gs_jval_str(label));
+            gs_jval_push(list, one);
+            a = end + 1;
+        }
+        gs_jval_set(o, "actions", list);
+    }
     char *json = gs_jval_write(o, false);
     gs_jval_free(o);
     return json;
 }
 
-static logged *log_add(long long seq, const char *who, const char *at, bool mine, bool quiet, const char *text) {
-    if (log_count == LOG) SDL_free(log_of[0].text), SDL_memmove(log_of, log_of + 1, (LOG - 1) * sizeof *log_of), log_count--;
+static logged *log_add(long long seq, const char *who, const char *at, bool mine, bool quiet, const char *text, const char *actions) {
+    if (log_count == LOG) SDL_free(log_of[0].text), SDL_free(log_of[0].actions), SDL_memmove(log_of, log_of + 1, (LOG - 1) * sizeof *log_of), log_count--;
     logged *l = &log_of[log_count++];
-    l->seq = seq, l->mine = mine, l->quiet = quiet, l->text = SDL_strdup(text);
+    l->seq = seq, l->mine = mine, l->quiet = quiet, l->text = SDL_strdup(text), l->actions = actions && *actions ? SDL_strdup(actions) : NULL;
     SDL_strlcpy(l->who, who, sizeof l->who), SDL_strlcpy(l->at, at, sizeof l->at);
     if (seq > log_seq) log_seq = seq;
     return l;
@@ -364,9 +378,15 @@ static void load_log(void) {
         if (!doc) continue;
         gs_jv o = gs_json_root(doc);
         const char *text = gs_json_str(gs_json_get(o, "text"), NULL);
+        char actions[1536] = "";
+        for (gs_jv a = gs_json_first(gs_json_get(o, "actions")); a; a = gs_json_next(a)) {
+            char one[1210];
+            SDL_snprintf(one, sizeof one, "%s\t%s\n", gs_json_str(gs_json_get(a, "id"), ""), gs_json_str(gs_json_get(a, "label"), ""));
+            if (SDL_strlen(actions) + SDL_strlen(one) < sizeof actions) SDL_strlcat(actions, one, sizeof actions);
+        }
         if (text)
             log_add((long long)gs_json_num(gs_json_get(o, "seq"), 0), gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""),
-                    gs_json_bool(gs_json_get(o, "mine"), false), gs_json_bool(gs_json_get(o, "quiet"), false), text), lines++;
+                    gs_json_bool(gs_json_get(o, "mine"), false), gs_json_bool(gs_json_get(o, "quiet"), false), text, actions), lines++;
         gs_json_free(doc);
     }
     SDL_free(all);
@@ -388,10 +408,10 @@ static void send_seq(server *s, long long seq) {
 // A message for the phone's conversation `who`, logged, and sent as 'Z' when a phone is connected
 // and `shown`, followed by its number ('K'). (A reply also goes as 'R', and the user's message as 'M',
 // before their numbers.)
-static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, bool shown) {
+static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, const char *actions, bool shown) {
     char now[8];
     if (!*at) stamp(now), at = now;
-    logged *l = log_add(log_seq + 1, who, at, mine, quiet, text);
+    logged *l = log_add(log_seq + 1, who, at, mine, quiet, text, actions);
     char *line = log_line(l);
     SDL_IOStream *io = SDL_IOFromFile(log_path, "ab");
     if (io) SDL_WriteIO(io, line, SDL_strlen(line)), SDL_WriteIO(io, "\n", 1), SDL_CloseIO(io);
@@ -647,6 +667,15 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'X':
                 SDL_AddAtomicInt(&s.generation, 1);
                 break;
+            case 'C': {  // one of a question's answers pressed: {"to": ROUTE, "action": ID}
+                gs_json *doc = gs_json_parse(f->data, f->len);
+                gs_jv o = doc ? gs_json_root(doc) : NULL;
+                char label[600], error[600];
+                if (o && !gear_panetone_answer(gs_json_str(gs_json_get(o, "to"), ""), gs_json_str(gs_json_get(o, "action"), ""), "gear", label, sizeof label, error, sizeof error))
+                    send_text(&s, 'F', error);
+                gs_json_free(doc);
+                break;
+            }
             case 'M':  // a message typed: sent as one said
                 if (*f->data) deliver_text(&s, f->data);
                 break;
@@ -733,9 +762,10 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
         // turn is its reply, shown and spoken (as text alone to a phone in the background).
         for (gear_post p; feed && gear_feed_next(feed, *target ? target_tab : "", &p); SDL_free(p.text)) {
             if (p.kind == GEAR_POST_REPLY) {
-                if (!p.shown) send_text(&s, 'R', p.text), log_message(&s, p.who, p.at, false, false, p.text, false);
+                // (with answers to press, also as 'Z', which gives the phone's message them)
+                if (!p.shown) send_text(&s, 'R', p.text), log_message(&s, p.who, p.at, false, false, p.text, p.actions, *p.actions);
                 if (frames_out && !s.background) speak(&s, p.text);
-            } else log_message(&s, p.who, p.at, p.kind == GEAR_POST_MINE, p.quiet, p.text, true);
+            } else log_message(&s, p.who, p.at, p.kind == GEAR_POST_MINE, p.quiet, p.text, p.actions, true);
         }
         SDL_Delay(10);
     }

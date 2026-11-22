@@ -11,6 +11,8 @@
 //   'W' the same as 'U' without the words taught ('Y'): how the speech says it by itself
 //   'J' a word, to ask how it is said: answered with 'J'
 //   'D' a line for finding a fault (UTF-8), kept in phone-debug.log in gear's data folder
+//   'C' {"to": the route, "action": one of a question's answers (from 'Z''s "actions")}: pressed, as
+//       its Telegram button is; a refusal comes back as 'F'
 //   'Y' {"word", "say"}: the word taught to be said so from now on (an empty "say" forgets it), or ""
 //       to ask for the list; answered with 'Y'
 //   'L' the agents there are, answered with 'G'
@@ -38,7 +40,8 @@
 //       sentence starts}, for showing what is heard
 //   'D' the reply has been spoken
 //   'Z' a message to show and not speak: {"seq", "who", "at", "text", "mine" when the user's, "again" when given
-//       again after 'K'}: a
+//       again after 'K', "quiet" for Panetone's own notice, "actions" [{"id", "label"}] for a question's
+//       answers to press with 'C'}: a
 //       reply from an agent sent to before, what Panetone posts to Mihai's own channels (the hub
 //       follows `panetone watch`), as Telegram shows it, or one given again after the phone's 'K'
 //   'K' the number of the message just sent ('M', 'R' or 'Z'), as the hub's log (hub-log.jsonl) has it

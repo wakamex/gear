@@ -35,6 +35,33 @@ bool gear_panetone_say(const char *route, const char *text, const char *via, cha
     return ok;
 }
 
+bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, char *error, size_t error_size) {
+    const char *argv[] = { panetone(), "answer", "--to", route, "--action", action, "--as", via, NULL };
+    size_t len = 0;
+    int code = -1;
+    char *out = gear_host_run(argv, NULL, &len, &code);
+    if (!out) { SDL_snprintf(error, error_size, "could not run panetone: %s", SDL_GetError()); return false; }
+    // {"ok": true, "result": {"answered": LABEL}}, or {"ok": false, "error": {"code", "message"}}
+    // with code question_closed, unknown_action or answer_failed
+    gs_json *doc = gs_json_parse(out, strcspn(out, "\n"));
+    gs_jv r = doc ? gs_json_root(doc) : NULL;
+    bool ok = r && gs_json_bool(gs_json_get(r, "ok"), false);
+    if (ok) SDL_strlcpy(label, gs_json_str(gs_json_get(gs_json_get(r, "result"), "answered"), ""), label_size);
+    else {
+        const char *why = r ? gs_json_str(gs_json_get(gs_json_get(r, "error"), "code"), NULL) : NULL;
+        if (why && !SDL_strcmp(why, "question_closed")) SDL_snprintf(error, error_size, "%s's question was already answered or closed", route);
+        else if (why && !SDL_strcmp(why, "unknown_action")) SDL_snprintf(error, error_size, "%s no longer offers that answer", route);
+        else {
+            const char *m = r ? gs_json_str(gs_json_get(gs_json_get(r, "error"), "message"), NULL) : NULL;
+            size_t n = strcspn(out, "\n");
+            SDL_snprintf(error, error_size, "the answer did not reach %s: %.*s", route, (int)(m ? SDL_strlen(m) : SDL_min(n, 300)), m ? m : n ? out : "no answer");
+        }
+    }
+    gs_json_free(doc);
+    SDL_free(out);
+    return ok;
+}
+
 // ---- The feed ----
 
 // A line of the feed: kind is Panetone's ("agent", "question", "request", "notice", "owner",
@@ -44,6 +71,7 @@ typedef struct line {
     struct line *next;
     char *text;
     char who[128], at[8], kind[16], via[32], id[64], final_id[64];
+    char actions[1536];  // its answers to press: "ID\tLABEL\n" each
     long long seq;
 } line;
 
@@ -72,6 +100,12 @@ static line *parse(const char *json, size_t n) {
     SDL_strlcpy(p->via, gs_json_str(gs_json_get(o, "via"), ""), sizeof p->via);
     SDL_strlcpy(p->id, gs_json_str(gs_json_get(o, "id"), ""), sizeof p->id);
     SDL_strlcpy(p->final_id, gs_json_str(gs_json_get(o, "final_id"), ""), sizeof p->final_id);
+    for (gs_jv a = gs_json_first(gs_json_get(o, "actions")); a; a = gs_json_next(a)) {
+        char one[600];
+        SDL_snprintf(one, sizeof one, "%s\t%s\n", gs_json_str(gs_json_get(a, "id"), ""), gs_json_str(gs_json_get(a, "label"), ""));
+        if (!SDL_strchr(gs_json_str(gs_json_get(a, "id"), ""), '\t') && SDL_strlen(p->actions) + SDL_strlen(one) < sizeof p->actions)
+            SDL_strlcat(p->actions, one, sizeof p->actions);
+    }
     // The text, and each attachment by name (the file stays on the computer).
     const char *text = gs_json_str(gs_json_get(o, "text"), "");
     size_t cap = SDL_strlen(text) + 1;
@@ -172,7 +206,8 @@ void gear_feed_close(gear_feed *f) {
 
 // `text` handed out as a post from the line `l`'s route and time.
 static void post_of(const line *l, gear_post_kind kind, bool quiet, bool shown, char *text, gear_post *out) {
-    *out = (gear_post){ kind, quiet, shown, "", "", text };
+    *out = (gear_post){ kind, quiet, shown, "", "", text, "" };
+    SDL_strlcpy(out->actions, l->actions, sizeof out->actions);
     SDL_strlcpy(out->who, l->who, sizeof out->who), SDL_strlcpy(out->at, l->at, sizeof out->at);
 }
 

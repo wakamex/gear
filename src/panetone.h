@@ -17,6 +17,11 @@
 // ("gear", "gear-window"). False with the reason in `error`.
 bool gear_panetone_say(const char *route, const char *text, const char *via, char *error, size_t error_size);
 
+// Presses one of a question's answers (an id of its post's actions) in the route titled `route`, as its
+// Telegram button does, as the user through `via`: the label pressed in `label`, or false with the
+// reason in `error` (the question already answered or closed among them).
+bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, char *error, size_t error_size);
+
 typedef enum {
     GEAR_POST_MESSAGE,  // a post to show: an agent's message, or Panetone's receipt or notice (quiet)
     GEAR_POST_MINE,     // the user's own message, sent through another client
@@ -29,6 +34,8 @@ typedef struct {
     bool shown;  // a reply given already as a message, its turn's end having come late: to speak only
     char who[128], at[8];  // the route's title, and the time HH:MM
     char *text;  // SDL_free it
+    // A question's answers, to be pressed as its Telegram buttons are: "ID\tLABEL\n" for each, or ""
+    char actions[1536];
 } gear_post;
 
 typedef struct gear_feed gear_feed;
