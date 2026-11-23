@@ -2231,8 +2231,9 @@ int main(int argc, char **argv) {
                 talk_screen(ui, &a, shifted(area, sw.axis, sw.off + step * sw.size), t, next);
                 preview = false;
             }
-            talk_screen(ui, &a, sw.off != 0 ? shifted(area, sw.axis, sw.off) : area, t, a.open);
-            // A table clicked: shown at its full size over everything, dragged or scrolled to its edges.
+            // A table clicked: shown at its full size in place of the talk screen, which is not drawn under it
+            // (its controls there, such as settings, would take the clicks meant for the table's).
+            if (!a.viewing) talk_screen(ui, &a, sw.off != 0 ? shifted(area, sw.axis, sw.off) : area, t, a.open);
             char *clicked = gp_rich_take_table();
             if (clicked) SDL_free(a.viewing), a.viewing = clicked, a.view_x = a.view_y = 0, went_down = false;
             if (a.viewing) table_screen(ui, &a, area);
