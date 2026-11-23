@@ -918,7 +918,13 @@ static const char *hint(app *a, char *buf, size_t size) {
     }
 }
 
-static float px = 18, small = 18;  // (small: the secondary text, dim, at the same size as the rest to be read easily)
+// The text's size, and the secondary text's (dim): on the phone 18 points both, to be read easily; on
+// the desktop gink's, 15 points and 13, read closer up on a bigger screen.
+#ifdef SDL_PLATFORM_ANDROID
+static float px = 18, small = 18;
+#else
+static float px = 15, small = 13;
+#endif
 static gs_rect character_area;  // where the character was drawn, which holding down on starts listening
 
 // The conversations to open: those with messages, the newest first, then the agents without one yet.
