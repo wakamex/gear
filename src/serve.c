@@ -46,6 +46,7 @@ typedef struct {
     bool always;         // it asked for always-on listening
     Uint64 used;         // when it last talked, typed or asked for speech
     char target[128];    // the agent its open conversation sends to ('T'), or "" for the hub's
+    char tab[128];       // and that agent's route, found once when it is chosen
 } client;
 
 typedef struct {
@@ -325,9 +326,8 @@ static char target_tab[128];  // the conversation of the agent sent to now
 // always-on's countdown.
 static struct { char hear[128]; int hears; char device[32]; bool echo; double countdown; } settings;
 
-static void hello(server *s, const char *target, const char *voice) {
-    char tab[128];
-    tab_of(target, tab, sizeof tab);
+// (the tab found already: finding it asks Wakterm for every agent, too slow to do for each greeting)
+static void hello(server *s, const char *target, const char *tab, const char *voice) {
     gs_jval *o = gs_jval_object();
     gs_jval_set(o, "target", gs_jval_str(target));
     gs_jval_set(o, "tab", gs_jval_str(tab));
@@ -599,7 +599,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
     tab_of(target, target_tab, sizeof target_tab);
     if (!hub) s.clients[0].reader = SDL_CreateThread(read_frames, "gear-serve-in", &s.clients[0]);
     SDL_Thread *speaker = SDL_CreateThread(synthesize, "gear-serve-say", &s);
-    if (!hub) hello(&s, target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+    if (!hub) hello(&s, target, target_tab, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
 
     float *audio = SDL_malloc(MAX_AUDIO * sizeof(float));
     int samples = 0;
@@ -628,9 +628,9 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 SDL_UnlockMutex(s.out);
                 c->reader = SDL_CreateThread(read_frames, "gear-hub-in", c);
                 if (s.talker < 0) use_voice(&s, i);
-                SDL_strlcpy(c->target, target, sizeof c->target);
+                SDL_strlcpy(c->target, target, sizeof c->target), SDL_strlcpy(c->tab, target_tab, sizeof c->tab);
                 s.only = i;
-                hello(&s, c->target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                hello(&s, c->target, c->tab, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
                 s.only = -1;
             }
         }
@@ -679,7 +679,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                     // (and what it says goes to the agent of its open conversation)
                     if (*from->target && SDL_strcmp(from->target, target)) {
                         SDL_strlcpy(target, from->target, sizeof target);
-                        tab_of(target, target_tab, sizeof target_tab);
+                        SDL_strlcpy(target_tab, from->tab, sizeof target_tab);
                         gear_target_remember(models, target, "");
                     }
                 }
@@ -824,12 +824,13 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 // Each client sends to the agent of the conversation it has open; the hub's own is the
                 // voice client's. (The agent before goes on answering in its own conversation, through the feed.)
                 SDL_strlcpy(from->target, a.name, sizeof from->target);
+                tab_of(a.name, from->tab, sizeof from->tab);
                 if (f->from == s.talker) {
                     SDL_strlcpy(target, a.name, sizeof target);
-                    tab_of(a.name, target_tab, sizeof target_tab);
+                    SDL_strlcpy(target_tab, from->tab, sizeof target_tab);
                     gear_target_remember(models, a.name, "");
                 }
-                hello(&s, from->target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                hello(&s, from->target, from->tab, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
                 s.only = -1;
                 break;
             }
@@ -868,7 +869,8 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 }
                 gs_json_free(doc);
                 for (int i = 0; i < CLIENTS; i++)  // (each with its own agent)
-                    if (s.clients[i].live) s.only = i, hello(&s, *s.clients[i].target ? s.clients[i].target : target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                    if (s.clients[i].live)
+                        s.only = i, hello(&s, *s.clients[i].target ? s.clients[i].target : target, *s.clients[i].target ? s.clients[i].tab : target_tab, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
                 s.only = -1;
                 break;
             }
@@ -882,7 +884,8 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 SDL_SignalCondition(s.wake);
                 SDL_UnlockMutex(s.lock);
                 for (int i = 0; i < CLIENTS; i++)  // (each with its own agent)
-                    if (s.clients[i].live) s.only = i, hello(&s, *s.clients[i].target ? s.clients[i].target : target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                    if (s.clients[i].live)
+                        s.only = i, hello(&s, *s.clients[i].target ? s.clients[i].target : target, *s.clients[i].target ? s.clients[i].tab : target_tab, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
                 s.only = -1;
                 break;
             }

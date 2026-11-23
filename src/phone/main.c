@@ -67,6 +67,7 @@ typedef struct {
     int hears;
     bool echo;
     double countdown;
+    Uint64 countdown_at;  // when it was last changed here: the greetings answering taps before then are older
     char avatar[16];      // the character drawn: fox, tomato, girl or robot
     char pem[1024], key_line[400];
     char dir[1024];
@@ -497,7 +498,8 @@ static void take_frames(app *a) {
                 SDL_strlcpy(a->device, gs_json_str(gs_json_get(o, "device"), ""), sizeof a->device);
                 a->hears = (int)gs_json_num(gs_json_get(o, "hears"), 0);
                 a->echo = gs_json_bool(gs_json_get(o, "echo"), false);
-                a->countdown = gs_json_num(gs_json_get(o, "countdown"), -1);
+                // (not while taps here are still being answered, whose greetings would set it back a step)
+                if (SDL_GetTicks() - a->countdown_at > 2000) a->countdown = gs_json_num(gs_json_get(o, "countdown"), -1);
             }
             gs_json_free(doc);
             if (a->always && !a->always_sent) gp_link_send(a->link, 'O', "1", 1), a->always_sent = true;
@@ -1713,7 +1715,7 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
         // (changed here at once, the computer's greeting confirming it, so quick taps each count; 0 to 10 s)
         int step = (gs_ui_button(ui, more, "+") && a->countdown < 10) - (gs_ui_button(ui, less, "-") && a->countdown > 0);
         if (step && on) {
-            a->countdown = SDL_clamp(SDL_round(a->countdown) + step, 0, 10);
+            a->countdown = SDL_clamp(SDL_round(a->countdown) + step, 0, 10), a->countdown_at = SDL_GetTicks();
             SDL_snprintf(json, sizeof json, "{\"countdown\":%.0f}", a->countdown);
             gp_link_send(a->link, 'S', json, (uint32_t)SDL_strlen(json));
         }
