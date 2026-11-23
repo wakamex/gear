@@ -6,11 +6,13 @@
     tools/publish-update --to PLACE            publish to PLACE instead
 
 PLACE is HOST:FOLDER or a local folder: by default the one named in ~/.config/gear/publish-to, the
-folder the update server serves at the address in src/window.c. It gets files/SHA256 for each file
+folder the update server serves at the address in src/phone/main.c. It gets files/SHA256 for each file
 of the build, a manifest naming the build and each file's name, hash and size, the manifest's
 signature with the key in ~/.config/gear/update-signing.key as manifest.txt.sig, where gesso's
-gs_update reads it, and gear-test-windows.zip of the same files for a first install: the program,
-its font, LICENSE and THIRD-PARTY-LICENSES.txt (written by tools/third-party-licenses), named as a
+gs_update reads it, and gear-test-windows.zip of the same files for a first install: the program
+(the app, a client of the hub as the phone is, built as gear-phone.exe and published as gear.exe), its
+characters' pictures, its font, LICENSE and THIRD-PARTY-LICENSES.txt (written by
+tools/third-party-licenses --app), named as a
 test build since it updates itself once its user agrees. The files go up before the manifest, which
 goes up whole, so a copy never reads one that names a file not yet there. The build is the commit's
 short hash, so the tree must be clean; a copy runs it only when it was built with that name
@@ -29,8 +31,11 @@ import zipfile
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# (beside the program, never in a folder: gs_update takes no paths)
-FILES = ["gear.exe", "ClankerMono-Regular.ttf", "ClankerMono-LICENSE.txt", "LICENSE", "THIRD-PARTY-LICENSES.txt"]
+# (beside the program, never in a folder: gs_update takes no paths). The program is the app, the
+# phone's, built for Windows as gear-phone.exe and published as gear.exe, a client of the hub; its
+# characters' pictures go beside it.
+AVATARS = sorted(f for f in os.listdir(os.path.join(ROOT, "assets", "avatars")) if f.endswith(".png"))
+FILES = ["gear.exe", "ClankerMono-Regular.ttf", "ClankerMono-LICENSE.txt", "LICENSE", "THIRD-PARTY-LICENSES.txt"] + AVATARS
 KEY = os.path.expanduser("~/.config/gear/update-signing.key")
 PLACE = os.path.expanduser("~/.config/gear/publish-to")
 
@@ -56,9 +61,13 @@ def main():
         build = subprocess.run(["git", "-C", ROOT, "rev-parse", "--short", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
         run("zig", "build", "-Doptimize=ReleaseFast", "-Dtarget=x86_64-windows-gnu", "-Decho=true", f"-Dbuild={build}", "-p", "zig-out/windows", cwd=ROOT)
     folder = args.bin or os.path.join(ROOT, "zig-out", "windows", "bin")
+    if not args.bin:
+        shutil.copyfile(os.path.join(folder, "gear-phone.exe"), os.path.join(folder, "gear.exe"))
+        for name in AVATARS:
+            shutil.copyfile(os.path.join(ROOT, "assets", "avatars", name), os.path.join(folder, name))
     # The program's license and those of what is compiled into it go with every copy.
     shutil.copyfile(os.path.join(ROOT, "LICENSE"), os.path.join(folder, "LICENSE"))
-    run(os.path.join(ROOT, "tools", "third-party-licenses"), "--target", "windows", "--echo", os.path.join(folder, "THIRD-PARTY-LICENSES.txt"))
+    run(os.path.join(ROOT, "tools", "third-party-licenses"), "--target", "windows", "--echo", "--app", os.path.join(folder, "THIRD-PARTY-LICENSES.txt"))
     if not build:
         sys.exit("--build is needed with --bin")
     with open(KEY, "rb") as f:

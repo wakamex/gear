@@ -14,6 +14,7 @@
 #include "gs_stream.h"
 #include "gs_text.h"
 #include "gs_ui.h"
+#include "gs_update.h"
 #ifdef SDL_PLATFORM_ANDROID
 #include "gs_android.h"
 #endif
@@ -59,6 +60,13 @@ typedef struct {
     char host[256], user[64], port[8], host_key[128];
     bool always;          // always on: listening without holding, the computer finding the messages
     int read;             // which new messages are read aloud: READ_REPLIES, READ_OPEN or READ_ALL
+    float volume;         // of what the app plays, 0 to 2 (kept here, for this device)
+    // The computer's settings, as its greeting ('H') gives them, changed with 'S': the recognition model,
+    // how many there are, where it runs, whether its echo canceller is built in, always-on's countdown
+    char hear[128], device[32];
+    int hears;
+    bool echo;
+    double countdown;
     char avatar[16];      // the character drawn: fox, tomato, girl or robot
     char pem[1024], key_line[400];
     char dir[1024];
@@ -130,6 +138,7 @@ static void load_settings(app *a) {
     char *text = SDL_LoadFile(path, NULL);
     SDL_strlcpy(a->port, "22", sizeof a->port);
     SDL_strlcpy(a->avatar, "tomato", sizeof a->avatar);
+    a->volume = 1;
     char *save = NULL;
     for (char *line = text ? SDL_strtok_r(text, "\n", &save) : NULL; line; line = SDL_strtok_r(NULL, "\n", &save)) {
         char *eq = SDL_strchr(line, '=');
@@ -142,6 +151,7 @@ static void load_settings(app *a) {
         else if (!SDL_strcmp(line, "host_key")) SDL_strlcpy(a->host_key, v, sizeof a->host_key);
         else if (!SDL_strcmp(line, "always")) a->always = *v == '1';
         else if (!SDL_strcmp(line, "read")) a->read = SDL_clamp(SDL_atoi(v), 0, 2);
+        else if (!SDL_strcmp(line, "volume")) a->volume = SDL_clamp((float)SDL_atof(v), 0, 2);
         else if (!SDL_strcmp(line, "avatar")) SDL_strlcpy(a->avatar, v, sizeof a->avatar);
         else if (!SDL_strcmp(line, "open")) SDL_strlcpy(a->open, v, sizeof a->open);
     }
@@ -151,7 +161,7 @@ static void load_settings(app *a) {
 static void save_settings(app *a) {
     char path[1100], text[920];
     settings_path(a, path, sizeof path, "settings.txt");
-    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\nopen=%s\nread=%d\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar, a->open, a->read);
+    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\nopen=%s\nread=%d\nvolume=%.2f\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar, a->open, a->read, a->volume);
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
@@ -479,6 +489,12 @@ static void take_frames(app *a) {
                 SDL_strlcpy(a->target, gs_json_str(gs_json_get(gs_json_root(doc), "target"), ""), sizeof a->target);
                 SDL_strlcpy(a->tab, gs_json_str(gs_json_get(gs_json_root(doc), "tab"), ""), sizeof a->tab);
                 SDL_strlcpy(a->voice, gs_json_str(gs_json_get(gs_json_root(doc), "voice"), "alba"), sizeof a->voice);
+                gs_jv o = gs_json_root(doc);
+                SDL_strlcpy(a->hear, gs_json_str(gs_json_get(o, "hear"), ""), sizeof a->hear);
+                SDL_strlcpy(a->device, gs_json_str(gs_json_get(o, "device"), ""), sizeof a->device);
+                a->hears = (int)gs_json_num(gs_json_get(o, "hears"), 0);
+                a->echo = gs_json_bool(gs_json_get(o, "echo"), false);
+                a->countdown = gs_json_num(gs_json_get(o, "countdown"), -1);
             }
             gs_json_free(doc);
             if (a->always && !a->always_sent) gp_link_send(a->link, 'O', "1", 1), a->always_sent = true;
@@ -804,8 +820,10 @@ static void load_avatars(SDL_Renderer *ren) {
     for (int i = 0; i < AVATARS; i++)
         for (int k = 0; k < 4; k++) {
             char path[1100];
+            // (in a folder beside the program, or beside it, as an update to the desktop's app puts them)
             SDL_snprintf(path, sizeof path, "%savatars/%s-%s.png", SDL_GetBasePath(), avatars[i], states[k]);
             SDL_Surface *img = SDL_LoadPNG(path);
+            if (!img) SDL_snprintf(path, sizeof path, "%s%s-%s.png", SDL_GetBasePath(), avatars[i], states[k]), img = SDL_LoadPNG(path);
             if (!img) { SDL_Log("gear: no %s: %s", path, SDL_GetError()); continue; }
             frames[i][k] = SDL_CreateTextureFromSurface(ren, img);
             SDL_SetTextureScaleMode(frames[i][k], SDL_SCALEMODE_LINEAR);
@@ -1336,7 +1354,14 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         if (!preview) character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
         char buf[300];
         bool listening = !preview && (a->mood == LISTENING || (a->always && a->mood == IDLE));
-        gs_ui_text(ui, gs_cut_top(&r, px * 1.8f), preview ? "" : hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
+        gs_rect hint_line = gs_cut_top(&r, px * 1.8f);
+        gs_ui_text(ui, hint_line, preview ? "" : hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
+        // The microphone's level while it is open, at the right of the hint, so being heard shows.
+        if (!preview && a->mic) {
+            gs_rect meter = { hint_line.x + hint_line.w - 56, hint_line.y + hint_line.h / 2 - 3, 56, 6 };
+            gs_ui_round(ui, meter, 3, RAISED);
+            gs_ui_round(ui, (gs_rect){ meter.x, meter.y, meter.w * SDL_clamp(a->level, 0, 1), meter.h }, 3, ACCENT);
+        }
         gs_rect toggle = gs_cut_top(&r, px * 2);
         const char *always_label = a->always ? "always on: on" : "always on: off";
         float tw = gs_ui_text_width(ui, always_label, small) + 24;
@@ -1621,6 +1646,10 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
     }
     gs_ui_text(ui, head, "gear: the computer it talks to", px, BRIGHT, -1);
     float row = px * 2.4f;
+    // (the rest a page that scrolls, when it is taller than the screen)
+    gs_rect area_below = r;
+    r = gs_ui_page_begin(ui, area_below, "setup");
+    r.h = 1e6f;
     gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "computer (name or address)", small, DIM, -1);
     gs_ui_field(ui, gs_cut_top(&r, row), "host", a->host, sizeof a->host, "example.org");
     gs_cut_top(&r, 6);
@@ -1655,8 +1684,41 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
         a->teaching = true;
         gp_link_send(a->link, 'Y', "", 0);
     }
+    // The volume of what this device plays.
     gs_cut_top(&r, 14);
-    gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "this phone's key, for ~/.ssh/authorized_keys there:", small, DIM, -1);
+    char vol[32];
+    SDL_snprintf(vol, sizeof vol, "volume: %.0f%%", a->volume * 100);
+    gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), vol, small, DIM, -1);
+    float was = a->volume;
+    gs_ui_slider(ui, gs_cut_top(&r, row), "volume", &a->volume, 0, 2);
+    if (a->volume != was) gs_mix_set_volume(a->volume), save_settings(a);
+    // The computer's settings, shared by every device: always-on's countdown, and the recognition model.
+    // (as its last greeting gave them; changing them needs the connection)
+    bool on = a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN;
+    if (a->hear[0]) {
+        gs_cut_top(&r, 14);
+        gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "the computer's, for every device", small, DIM, -1);
+        gs_rect line = gs_cut_top(&r, row);
+        float sign = row;
+        gs_rect more = gs_cut_right(&line, sign);
+        gs_rect less = gs_cut_right(&line, sign);
+        char cd[64];
+        SDL_snprintf(cd, sizeof cd, "always on sends after: %.0f s", a->countdown);
+        gs_ui_text(ui, line, cd, px, TEXT, -1);
+        char json[40];
+        if (gs_ui_button(ui, less, "-") && on && a->countdown > 0) SDL_snprintf(json, sizeof json, "{\"countdown\":%.0f}", a->countdown - 1), gp_link_send(a->link, 'S', json, (uint32_t)SDL_strlen(json));
+        if (gs_ui_button(ui, more, "+") && on && a->countdown < 10) SDL_snprintf(json, sizeof json, "{\"countdown\":%.0f}", a->countdown + 1), gp_link_send(a->link, 'S', json, (uint32_t)SDL_strlen(json));
+        gs_cut_top(&r, 6);
+        char hear[200];
+        char model[128];
+        SDL_strlcpy(model, a->hear, sizeof model);
+        if (SDL_strstr(model, ".gguf")) *SDL_strstr(model, ".gguf") = 0;
+        SDL_snprintf(hear, sizeof hear, "hears with %s, %s", model, !SDL_strcasecmp(a->device, "cpu") ? "CPU" : "GPU");
+        if (gs_ui_button(ui, gs_cut_top(&r, row), hear) && on && a->hears > 1) gp_link_send(a->link, 'S', "{\"hear\":\"next\"}", 15);
+        gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), a->echo ? "echo cancelling: built in" : "echo cancelling: not in this build", small, DIM, -1);
+    }
+    gs_cut_top(&r, 14);
+    gs_ui_text(ui, gs_cut_top(&r, small * 1.6f), "this device's key, for ~/.ssh/authorized_keys there:", small, DIM, -1);
     float kh = gs_ui_text_height(ui, a->key_line, small, r.w);
     gs_ui_text_wrapped(ui, gs_cut_top(&r, kh), a->key_line, small, TEXT);
     gs_cut_top(&r, 8);
@@ -1680,8 +1742,10 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
     char why[256];
     if (a->link && gp_link_status(a->link, why, sizeof why) == GP_FAILED) {
         gs_cut_top(&r, 10);
-        gs_ui_text_wrapped(ui, r, why, small, OVER);
+        float h = gs_ui_text_height(ui, why, small, r.w);
+        gs_ui_text_wrapped(ui, gs_cut_top(&r, h), why, small, OVER);
     }
+    gs_ui_page_end(ui, r.y + 16);
     if (a->teaching) pronunciation_panel(ui, a, area);
 }
 
@@ -1777,6 +1841,48 @@ static void debug_event(const SDL_Event *e) {
     debug_line(line);
 }
 
+// ---- Updates, on the desktop ----
+
+#if defined(GEAR_BUILD) && !defined(SDL_PLATFORM_ANDROID)
+// A published build of the desktop's app keeps itself up to date as the window before it did, with
+// gesso's gs_update, from the same place and with the same yes or no (update.txt in gear's data folder).
+#define UPDATES "http://updates.waka.mx/gear/manifest.txt"
+// The publisher's key; tools/publish-update signs with its private half.
+static const Uint8 publisher[32] = {
+    0x45, 0xbb, 0xa1, 0x28, 0xcb, 0x43, 0x4d, 0xe9, 0xe0, 0x8d, 0x0a, 0xc5, 0x99, 0x0a, 0x27, 0x6b,
+    0x9d, 0x6c, 0xf0, 0x33, 0x08, 0xde, 0x1c, 0xad, 0x1b, 0x07, 0x9a, 0xa5, 0xcf, 0xde, 0x20, 0x7a,
+};
+#ifdef _WIN32
+#define PROGRAM "gear.exe"
+#else
+#define PROGRAM "gear"
+#endif
+
+static gs_update *start_updates(SDL_Window *win) {
+    const char *from = SDL_getenv("GEAR_UPDATE_FROM");
+    char state[1100] = "", *pref = SDL_GetPrefPath("wakamex", "gear");
+    if (pref) SDL_snprintf(state, sizeof state, "%supdate.txt", pref), SDL_free(pref);
+    gs_update_config c = { .build = GEAR_BUILD, .manifest = from && *from ? from : UPDATES, .key = publisher,
+                           .program = PROGRAM, .agent = "gear", .state = state[0] ? state : NULL };
+    gs_update *u = gs_update_start(&c);
+    if (gs_update_consent(u) == GS_UPDATE_ASK) {
+        const SDL_MessageBoxButtonData buttons[] = { { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Yes" },
+                                                     { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Not now" } };
+        const SDL_MessageBoxData box = { SDL_MESSAGEBOX_INFORMATION, win, "gear test build " GEAR_BUILD,
+                                         "This is a test build of gear. It can keep itself up to date:\n"
+                                         "it downloads each new version and restarts when you have left\n"
+                                         "it alone for a couple of minutes, coming back as it was.\n\n"
+                                         "Keep it up to date?", 2, buttons, NULL };
+        int yes = 0;
+        SDL_ShowMessageBox(&box, &yes);
+        gs_update_set_consent(u, yes == 1);
+    }
+    return u;
+}
+#else
+static gs_update *start_updates(SDL_Window *win) { (void)win; return NULL; }
+#endif
+
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
     // `gear-phone --shot FILE setup|talk|pick|table|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
@@ -1867,6 +1973,9 @@ int main(int argc, char **argv) {
     SDL_snprintf(font, sizeof font, "%sClankerMono-Regular.ttf", SDL_GetBasePath());
     gs_fontset_prepend(fonts, font);
     gs_ui *ui = gs_ui_new(win, ren, fonts);
+    gs_update *update = shot ? NULL : start_updates(win);
+    Uint64 input_at = SDL_GetTicks();  // (the last key, click or touch, for when an update may restart)
+    bool restart = false;
     // (gesso's controls, buttons, fields and the box to type in, with text the size of the rest)
     gs_ui_style *style = gs_ui_style_of(ui);
     style->text_px = style->small_px = px, style->row = px * 2.2f;
@@ -1875,12 +1984,14 @@ int main(int argc, char **argv) {
     if (!shot) gs_notify_init("gear", "org.wakamex.gear", NULL, notification_clicked);
 
     gs_mix_open(MIX_RATE);
+    gs_mix_set_volume(a.volume);
     a.play = gs_stream_new(MIX_RATE, 8.0, 0.08);
     gs_mix_add(gs_stream_render, a.play);
     const SDL_AudioSpec speech = { SDL_AUDIO_S16, 1, SPEECH_RATE }, mix = { SDL_AUDIO_F32, 2, MIX_RATE };
     a.conv = SDL_CreateAudioStream(&speech, &mix);
 
     a.setup = shot ? !SDL_strcmp(argv[3], "setup") || !SDL_strcmp(argv[3], "pronounce") : !a.host[0] || !a.user[0];
+    if (shot) SDL_strlcpy(a.hear, "parakeet-ft-v1-Q4_K_M.gguf", sizeof a.hear), SDL_strlcpy(a.device, "Vulkan0", sizeof a.device), a.hears = 3, a.echo = true, a.countdown = 3;
     if (shot && !SDL_strcmp(argv[3], "pronounce")) {
         a.teaching = true, a.taught_count = 2;
         SDL_strlcpy(a.word, "lepton", sizeof a.word), SDL_strlcpy(a.looked_up, "lepton", sizeof a.looked_up);
@@ -1908,6 +2019,7 @@ int main(int argc, char **argv) {
     if (shot && !SDL_strcmp(argv[3], "type")) SDL_strlcpy(a.typed, "Can you check whether the phone build passed, and if it did, install it on the PC too?", sizeof a.typed), gs_ui_focus(ui, "compose");
     if (shot && !SDL_strcmp(argv[3], "swipe")) sw.axis = 1, sw.size = 400, sw.off = -170;  // (40% of the way to the next)
     Uint64 typed_at = 0, frame_at = 0;  // (in ns: the frame's first key event, and when the frame took it)
+    bool space_talking = false;  // Space is held to talk
     for (bool running = true; running;) {
         SDL_Event e;
         int wait = a.holding || a.mood != IDLE || sw.settling || sw.axis ? 5 : 30;
@@ -1915,6 +2027,7 @@ int main(int argc, char **argv) {
         if (SDL_WaitEventTimeout(&e, wait)) {
             do {
                 if (e.type == SDL_EVENT_QUIT) running = false;
+                if (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_MOUSE_BUTTON_DOWN || e.type == SDL_EVENT_FINGER_DOWN || e.type == SDL_EVENT_MOUSE_WHEEL) input_at = SDL_GetTicks();
                 // Leaving the app ends what is being said; coming back, the connection is made again.
                 if (e.type == SDL_EVENT_DID_ENTER_BACKGROUND) {
                     stop_holding(&a);
@@ -1941,7 +2054,27 @@ int main(int argc, char **argv) {
                 debug_event(&e);
                 // (the oldest key or typed text of the frame, for timing what typing waits for)
                 if ((e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_KEY_DOWN) && !typed_at) typed_at = e.common.timestamp, frame_at = SDL_GetTicksNS();
-                gs_ui_event(ui, &e);
+                bool taken = gs_ui_event(ui, &e);
+                // With a keyboard, Space held talks as the character held does (a tap stops what is being
+                // said, or in always-on sends now), unless a field has the keyboard; Escape stops a reply.
+                if (!taken && !a.setup && !a.picking && (e.type == SDL_EVENT_KEY_DOWN || e.type == SDL_EVENT_KEY_UP)) {
+                    bool press = e.type == SDL_EVENT_KEY_DOWN;
+                    if (e.key.key == SDLK_SPACE && press && !e.key.repeat && !gs_ui_focused(ui, "compose")) {
+                        if (a.always) tap_always(&a);
+                        else if (!a.holding) {
+                            begin_press(&a);
+                            if (a.pressing) start_holding(&a), space_talking = true;
+                        }
+                    } else if (e.key.key == SDLK_SPACE && !press && space_talking) {
+                        space_talking = false;
+                        if (SDL_GetTicks() - a.held_at < 400 && (a.saying || a.mood == SPEAKING)) {  // (a tap: stop what is said)
+                            a.holding = false, a.level = 0;
+                            if (!a.always) close_mic(&a);
+                            gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
+                        } else stop_holding(&a);
+                    } else if (e.key.key == SDLK_ESCAPE && press && (a.saying || a.mood == SPEAKING) && a.link)
+                        gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
+                }
             } while (SDL_PollEvent(&e));
         }
         if (gp_rich_began()) debug_line("frame: a new selection began in the messages");
@@ -2016,7 +2149,7 @@ int main(int argc, char **argv) {
                     drop_press(&a);
                 }
                 else if (a.pressing && SDL_GetTicks() - a.held_at >= HOLD_MS) start_holding(&a);
-                if (!down && a.holding) stop_holding(&a);
+                if (!down && a.holding && !space_talking) stop_holding(&a);
             }
             went_down = went_up = false;
         }
@@ -2034,11 +2167,23 @@ int main(int argc, char **argv) {
             gp_link_send(a.link, 'D', line, (uint32_t)n);
         }
         typed_at = 0;
+        // A newer build in place, and the app idle for two minutes: it restarts as the new build.
+        bool busy = a.holding || a.pressing || a.mood != IDLE || a.saying || speech_left(&a) > 0 || a.typed[0];
+        if (gs_update_due(update, busy, input_at)) restart = true, running = false;
     }
     stop_holding(&a);
     gp_link_close(a.link);
     gs_mix_close();
     gs_ui_free(ui);
+    if (restart) {
+        const char *args[72];
+        int n = 0;
+        for (int i = 0; i < argc && n < 70; i++)
+            if (i == 0 || SDL_strcmp(argv[i], "--restarted")) args[n++] = argv[i];
+        args[n] = NULL;
+        if (!gs_update_restart_as(update, n, (char **)args)) SDL_Log("gear: the new build could not be started: %s", SDL_GetError());
+    }
+    gs_update_free(update);  // (a run that ends without it counts against a build on trial)
     SDL_Quit();
     return 0;
 }

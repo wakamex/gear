@@ -320,6 +320,11 @@ static void tab_of(const char *name, char *out, size_t size) {
 
 static char target_tab[128];  // the conversation of the agent sent to now
 
+// The hub's settings, which every client shows and can change ('S'): the recognition model in use and
+// how many there are to switch between, where it runs, whether the echo canceller is in this build, and
+// always-on's countdown.
+static struct { char hear[128]; int hears; char device[32]; bool echo; double countdown; } settings;
+
 static void hello(server *s, const char *target, const char *voice) {
     char tab[128];
     tab_of(target, tab, sizeof tab);
@@ -327,6 +332,11 @@ static void hello(server *s, const char *target, const char *voice) {
     gs_jval_set(o, "target", gs_jval_str(target));
     gs_jval_set(o, "tab", gs_jval_str(tab));
     gs_jval_set(o, "voice", gs_jval_str(voice));
+    gs_jval_set(o, "hear", gs_jval_str(settings.hear));
+    gs_jval_set(o, "hears", gs_jval_num(settings.hears));
+    gs_jval_set(o, "device", gs_jval_str(settings.device));
+    gs_jval_set(o, "echo", gs_jval_bool(settings.echo));
+    gs_jval_set(o, "countdown", gs_jval_num(settings.countdown));
     char *json = gs_jval_write(o, false);
     send_text(s, 'H', json);
     SDL_free(json);
@@ -559,6 +569,14 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
     const SDL_AudioSpec speech = { SDL_AUDIO_F32, 1, SPEECH_RATE }, mic = { SDL_AUDIO_F32, 1, GEAR_RATE };
     s.to16 = SDL_CreateAudioStream(&speech, &mic);
     if (!hear) { send_text(&s, 'F', error); return 1; }
+    {
+        char names[16][128];
+        SDL_strlcpy(settings.hear, name, sizeof settings.hear);
+        settings.hears = gear_hear_models(models, names, 16);
+        SDL_strlcpy(settings.device, gear_hear_device(hear), sizeof settings.device);
+        settings.echo = gs_voice_has_echo();
+        settings.countdown = gear_countdown_remembered(models, 3);
+    }
     char threads[16];
     SDL_snprintf(threads, sizeof threads, "%d", say_threads);
     gear_setenv("POCKET_THREADS", threads);
@@ -692,7 +710,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                     // (with WebRTC's echo canceller where this build has it, given what the phone plays)
                     voice_dsp = gs_voice_new(GEAR_RATE, GS_VOICE_SPEECH | (gs_voice_has_echo() ? GS_VOICE_ECHO : 0));
                     gear_listen_params lp = gear_listen_defaults();
-                    pipe = gear_pipeline_new(voice_dsp, vad, hear, NULL, &lp, gear_countdown_remembered(models, 3));
+                    pipe = gear_pipeline_new(voice_dsp, vad, hear, NULL, &lp, settings.countdown);
                     gear_pipeline_set_speaker(pipe, &(gear_speaker){ phone_busy, phone_stop, &s });
                     // Words as they are said, where the recogniser has a GPU (as the window's).
                     if (SDL_strcasecmp(gear_hear_device(hear), "cpu")) gear_pipeline_set_drafter(pipe, hear);
@@ -812,6 +830,45 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                     gear_target_remember(models, a.name, "");
                 }
                 hello(&s, from->target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                s.only = -1;
+                break;
+            }
+            case 'S': {  // a setting changed: {"countdown": SECONDS} or {"hear": "next"}, told to every client
+                gs_json *doc = gs_json_parse(f->data, f->len);
+                gs_jv o = doc ? gs_json_root(doc) : NULL;
+                double secs = gs_json_num(gs_json_get(o, "countdown"), -1);
+                if (secs >= 0) {
+                    settings.countdown = SDL_clamp(secs, 0, 10);
+                    gear_countdown_remember(models, settings.countdown);
+                    if (pipe) gear_pipeline_set_countdown(pipe, settings.countdown);
+                }
+                // (the next recognition model in the models folder, loaded in place of the one in use)
+                if (!SDL_strcmp(gs_json_str(gs_json_get(o, "hear"), ""), "next")) {
+                    char names[16][128];
+                    int n = gear_hear_models(models, names, 16), at = 0;
+                    for (int i = 0; i < n; i++) if (!SDL_strcmp(names[i], settings.hear)) at = i;
+                    gear_hear *h = NULL;
+                    if (n > 1) {
+                        SDL_snprintf(path, sizeof path, "%s/%s", models, names[(at + 1) % n]);
+                        if (!(h = gear_hear_open(path, hear_threads, error, sizeof error))) send_text(&s, 'F', error);
+                    }
+                    if (h) {
+                        gear_hear *old = hear;
+                        hear = h;
+                        if (pipe) {
+                            gear_pipeline_set_hear(pipe, h, names[(at + 1) % n]);
+                            // (drafts from the new model where it has a GPU, and none on the CPU, as when opened)
+                            gear_pipeline_set_drafter(pipe, SDL_strcasecmp(gear_hear_device(h), "cpu") ? h : NULL);
+                        }
+                        gear_hear_close(old);
+                        SDL_strlcpy(settings.hear, names[(at + 1) % n], sizeof settings.hear);
+                        SDL_strlcpy(settings.device, gear_hear_device(h), sizeof settings.device);
+                        gear_hear_model_remember(models, settings.hear);
+                    }
+                }
+                gs_json_free(doc);
+                for (int i = 0; i < CLIENTS; i++)  // (each with its own agent)
+                    if (s.clients[i].live) s.only = i, hello(&s, *s.clients[i].target ? s.clients[i].target : target, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
                 s.only = -1;
                 break;
             }

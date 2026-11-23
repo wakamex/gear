@@ -9,5 +9,6 @@ set -eu
 host=${1:-windows} bin=${2:-zig-out/windows/bin} folder=${3:-gear}
 here=$(dirname "$0")
 ssh -o BatchMode=yes "$host" "mkdir $folder/new" > /dev/null 2>&1 || true
-scp -q "$bin/gear.exe" "$bin/ClankerMono-Regular.ttf" "$bin/ClankerMono-LICENSE.txt" "$bin/LICENSE" "$bin/THIRD-PARTY-LICENSES.txt" "$host:$folder/new/"
+# (the app as gear.exe, and its characters' pictures beside it, as tools/publish-update leaves them)
+scp -q "$bin/gear.exe" "$bin/ClankerMono-Regular.ttf" "$bin/ClankerMono-LICENSE.txt" "$bin/LICENSE" "$bin/THIRD-PARTY-LICENSES.txt" "$bin"/*-*.png "$host:$folder/new/"
 deskrun run --host "$host" --space gear --timeout 60 --put "$here/windows_update.py" -- python windows_update.py "$folder"
