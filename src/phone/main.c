@@ -1643,7 +1643,7 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
     if (a->host[0] && a->user[0]) {
         gs_rect back = gs_cut_right(&head, gs_ui_text_width(ui, "back", px) + 16);
         gs_ui_text(ui, back, "back", px, gs_ui_hovered(ui, back) ? ACCENT : TEXT, 1);
-        if (gs_ui_clicked(ui, back) || (!a->teaching && gs_ui_key(ui, SDLK_AC_BACK, 0))) {
+        if (gs_ui_clicked(ui, back) || (!a->teaching && (gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0)))) {
             a->setup = false;
             if (!a->link) save_settings(a), connect_link(a);
         }
@@ -1710,8 +1710,13 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
         SDL_snprintf(cd, sizeof cd, "always on sends after: %.0f s", a->countdown);
         gs_ui_text(ui, line, cd, px, TEXT, -1);
         char json[40];
-        if (gs_ui_button(ui, less, "-") && on && a->countdown > 0) SDL_snprintf(json, sizeof json, "{\"countdown\":%.0f}", a->countdown - 1), gp_link_send(a->link, 'S', json, (uint32_t)SDL_strlen(json));
-        if (gs_ui_button(ui, more, "+") && on && a->countdown < 10) SDL_snprintf(json, sizeof json, "{\"countdown\":%.0f}", a->countdown + 1), gp_link_send(a->link, 'S', json, (uint32_t)SDL_strlen(json));
+        // (changed here at once, the computer's greeting confirming it, so quick taps each count; 0 to 10 s)
+        int step = (gs_ui_button(ui, more, "+") && a->countdown < 10) - (gs_ui_button(ui, less, "-") && a->countdown > 0);
+        if (step && on) {
+            a->countdown = SDL_clamp(SDL_round(a->countdown) + step, 0, 10);
+            SDL_snprintf(json, sizeof json, "{\"countdown\":%.0f}", a->countdown);
+            gp_link_send(a->link, 'S', json, (uint32_t)SDL_strlen(json));
+        }
         gs_cut_top(&r, 6);
         char hear[200];
         char model[128];
