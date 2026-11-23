@@ -1306,12 +1306,18 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         if (st == GP_OPEN) gp_link_send(a->link, 'L', NULL, 0);
     }
     // The box to type in, at the bottom, growing to five lines, with its send button. While it has the
-    // keyboard the character and what is under it fold away, for the conversation to have the room.
+    // keyboard on the phone, whose on-screen keyboard takes half the screen, the character and what is
+    // under it fold away, for the conversation to have the room; with a real keyboard nothing moves.
     bool typing = !preview && gs_ui_focused(ui, "compose");
+#ifdef SDL_PLATFORM_ANDROID
+    bool folded = typing;
+#else
+    bool folded = false;
+#endif
 #ifdef GEAR_BUILD
-    // The commit the app was built from, under settings (left out while typing, the conversation then
+    // The commit the app was built from, under settings (left out while folded, the conversation then
     // starting right under the top line).
-    if (!typing) {
+    if (!folded) {
         float w = gs_ui_text_width(ui, GEAR_BUILD, small) + 4;
         gs_ui_text(ui, (gs_rect){ settings.x + settings.w - w, top.y + top.h - 4, w, small * 1.4f }, GEAR_BUILD, small, DIM, 1);
     }
@@ -1349,7 +1355,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         if (!preview) chat_area = (gs_rect){ r.x, r.y, r.w, box.y + box.h - r.y };  // (amended below, once the page's top is known)
     }
     // The character, a third of the screen at most, with what it is doing and always-on's switch under it.
-    if (!typing) {
+    if (!folded) {
         gs_cut_top(&r, 8);
         float block = SDL_min(r.w * 0.62f, r.h * 0.3f), radius = block * 0.4f;
         gs_rect stage = gs_cut_top(&r, block);
