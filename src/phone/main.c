@@ -79,6 +79,7 @@ typedef struct {
     char note_for[128];   // the conversation the note is about ("waiting for X", a failure), or "" for any
     unread unread[CONVERSATIONS];
     long long seen;       // the newest message's number in the computer's log, kept in seen.txt
+    bool first_sync;      // connected with no number kept: what the computer gives again is not unseen
     int unread_count;
     char typed[4000];     // the message being typed
     char *said, *reply;   // what is being said now (always-on's live words), and the reply being spoken
@@ -296,14 +297,15 @@ static void open_conversation(app *a, const char *who) {
 
 // A message of a conversation, kept and shown: what the user sent (to `who`), or an agent's reply,
 // counted unseen when its conversation is not the one open.
-// A quiet one (Panetone's receipt for a send, or its notice) is shown but not counted unseen.
-static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine, bool quiet) {
+// A quiet one (Panetone's receipt for a send, or its notice) is shown but not counted unseen, nor is
+// one `caught_up` on (the log given to an app that had none of it, its first time).
+static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine, bool quiet, bool caught_up) {
     remember(a, text, who, at, mine);
     a->history[a->count - 1].quiet = quiet;
     // (an answer in the conversation the note is about ends its "waiting for")
     if (!mine && !quiet && *a->note_for && !SDL_strcmp(who, a->note_for)) a->note[0] = 0;
     if (!SDL_strcmp(who, a->open)) a->fresh = true;
-    else if (!mine && !quiet) {
+    else if (!mine && !quiet && !caught_up) {
         int *n = unread_of(a, who, true);
         if (n) ++*n, save_unread(a);
     }
@@ -326,7 +328,7 @@ static void add_message(app *a, const char *text, const char *who, bool mine) {
     SDL_DateTime d;
     char at[8] = "";
     if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(at, sizeof at, "%02d:%02d", d.hour, d.minute);
-    add_message_at(a, text, who, at, mine, false);
+    add_message_at(a, text, who, at, mine, false, false);
 }
 
 // ---- Notifications ----
@@ -395,6 +397,7 @@ static void connect_link(app *a) {
     c.key_pem = a->pem, c.key_public = pub;
     SDL_strlcpy(c.host_key, a->host_key, sizeof c.host_key);
     c.seen = a->seen;
+    a->first_sync = a->seen == 0;
     a->link = gp_link_open(&c);
     gp_link_on_frame(a->link, heard, NULL);
     // Online behind other apps too, as gink is (asked while in front, as Android wants).
@@ -518,7 +521,8 @@ static void take_frames(app *a) {
                 bool had = false;
                 for (int i = a->count - 1; i >= 0 && i >= a->count - 200; i--)
                     if (a->history[i].mine == mine && !SDL_strcmp(a->history[i].who, who) && !SDL_strcmp(a->history[i].text, text)) had = true;
-                if (!had) add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine, quiet);
+                bool again = gs_json_bool(gs_json_get(o, "again"), false);
+                if (!had) add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine, quiet, again && a->first_sync);
                 // (its answers to press, on it as new or on the one had, such as a reply come as 'R')
                 entry *with = gs_json_count(gs_json_get(o, "actions")) ? kept_message(a, who, text, mine) : NULL;
                 if (with && !with->actions) with->actions = actions_of(o), with->laid_w = 0, save_answers(a, with);
