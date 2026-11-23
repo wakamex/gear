@@ -58,6 +58,7 @@ typedef struct {
     // that one client alone (its greeting, and what it missed).
     client clients[CLIENTS];
     int talker, only;
+    int skip;  // while not -1, the rest goes to every client but this one
     // What goes out, one frame at a time, from the main thread and the synthesis thread.
     SDL_Mutex *out;
     // Speech: text queued for the synthesis thread, and the voice to load before the next.
@@ -81,8 +82,9 @@ typedef struct {
     long since_at;     // microphone samples since that report
 } server;
 
-// Frames of speech and of always-on's listening: for the voice client alone.
-static bool voice_frame(char type) { return type && SDL_strchr("PLDIW", type); }
+// Frames of speech, of always-on's listening and of what the agent talked to is doing ('S'): for the
+// voice client alone.
+static bool voice_frame(char type) { return type && SDL_strchr("PLDIWS", type); }
 
 // (what the engines print goes to standard error instead of a client)
 static void send_frame(server *s, char type, const void *data, Uint32 len) {
@@ -90,7 +92,7 @@ static void send_frame(server *s, char type, const void *data, Uint32 len) {
     SDL_LockMutex(s->out);
     for (int i = 0; i < CLIENTS; i++) {
         client *c = &s->clients[i];
-        if (!c->out || (voice_frame(type) ? i != s->talker : s->only >= 0 && i != s->only)) continue;
+        if (!c->out || (voice_frame(type) ? i != s->talker : s->only >= 0 ? i != s->only : i == s->skip)) continue;
         fwrite(head, 1, 5, c->out);
         if (len) fwrite(data, 1, len, c->out);
         fflush(c->out);
@@ -350,12 +352,19 @@ typedef struct { const char *target; gear_transcript *transcript; } delivery;
 static delivery out_to;
 
 static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, const char *actions, bool shown);
+static void send_seq(server *s, long long seq);
+static long long log_seq;  // the newest message's number in the log
 static const char *conversation_of(const char *tab) { return *tab ? tab : "read back"; }
 
 static void deliver_text(server *s, const char *text) {
     char status[200], error[512];
-    send_text(s, 'M', text);
-    log_message(s, conversation_of(target_tab), "", true, false, text, NULL, false);
+    // (as 'M' to the client it came from, the talking one; the others get it as a message of its
+    // conversation, 'Z', so it goes there and not into the conversation they have open)
+    if (s->talker >= 0) s->only = s->talker, send_text(s, 'M', text), s->only = -1;
+    s->skip = s->talker;
+    log_message(s, conversation_of(target_tab), "", true, false, text, NULL, true);
+    s->skip = -1;
+    if (s->talker >= 0) s->only = s->talker, send_seq(s, log_seq), s->only = -1;
     gear_transcript_add(out_to.transcript, text, out_to.target);
     if (*out_to.target) {
         if (gear_panetone_say(target_tab, text, "gear", error, sizeof error)) {
@@ -525,7 +534,7 @@ int gear_serve_proxy(void) { return -1; }
 int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) {
     char path[1200], name[128], error[512];
     server s = { 0 };
-    s.talker = s.only = -1;
+    s.talker = s.only = s.skip = -1;
     int listener = -1;
 #ifndef _WIN32
     // The engines print progress to standard output in places: that goes to standard error, and the
@@ -904,8 +913,16 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
         // turn is its reply, shown and spoken (as text alone to a phone in the background).
         for (gear_post p; feed && gear_feed_next(feed, *target ? target_tab : "", &p); SDL_free(p.text)) {
             if (p.kind == GEAR_POST_REPLY) {
-                // (with answers to press, also as 'Z', which gives the phone's message them)
-                if (!p.shown) send_text(&s, 'R', p.text), log_message(&s, p.who, p.at, false, false, p.text, p.actions, *p.actions);
+                // The reply as 'R' to the client talking to its agent alone, whose conversation it is; the
+                // others, which may have another conversation open, get it as a message of its route ('Z'),
+                // as does the talking client too when it has answers to press, which 'Z' carries.
+                if (!p.shown) {
+                    if (s.talker >= 0) s.only = s.talker, send_text(&s, 'R', p.text), s.only = -1;
+                    s.skip = *p.actions ? -1 : s.talker;
+                    log_message(&s, p.who, p.at, false, false, p.text, p.actions, true);
+                    s.skip = -1;
+                    if (s.talker >= 0 && !*p.actions) s.only = s.talker, send_seq(&s, log_seq), s.only = -1;  // (its number)
+                }
                 if (s.talker >= 0 && !s.clients[s.talker].background) speak(&s, p.text);
             } else log_message(&s, p.who, p.at, p.kind == GEAR_POST_MINE, p.quiet, p.text, p.actions, true);
         }
