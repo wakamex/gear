@@ -820,10 +820,11 @@ static void character(gs_ui *ui, float cx, float cy, float r, mood m, float t, f
 // ---- The characters ----
 
 // Four drawn characters (assets/avatars, generated with Codex's image tool), each four frames of the
-// same size and place: at rest, blinking, speaking and listening.
+// same size and place: at rest, blinking, speaking and listening; and four of thinking.
 static const char *const avatars[] = { "tomato", "fox", "girl", "robot" };
 enum { AVATARS = 4, REST = 0, BLINK, SPEAK, LISTEN };
 static SDL_Texture *frames[AVATARS][4];
+static SDL_Texture *thinking[AVATARS][4];  // a character's four thinking frames, where it has them
 
 static void load_avatars(SDL_Renderer *ren) {
     static const char *const states[] = { "rest", "blink", "speak", "listen" };
@@ -837,6 +838,18 @@ static void load_avatars(SDL_Renderer *ren) {
             if (!img) { SDL_Log("gear: no %s: %s", path, SDL_GetError()); continue; }
             frames[i][k] = SDL_CreateTextureFromSurface(ren, img);
             SDL_SetTextureScaleMode(frames[i][k], SDL_SCALEMODE_LINEAR);
+            SDL_DestroySurface(img);
+        }
+    // (and its thinking frames, NAME-think1.png to NAME-think4.png, where they are)
+    for (int i = 0; i < AVATARS; i++)
+        for (int k = 0; k < 4; k++) {
+            char path[1100];
+            SDL_snprintf(path, sizeof path, "%savatars/%s-think%d.png", SDL_GetBasePath(), avatars[i], k + 1);
+            SDL_Surface *img = SDL_LoadPNG(path);
+            if (!img) SDL_snprintf(path, sizeof path, "%s%s-think%d.png", SDL_GetBasePath(), avatars[i], k + 1), img = SDL_LoadPNG(path);
+            if (!img) continue;
+            thinking[i][k] = SDL_CreateTextureFromSurface(ren, img);
+            SDL_SetTextureScaleMode(thinking[i][k], SDL_SCALEMODE_LINEAR);
             SDL_DestroySurface(img);
         }
 }
@@ -870,8 +883,16 @@ static bool avatar(gs_ui *ui, int which, float cx, float cy, float r, mood m, fl
     else if (m == SPEAKING && SDL_sinf(t * 13) * SDL_sinf(t * 5.3f) > 0.05f) k = SPEAK;
     else if (blinking) k = BLINK;
     float bob = m == THINKING ? r * 0.03f * SDL_sinf(t * 3) : 0, size = 2 * r * breathe;
-    gs_ui_texture(ui, (gs_rect){ cx - size / 2, cy - size / 2 + bob, size, size }, f[k], NULL);
-    if (m == THINKING)
+    // Thinking, with its frames: looking up one way and the other, eyes closed, about to speak, in turn.
+    SDL_Texture **th = thinking[which];
+    bool poses = th[0] && th[1] && th[2] && th[3];
+    SDL_Texture *shown = f[k];
+    if (m == THINKING && poses) {
+        static const int order[] = { 0, 1, 0, 1, 2, 2, 3, 0 };
+        shown = th[order[(int)(t / 0.5f) % 8]];
+    }
+    gs_ui_texture(ui, (gs_rect){ cx - size / 2, cy - size / 2 + bob, size, size }, shown, NULL);
+    if (m == THINKING && !poses)
         for (int i = 0; i < 3; i++) {
             float ang = t * 3 + (float)i * 2.094f;
             gs_ui_circle(ui, cx + SDL_cosf(ang) * r * 1.15f, cy + SDL_sinf(ang) * r * 1.15f, r * 0.05f, DIM);
