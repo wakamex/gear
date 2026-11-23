@@ -397,6 +397,41 @@ static void paragraph(gs_ui *ui, gs_rect r, const char *id, const char *text, co
     }
 }
 
+// The Markdown of the table last clicked, for gp_rich_take_table.
+static char *clicked_table;
+
+char *gp_rich_take_table(void) {
+    char *t = clicked_table;
+    clicked_table = NULL;
+    return t;
+}
+
+// The table of Markdown `md` at its full size, its columns as wide as their words on one line and its
+// text at the style's size, drawn in `area` moved by *x and *y (kept within the table's edges).
+void gp_rich_table_view(gs_ui *ui, gs_rect area, const char *md, const gp_rich_style *s, float *x, float *y) {
+    table *t = parse_table(md, md + SDL_strlen(md));
+    float h = lay_table(ui, t, 1e6f, s->px, s->px), w = 0;
+    // (a column of long text no wider than most of the screen, its cells wrapped, so the rest show beside it)
+    float cap = SDL_max(area.w * 0.8f, s->px * 8);
+    bool capped = false;
+    for (int c = 0; c < t->cols; c++)
+        if (t->colw[c] > cap) t->colw[c] = cap, capped = true;
+    if (capped) {
+        h = 1;
+        for (int r = 0; r < t->rows; r++) {
+            t->rowh[r] = t->line;
+            for (int c = 0; c < t->cols; c++) t->rowh[r] = SDL_max(t->rowh[r], cell_height(ui, t, r, c, t->colw[c] - 2 * PAD - 1));
+            h += t->rowh[r] + 2 * VPAD;
+        }
+    }
+    for (int c = 0; c < t->cols; c++) w += t->colw[c];
+    *x = SDL_clamp(*x, 0, SDL_max(0, w - area.w)), *y = SDL_clamp(*y, 0, SDL_max(0, h - area.h));
+    gs_ui_clip(ui, &area);
+    draw_table(ui, t, area.x - *x, area.y - *y, s);
+    gs_ui_clip(ui, NULL);
+    SDL_free(t->buf), SDL_free(t);
+}
+
 float gp_rich(gs_ui *ui, gs_rect at, const char *text, const gp_rich_style *s, bool draw) {
     if (!draw) return lay_out(ui, text, at.w, s)->height;
     return gp_rich_marked(ui, at, text, s, 0, 0, NULL);
@@ -417,6 +452,16 @@ float gp_rich_marked(gs_ui *ui, gs_rect at, const char *text, const gp_rich_styl
                 if (mark_y && !placed) *mark_y = y, placed = true;
             }
             draw_table(ui, p->t, at.x, y, s);
+            // (a click on it opens it at its full size, gp_rich_take_table)
+            float tw = 0;
+            for (int c = 0; c < p->t->cols; c++) tw += p->t->colw[c];
+            gs_rect whole = { at.x, y, tw, p->height };
+            if (gs_ui_hovered(ui, whole)) gs_ui_outline(ui, gs_inset(whole, -2), 4, 1, s->rule);
+            if (gs_ui_clicked(ui, whole)) {
+                SDL_free(clicked_table);
+                clicked_table = SDL_malloc((size_t)(p->to - p->from) + 1);
+                SDL_memcpy(clicked_table, text + p->from, (size_t)(p->to - p->from)), clicked_table[p->to - p->from] = 0;
+            }
         } else if (a < b) {
             // (bytes of the piece's own copy, which begins at p->from)
             gs_ui_text_span span = { a - p->from, b - p->from, 0, s->marked, s->mark, false };

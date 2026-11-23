@@ -62,6 +62,8 @@ typedef struct {
     int read;             // which new messages are read aloud: READ_REPLIES, READ_OPEN or READ_ALL
     float volume;         // of what the app plays, 0 to 2 (kept here, for this device)
     bool compact;         // the character tucked away, small at the left of the box to type in
+    char *viewing;        // a table shown at its full size over the rest (its Markdown), or NULL
+    float view_x, view_y; // how far it is moved, across and down
     // The computer's settings, as its greeting ('H') gives them, changed with 'S': the recognition model,
     // how many there are, where it runs, whether its echo canceller is built in, always-on's countdown
     char hear[128], device[32];
@@ -1250,6 +1252,21 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
     *last_count = shown;
 }
 
+// A table at its full size over the screen, with its columns as wide as their contents: dragged, or
+// scrolled (Shift across), to its edges; closed by its button, back or Escape.
+static void table_screen(gs_ui *ui, app *a, gs_rect area) {
+    gs_ui_fill(ui, area, BACKGROUND);
+    gs_rect r = gs_inset(area, 12);
+    gs_rect head = gs_cut_top(&r, px * 2.2f);
+    gs_rect close = gs_cut_right(&head, gs_ui_text_width(ui, "close", px) + 16);
+    gs_ui_text(ui, close, "close", px, gs_ui_hovered(ui, close) ? ACCENT : TEXT, 1);
+    gs_ui_text(ui, head, "drag or scroll to see all of it", small, DIM, -1);
+    gs_cut_top(&r, 6);
+    gp_rich_style style = { px, 11, TEXT, ACCENT, BORDER, (SDL_FColor){ 1, 1, 1, 0.04f }, BRIGHT, (SDL_FColor){ 0, 0, 0, 0 } };
+    gp_rich_table_view(ui, r, a->viewing, &style, &a->view_x, &a->view_y);
+    if (gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_ESCAPE, 0) || gs_ui_key(ui, SDLK_AC_BACK, 0)) SDL_free(a->viewing), a->viewing = NULL;
+}
+
 // The talk screen of the conversation `key`: the open one, or with `preview` set, the one beside it.
 static gs_rect follow_area;  // the button to follow what is heard again, when it shows
 static gs_rect newest_area;  // the button to the conversation's newest message, when it shows
@@ -1946,7 +1963,7 @@ static gs_update *start_updates(SDL_Window *win) { (void)win; return NULL; }
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|compact|pick|table|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|compact|pick|table|tableview|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -1984,6 +2001,14 @@ int main(int argc, char **argv) {
                  "transcribe", "12:53", false);
         if (!SDL_strcmp(argv[3], "table")) SDL_strlcpy(a.open, "transcribe", sizeof a.open);
         if (!SDL_strcmp(argv[3], "compact")) a.compact = true;
+        if (!SDL_strcmp(argv[3], "tableview"))  // (the transcribe conversation's table at its full size)
+            for (int i = 0; i < a.count; i++) {
+                const char *at = SDL_strstr(a.history[i].text, "| Recording");
+                if (at) {
+                    const char *end = SDL_strstr(at, "\n\n");
+                    a.viewing = SDL_strndup(at, end ? (size_t)(end - at) : SDL_strlen(at)), SDL_strlcpy(a.open, "transcribe", sizeof a.open);
+                }
+            }
         if (!SDL_strcmp(argv[3], "question")) {  // (an agent's question with its answers, the second pressed)
             remember(&a, "Should this project take on the light client?\n\n1. Build it here (Recommended): build it in this repo next.\n\n2. Feasibility probe first: half a day against one peer, then report.\n\n3. Decline: out of this project's scope.", "re-opus", "18:26", false);
             a.history[a.count - 1].actions = SDL_strdup("o1\tBuild it here (Recommended)\no2\tFeasibility probe first\no3\tDecline\n");
@@ -2082,6 +2107,7 @@ int main(int argc, char **argv) {
     if (shot && !SDL_strcmp(argv[3], "swipe")) sw.axis = 1, sw.size = 400, sw.off = -170;  // (40% of the way to the next)
     Uint64 typed_at = 0, frame_at = 0;  // (in ns: the frame's first key event, and when the frame took it)
     bool space_talking = false;  // Space is held to talk
+    float drag_x = 0, drag_y = 0;  // where the finger or mouse was, for dragging a table at full size
     for (bool running = true; running;) {
         SDL_Event e;
         int wait = a.holding || a.mood != IDLE || sw.settling || sw.axis ? 5 : 30;
@@ -2104,13 +2130,21 @@ int main(int argc, char **argv) {
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     window_points(win, ui, e.button.x, e.button.y, &press_x, &press_y);
                     down = went_down = true, moved = false;
-                    if (!a.setup && !a.picking && !gs_rect_contains(chat_area, press_x, press_y) && !gs_rect_contains(grip_area, press_x, press_y)) swipe_down(&sw, press_x, press_y);
+                    if (!a.setup && !a.picking && !a.viewing && !gs_rect_contains(chat_area, press_x, press_y) && !gs_rect_contains(grip_area, press_x, press_y)) swipe_down(&sw, press_x, press_y);
+                    drag_x = press_x, drag_y = press_y;
+                }
+                if (e.type == SDL_EVENT_MOUSE_WHEEL && a.viewing) {  // (moved by the wheel too, Shift for across)
+                    float wx = e.wheel.x, wy = e.wheel.y;
+                    if (SDL_GetModState() & SDL_KMOD_SHIFT) wx = wy, wy = 0;
+                    a.view_x -= wx * 40, a.view_y -= wy * 40;
                 }
                 if (e.type == SDL_EVENT_MOUSE_MOTION && down) {
                     float x, y;
                     window_points(win, ui, e.motion.x, e.motion.y, &x, &y);
                     if ((x - press_x) * (x - press_x) + (y - press_y) * (y - press_y) > 12 * 12) moved = true;
-                    swipe_move(&sw, &a, x, y, last_area);
+                    if (a.viewing) a.view_x -= x - drag_x, a.view_y -= y - drag_y;  // (a table at full size, dragged)
+                    drag_x = x, drag_y = y;
+                    if (!a.viewing) swipe_move(&sw, &a, x, y, last_area);
                 }
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) down = false, went_up = true, swipe_up(&sw, &a);
                 debug_event(&e);
@@ -2134,7 +2168,7 @@ int main(int argc, char **argv) {
                             if (!a.always) close_mic(&a);
                             gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
                         } else stop_holding(&a);
-                    } else if (e.key.key == SDLK_ESCAPE && press && (a.saying || a.mood == SPEAKING) && a.link)
+                    } else if (e.key.key == SDLK_ESCAPE && press && !a.viewing && (a.saying || a.mood == SPEAKING) && a.link)
                         gp_link_send(a.link, 'X', NULL, 0), stop_speaking(&a), a.mood = IDLE;
                 }
             } while (SDL_PollEvent(&e));
@@ -2198,8 +2232,12 @@ int main(int argc, char **argv) {
                 preview = false;
             }
             talk_screen(ui, &a, sw.off != 0 ? shifted(area, sw.axis, sw.off) : area, t, a.open);
+            // A table clicked: shown at its full size over everything, dragged or scrolled to its edges.
+            char *clicked = gp_rich_take_table();
+            if (clicked) SDL_free(a.viewing), a.viewing = clicked, a.view_x = a.view_y = 0, went_down = false;
+            if (a.viewing) table_screen(ui, &a, area);
             // A press is on the character only where it went down, not where the pointer was last.
-            bool on_character = went_down && !a.picking && gs_rect_contains(character_area, press_x, press_y);
+            bool on_character = went_down && !a.picking && !a.viewing && gs_rect_contains(character_area, press_x, press_y);
             if (a.always) {
                 // (a tap, let go where it went down: a finger that moves is swiping)
                 if (went_up && !moved && !was_picking && !a.picking && gs_rect_contains(character_area, press_x, press_y)) tap_always(&a);
