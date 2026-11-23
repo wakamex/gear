@@ -61,6 +61,7 @@ typedef struct {
     bool always;          // always on: listening without holding, the computer finding the messages
     int read;             // which new messages are read aloud: READ_REPLIES, READ_OPEN or READ_ALL
     float volume;         // of what the app plays, 0 to 2 (kept here, for this device)
+    bool compact;         // the character tucked away, small at the left of the box to type in
     // The computer's settings, as its greeting ('H') gives them, changed with 'S': the recognition model,
     // how many there are, where it runs, whether its echo canceller is built in, always-on's countdown
     char hear[128], device[32];
@@ -154,6 +155,7 @@ static void load_settings(app *a) {
         else if (!SDL_strcmp(line, "always")) a->always = *v == '1';
         else if (!SDL_strcmp(line, "read")) a->read = SDL_clamp(SDL_atoi(v), 0, 2);
         else if (!SDL_strcmp(line, "volume")) a->volume = SDL_clamp((float)SDL_atof(v), 0, 2);
+        else if (!SDL_strcmp(line, "compact")) a->compact = *v == '1';
         else if (!SDL_strcmp(line, "avatar")) SDL_strlcpy(a->avatar, v, sizeof a->avatar);
         else if (!SDL_strcmp(line, "open")) SDL_strlcpy(a->open, v, sizeof a->open);
     }
@@ -163,7 +165,7 @@ static void load_settings(app *a) {
 static void save_settings(app *a) {
     char path[1100], text[920];
     settings_path(a, path, sizeof path, "settings.txt");
-    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\nopen=%s\nread=%d\nvolume=%.2f\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar, a->open, a->read, a->volume);
+    SDL_snprintf(text, sizeof text, "host=%s\nuser=%s\nport=%s\nhost_key=%s\nalways=%d\navatar=%s\nopen=%s\nread=%d\nvolume=%.2f\ncompact=%d\n", a->host, a->user, a->port, a->host_key, a->always, a->avatar, a->open, a->read, a->volume, a->compact);
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
@@ -1246,6 +1248,7 @@ static void conversation(gs_ui *ui, app *a, gs_rect r, const char *key) {
 static gs_rect follow_area;  // the button to follow what is heard again, when it shows
 static gs_rect newest_area;  // the button to the conversation's newest message, when it shows
 static gs_rect compose_area;  // the box to type in and its send button
+static gs_rect grip_area;     // the handle that tucks the character away, which a swipe does not start on
 static gs_rect chat_area;  // where the open conversation's page and the box to type in were, which a swipe does not start on
 
 // The typed message, to the agent of the open conversation: shown when the computer sends it back ('M').
@@ -1322,18 +1325,40 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         gs_ui_text(ui, (gs_rect){ settings.x + settings.w - w, top.y + top.h - 4, w, small * 1.4f }, GEAR_BUILD, small, DIM, 1);
     }
 #endif
+    // The character's room: all of it (1) or tucked away (0), gliding between, and while folded none.
+    float full = preview ? 1 - a->compact : gs_ui_ease(ui, "stage", a->compact ? 0 : 1, 220);
+    if (folded) full = 0;
+    bool small_one = !preview && (full < 0.5f);  // (the character small beside the box, past half way)
+    char buf[300];
+    const char *now = preview ? "" : hint(a, buf, sizeof buf);
+    mood shown = preview ? IDLE : a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood;
+    if (shown == SPEAKING && read_elsewhere(a)) shown = IDLE;  // (another conversation's message is being read)
+    if (!preview) character_area = (gs_rect){ 0 };
     {
         float send_w = gs_ui_text_width(ui, "send", px) + 24;
-        float h = gs_ui_textarea_height(ui, a->typed, r.w - send_w - 8, 5) + 12;
+        float small_w = small_one ? px * 2.6f + 8 : 0;
+        float h = gs_ui_textarea_height(ui, a->typed, r.w - send_w - 8 - small_w, 5) + 12;
         gs_rect box = gs_cut_bottom(&r, h);
         if (!preview) compose_area = box;  // (the box and its send button)
+        // Tucked away, the character at the box's left: held to talk, tapped to stop what is said, as big.
+        if (small_one) {
+            gs_rect spot = gs_cut_left(&box, px * 2.6f);
+            gs_cut_left(&box, 8);
+            float cy = box.y + box.h - px * 1.3f - 2, cx = spot.x + spot.w / 2, radius = px * 1.05f;
+            gs_ui_opacity(ui, SDL_clamp(1 - full * 2, 0, 1));
+            if (!avatar(ui, avatar_index(a->avatar), cx, cy, radius * 1.25f, shown, t, a->level)) character(ui, cx, cy, radius, shown, t, a->level);
+            gs_ui_opacity(ui, 1);
+            character_area = (gs_rect){ cx - radius * 1.3f, cy - radius * 1.3f, radius * 2.6f, radius * 2.6f };
+        }
         gs_rect send = gs_cut_right(&box, send_w);
         gs_cut_right(&box, 8);
         if (preview) {
             gs_ui_outline(ui, box, 4, 1, BORDER);
             gs_ui_text(ui, gs_inset(box, 8), "type a message", small, DIM, -1);
         } else {
-            gs_ui_textarea(ui, box, "compose", a->typed, sizeof a->typed, "type a message");
+            // (tucked away, what the character's line said shows in the empty box, when it is news)
+            const char *placeholder = small_one && SDL_strcmp(now, "hold to talk") ? now : "type a message";
+            gs_ui_textarea(ui, box, "compose", a->typed, sizeof a->typed, placeholder);
             // Where the box's cursor is, sent to the computer's phone-debug.log each time it or the text
             // changes ('D'), for finding where a caret drawn at the end comes from.
             static int was_from = -1, was_to = -1;
@@ -1354,42 +1379,52 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         gs_cut_bottom(&r, 8);
         if (!preview) chat_area = (gs_rect){ r.x, r.y, r.w, box.y + box.h - r.y };  // (amended below, once the page's top is known)
     }
-    // The character, a third of the screen at most, with what it is doing and always-on's switch under it.
-    if (!folded) {
-        gs_cut_top(&r, 8);
-        float block = SDL_min(r.w * 0.62f, r.h * 0.3f), radius = block * 0.4f;
-        gs_rect stage = gs_cut_top(&r, block);
+    // The character, a third of the screen at most, with what it is doing and always-on's switch under it,
+    // the whole of it shrinking as it tucks away.
+    if (full > 0.01f) {
+        float block_full = SDL_min(r.w * 0.62f, r.h * 0.3f) + 8 + px * 1.8f + px * 2;
+        gs_rect room = gs_cut_top(&r, block_full * full);
+        gs_ui_clip(ui, &room);
+        gs_ui_opacity(ui, SDL_clamp(full * 2 - 1, 0, 1));
+        gs_cut_top(&room, 8);
+        float block = SDL_min(r.w * 0.62f, (r.h + block_full * full) * 0.3f) * full, radius = block * 0.4f;
+        gs_rect stage = gs_cut_top(&room, block);
         float cx = stage.x + stage.w / 2, cy = stage.y + stage.h / 2;
-        mood shown = preview ? IDLE : a->always && a->mood == IDLE && st == GP_OPEN ? LISTENING : a->mood;
-        if (shown == SPEAKING && read_elsewhere(a)) shown = IDLE;  // (another conversation's message is being read)
-        if (!avatar(ui, avatar_index(a->avatar), cx, cy, radius * 1.25f, shown, t, a->level)) character(ui, cx, cy, radius, shown, t, a->level);
-        if (!preview) character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
-        char buf[300];
+        if (radius > 2 && !avatar(ui, avatar_index(a->avatar), cx, cy, radius * 1.25f, shown, t, a->level)) character(ui, cx, cy, radius, shown, t, a->level);
+        if (!preview && !small_one) character_area = (gs_rect){ cx - radius * 1.2f, cy - radius * 1.2f, radius * 2.4f, radius * 2.4f };
         bool listening = !preview && (a->mood == LISTENING || (a->always && a->mood == IDLE));
-        gs_rect hint_line = gs_cut_top(&r, px * 1.8f);
-        gs_ui_text(ui, hint_line, preview ? "" : hint(a, buf, sizeof buf), small, listening ? ACCENT : DIM, 0);
+        gs_rect hint_line = gs_cut_top(&room, px * 1.8f);
+        gs_ui_text(ui, hint_line, now, small, listening ? ACCENT : DIM, 0);
         // The microphone's level while it is open, at the right of the hint, so being heard shows.
         if (!preview && a->mic) {
             gs_rect meter = { hint_line.x + hint_line.w - 56, hint_line.y + hint_line.h / 2 - 3, 56, 6 };
             gs_ui_round(ui, meter, 3, RAISED);
             gs_ui_round(ui, (gs_rect){ meter.x, meter.y, meter.w * SDL_clamp(a->level, 0, 1), meter.h }, 3, ACCENT);
         }
-        gs_rect toggle = gs_cut_top(&r, px * 2);
+        gs_rect toggle = gs_cut_top(&room, px * 2);
         const char *always_label = a->always ? "always on: on" : "always on: off";
         float tw = gs_ui_text_width(ui, always_label, small) + 24;
         gs_rect sw = { toggle.x + (toggle.w - tw) / 2, toggle.y, tw, toggle.h };
         gs_ui_outline(ui, sw, sw.h / 2, 1, a->always ? ACCENT : BORDER);
         gs_ui_text(ui, sw, always_label, small, a->always ? ACCENT : gs_ui_hovered(ui, sw) ? TEXT : DIM, 0);
-        if (!preview && gs_ui_clicked(ui, sw)) set_always(a, !a->always);
-    } else {
-        char buf[300];
-        character_area = (gs_rect){ 0 };
-        gs_ui_text(ui, gs_cut_top(&r, px * 1.6f), hint(a, buf, sizeof buf), small, DIM, 0);
+        if (!preview && full > 0.9f && gs_ui_clicked(ui, sw)) set_always(a, !a->always);
+        gs_ui_opacity(ui, 1);
+        gs_ui_clip(ui, NULL);
     }
     // What was said and the reply: the rest of the screen, a page a finger scrolls, back at its top for each
     // new reply so it reads from the start.
+    // The line above the conversation, with a handle at its middle: a tap, or a drag up or down, tucks
+    // the character away or brings it back (not while folded for the on-screen keyboard).
     gs_cut_top(&r, 12);
     gs_ui_fill(ui, (gs_rect){ r.x, r.y, r.w, 1 }, BORDER);
+    if (!folded) {
+        gs_rect grip = { r.x + r.w / 2 - 40, r.y - 12, 80, 24 };
+        bool hot = !preview && gs_ui_hovered(ui, grip);
+        gs_ui_fill(ui, (gs_rect){ r.x + r.w / 2 - 26, r.y - 3, 52, 7 }, BACKGROUND);
+        gs_ui_round(ui, (gs_rect){ r.x + r.w / 2 - 20, r.y - 2, 40, 5 }, 2.5f, hot ? ACCENT : BORDER);
+        if (!preview) grip_area = grip;
+        if (!preview && gs_ui_clicked(ui, grip)) a->compact = !a->compact, save_settings(a);
+    } else if (!preview) grip_area = (gs_rect){ 0 };
     gs_cut_top(&r, 10);
     if (!preview) chat_area = (gs_rect){ r.x, r.y, r.w, chat_area.y + chat_area.h - r.y };
     conversation(ui, a, r, key);
@@ -1690,6 +1725,9 @@ static void setup_screen(gs_ui *ui, app *a, gs_rect area) {
     char read_label[80];
     SDL_snprintf(read_label, sizeof read_label, "read aloud: %s", read_names[a->read]);
     if (gs_ui_button(ui, gs_cut_top(&r, row), read_label)) a->read = (a->read + 1) % 3, save_settings(a);
+    // Always-on, here too for when the character is tucked away (its switch is under it).
+    gs_cut_top(&r, 8);
+    if (gs_ui_button(ui, gs_cut_top(&r, row), a->always ? "always on: on" : "always on: off")) set_always(a, !a->always);
     // Words said wrongly, taught on the computer.
     gs_cut_top(&r, 8);
     if (gs_ui_button(ui, gs_cut_top(&r, row), "pronunciation: words said wrongly") && a->link) {
@@ -1902,7 +1940,7 @@ static gs_update *start_updates(SDL_Window *win) { (void)win; return NULL; }
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|pick|table|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|compact|pick|table|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -1939,6 +1977,7 @@ int main(int argc, char **argv) {
                      "| Exam strategy | Portuguese | 15.4 | 8% | 1% |\n\n- German shares words like \"in\", \"so\", \"was\" and \"will\" with English, so a clean German transcript scores about 15% here.",
                  "transcribe", "12:53", false);
         if (!SDL_strcmp(argv[3], "table")) SDL_strlcpy(a.open, "transcribe", sizeof a.open);
+        if (!SDL_strcmp(argv[3], "compact")) a.compact = true;
         if (!SDL_strcmp(argv[3], "question")) {  // (an agent's question with its answers, the second pressed)
             remember(&a, "Should this project take on the light client?\n\n1. Build it here (Recommended): build it in this repo next.\n\n2. Feasibility probe first: half a day against one peer, then report.\n\n3. Decline: out of this project's scope.", "re-opus", "18:26", false);
             a.history[a.count - 1].actions = SDL_strdup("o1\tBuild it here (Recommended)\no2\tFeasibility probe first\no3\tDecline\n");
@@ -2059,7 +2098,7 @@ int main(int argc, char **argv) {
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     window_points(win, ui, e.button.x, e.button.y, &press_x, &press_y);
                     down = went_down = true, moved = false;
-                    if (!a.setup && !a.picking && !gs_rect_contains(chat_area, press_x, press_y)) swipe_down(&sw, press_x, press_y);
+                    if (!a.setup && !a.picking && !gs_rect_contains(chat_area, press_x, press_y) && !gs_rect_contains(grip_area, press_x, press_y)) swipe_down(&sw, press_x, press_y);
                 }
                 if (e.type == SDL_EVENT_MOUSE_MOTION && down) {
                     float x, y;
