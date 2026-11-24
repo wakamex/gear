@@ -49,6 +49,7 @@ typedef struct {
     Uint64 used;         // when it last talked, typed or asked for speech
     char target[128];    // the agent its open conversation sends to ('T'), or "" for the hub's
     char tab[128];       // and that agent's route, found once when it is chosen
+    char *files;         // the files it sent ('F') for its next message, a line each, or NULL
 } client;
 
 typedef struct {
@@ -360,8 +361,59 @@ static void send_seq(server *s, long long seq);
 static long long log_seq;  // the newest message's number in the log
 static const char *conversation_of(const char *tab) { return *tab ? tab : "read back"; }
 
-static void deliver_text(server *s, const char *text) {
+// ---- Attachments ----
+
+// The type of a file by its name's ending, as Panetone names the attachments it hands agents.
+static const char *mime_of(const char *name) {
+    static const char *const types[][2] = { { ".png", "image/png" }, { ".jpg", "image/jpeg" }, { ".jpeg", "image/jpeg" }, { ".gif", "image/gif" },
+                                            { ".webp", "image/webp" }, { ".heic", "image/heic" }, { ".pdf", "application/pdf" }, { ".txt", "text/plain" },
+                                            { ".md", "text/markdown" }, { ".csv", "text/csv" }, { ".json", "application/json" }, { ".mp4", "video/mp4" },
+                                            { ".mov", "video/quicktime" }, { ".mp3", "audio/mpeg" }, { ".m4a", "audio/mp4" }, { ".wav", "audio/wav" },
+                                            { ".ogg", "audio/ogg" }, { ".zip", "application/zip" } };
+    const char *dot = SDL_strrchr(name, '.');
+    for (size_t i = 0; dot && i < SDL_arraysize(types); i++)
+        if (!SDL_strcasecmp(dot, types[i][0])) return types[i][1];
+    return "application/octet-stream";
+}
+
+// A file a client sent ('F': its name, a zero byte, its bytes), kept on this computer in gear's data
+// folder (attachments/DATE/TIME-NAME), and its line, "[attached TYPE: PATH]" as Panetone gives an agent
+// a file sent from Telegram, added to what goes with the client's next message.
+static void keep_file(server *s, client *c, const char *data, Uint32 len) {
+    size_t name_len = SDL_strnlen(data, len);
+    if (name_len >= len) return;
+    char name[128] = "", at[1200], *pref = SDL_GetPrefPath("wakamex", "gear"), path[1400];
+    for (size_t i = 0, n = 0; i < name_len && n + 1 < sizeof name; i++)  // (no folders, nor a name to hide, nor spaces in the path the agent reads)
+        name[n++] = SDL_strchr("/\\:*?\"<>| ", data[i]) || (unsigned char)data[i] < 32 ? '_' : data[i], name[n] = 0;
+    if (!*name || *name == '.') SDL_strlcpy(name, "file", sizeof name);
+    SDL_Time now;
+    SDL_DateTime d;
+    SDL_GetCurrentTime(&now), SDL_TimeToDateTime(now, &d, true);
+    SDL_snprintf(at, sizeof at, "%sattachments/%04d-%02d-%02d", pref ? pref : "", d.year, d.month, d.day);
+    SDL_CreateDirectory(at);
+    SDL_snprintf(path, sizeof path, "%s/%02d%02d%02d-%s", at, d.hour, d.minute, d.second, name);
+    SDL_free(pref);
+    if (!SDL_SaveFile(path, data + name_len + 1, len - name_len - 1)) { send_text(s, 'F', "could not keep an attachment"); return; }
+    char line[1600];
+    SDL_snprintf(line, sizeof line, "[attached %s: %s]", mime_of(name), path);
+    size_t had = c->files ? SDL_strlen(c->files) : 0;
+    c->files = SDL_realloc(c->files, had + SDL_strlen(line) + 2);
+    SDL_snprintf(c->files + had, SDL_strlen(line) + 2, "%s\n", line);
+}
+
+static void deliver_text(server *s, const char *said) {
     char status[200], error[512];
+    // (with the files the talking client sent for it after it, a line each)
+    client *c = s->talker >= 0 ? &s->clients[s->talker] : NULL;
+    char *with = NULL;
+    if (c && c->files) {
+        size_t n = SDL_strlen(said) + SDL_strlen(c->files) + 4;
+        with = SDL_malloc(n);
+        SDL_snprintf(with, n, "%s%s%s", said, *said ? "\n\n" : "", c->files);
+        with[SDL_strlen(with) - 1] = 0;  // (the last line's newline)
+        SDL_free(c->files), c->files = NULL;
+    }
+    const char *text = with ? with : said;
     // (as 'M' to the client it came from, the talking one; the others get it as a message of its
     // conversation, 'Z', so it goes there and not into the conversation they have open)
     if (s->talker >= 0) s->only = s->talker, send_text(s, 'M', text), s->only = -1;
@@ -376,6 +428,7 @@ static void deliver_text(server *s, const char *text) {
             send_text(s, 'S', status);
         } else send_text(s, 'F', error);
     } else send_text(s, 'R', text), log_message(s, "read back", "", false, false, text, NULL, false), speak(s, text);
+    SDL_free(with);
 }
 
 // ---- What waits for the phone ----
@@ -717,6 +770,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             if (c->fd >= 0) close(c->fd);
 #endif
             c->from = NULL, c->fd = -1;
+            SDL_free(c->files), c->files = NULL;  // (files sent for a message that never came)
             if (i == s.talker) {
                 int next = -1;
                 for (int j = 0; j < CLIENTS; j++)
@@ -826,8 +880,11 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 gs_json_free(doc);
                 break;
             }
-            case 'M':  // a message typed: sent as one said
-                if (*f->data) deliver_text(&s, f->data);
+            case 'M':  // a message typed: sent as one said (with the files sent before it, if only those)
+                if (*f->data || from->files) deliver_text(&s, f->data);
+                break;
+            case 'F':  // a file for the client's next message: kept here, and named in it
+                keep_file(&s, from, f->data, f->len);
                 break;
             case 'D': {  // a line from the phone, for finding a fault: kept in phone-debug.log
                 char *pref = SDL_GetPrefPath("wakamex", "gear"), at[8], file[1100];

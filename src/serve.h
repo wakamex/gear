@@ -11,6 +11,9 @@
 //   'W' the same as 'U' without the words taught ('Y'): how the speech says it by itself
 //   'J' a word, to ask how it is said: answered with 'J'
 //   'D' a line for finding a fault (UTF-8), kept in phone-debug.log in gear's data folder
+//   'F' a file for the next message: its name, a zero byte, its bytes (8 MB at most); kept in gear's data
+//       folder under attachments/DATE/, and named in the message, "[attached TYPE: PATH]", as Panetone
+//       names a file sent from Telegram
 //   'C' {"to": the route, "action": one of a question's answers (from 'Z''s "actions")}: pressed, as
 //       its Telegram button is; a refusal comes back as 'F'
 //   'Y' {"word", "say"}: the word taught to be said so from now on (an empty "say" forgets it), or ""

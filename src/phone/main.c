@@ -64,6 +64,9 @@ typedef struct {
     float volume;         // of what the app plays, 0 to 2 (kept here, for this device)
     bool compact;         // the character tucked away, small at the left of the box to type in
     char *viewing;        // a table shown at its full size over the rest (its Markdown), or NULL
+    // Files to send with the next message, picked with the system's file dialog: where each is, and its name
+    char attached[8][1100], attached_name[8][128];
+    int attached_count;
     float view_x, view_y; // how far it is moved, across and down
     // The computer's settings, as its greeting ('H') gives them, changed with 'S': the recognition model,
     // how many there are, where it runs, whether its echo canceller is built in, always-on's countdown
@@ -1324,16 +1327,76 @@ static void table_screen(gs_ui *ui, app *a, gs_rect area) {
 static gs_rect follow_area;  // the button to follow what is heard again, when it shows
 static gs_rect newest_area;  // the button to the conversation's newest message, when it shows
 static gs_rect compose_area;  // the box to type in and its send button
+static SDL_Window *main_window;  // (for the file dialog)
 static gs_rect grip_area;     // the handle that tucks the character away, which a swipe does not start on
 static gs_rect chat_area;  // where the open conversation's page and the box to type in were, which a swipe does not start on
 
 // The typed message, to the agent of the open conversation: shown when the computer sends it back ('M').
+// ---- Attachments ----
+
+// Files picked in the system's dialog, handed over from the dialog's callback, which may run on another
+// thread, to the app (take_picked).
+static SDL_Mutex *picked_lock;
+static char picked[8][1100];
+static int picked_count;
+
+static void picked_files(void *user, const char *const *files, int filter) {
+    (void)user, (void)filter;
+    if (!files) return;
+    SDL_LockMutex(picked_lock);
+    for (int i = 0; files[i] && picked_count < 8; i++) SDL_strlcpy(picked[picked_count++], files[i], sizeof picked[0]);
+    SDL_UnlockMutex(picked_lock);
+}
+
+static void take_picked(app *a) {
+    SDL_LockMutex(picked_lock);
+    for (int i = 0; i < picked_count && a->attached_count < 8; i++) {
+        SDL_strlcpy(a->attached[a->attached_count], picked[i], sizeof a->attached[0]);
+        // (its name: the last part of its path, or of an Android content address)
+        const char *name = picked[i], *slash;
+        while ((slash = SDL_strpbrk(name, "/\\")) && slash[1]) name = slash + 1;
+        char decoded[128];
+        size_t n = 0;
+        for (const char *c = name; *c && n + 1 < sizeof decoded; c++) {  // (%3A and the like, as content addresses have)
+            if (*c == '%' && SDL_isxdigit((unsigned char)c[1]) && SDL_isxdigit((unsigned char)c[2])) {
+                char hexs[3] = { c[1], c[2], 0 };
+                decoded[n++] = (char)SDL_strtol(hexs, NULL, 16), c += 2;
+            } else decoded[n++] = *c;
+        }
+        decoded[n] = 0;
+        const char *colon = SDL_strrchr(decoded, ':'), *last = SDL_strrchr(decoded, '/');
+        const char *shown = last ? last + 1 : colon ? colon + 1 : decoded;
+        SDL_strlcpy(a->attached_name[a->attached_count++], *shown ? shown : "file", sizeof a->attached_name[0]);
+    }
+    picked_count = 0;
+    SDL_UnlockMutex(picked_lock);
+}
+
+// Each file picked, to the computer before the message they go with ('F': the name, a zero byte, the
+// file), as much of it as a frame holds.
+static bool send_files(app *a) {
+    for (int i = 0; i < a->attached_count; i++) {
+        size_t len = 0;
+        void *data = SDL_LoadFile(a->attached[i], &len);
+        if (!data) { SDL_snprintf(a->note, sizeof a->note, "could not read %s: %s", a->attached_name[i], SDL_GetError()), a->note_for[0] = 0; return false; }
+        size_t name_len = SDL_strlen(a->attached_name[i]);
+        if (len + name_len + 1 > 8 * 1024 * 1024 - 64) { SDL_free(data); SDL_snprintf(a->note, sizeof a->note, "%s is over 8 MB", a->attached_name[i]), a->note_for[0] = 0; return false; }
+        char *frame = SDL_malloc(name_len + 1 + len);
+        SDL_memcpy(frame, a->attached_name[i], name_len + 1), SDL_memcpy(frame + name_len + 1, data, len);
+        gp_link_send(a->link, 'F', frame, (uint32_t)(name_len + 1 + len));
+        SDL_free(frame), SDL_free(data);
+    }
+    a->attached_count = 0;
+    return true;
+}
+
 static void send_typed(gs_ui *ui, app *a) {
     char *s = a->typed, *e = s + SDL_strlen(s);
     while (*s == ' ' || *s == '\n') s++;
     while (e > s && (e[-1] == ' ' || e[-1] == '\n')) e--;
-    if (s == e) return;
+    if (s == e && !a->attached_count) return;
     if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) { SDL_strlcpy(a->note, "not connected: the message waits here", sizeof a->note), a->note_for[0] = 0; return; }
+    if (a->attached_count && !send_files(a)) return;
     gp_link_send(a->link, 'M', s, (uint32_t)(e - s));
     a->typed[0] = 0;
     gs_ui_edited(ui, "compose", a->typed, 0);
@@ -1411,10 +1474,32 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     if (shown == SPEAKING && read_elsewhere(a)) shown = IDLE;  // (another conversation's message is being read)
     if (!preview) character_area = (gs_rect){ 0 };
     {
-        float send_w = gs_ui_text_width(ui, "send", px) + 24;
+        float send_w = gs_ui_text_width(ui, "send", px) + 24, clip_w = px * 2.2f;
         float small_w = small_one ? px * 2.6f + 8 : 0;
-        float h = gs_ui_textarea_height(ui, a->typed, r.w - send_w - 8 - small_w, 5) + 12;
+        float h = gs_ui_textarea_height(ui, a->typed, r.w - send_w - 8 - small_w - clip_w - 6, 5) + 12;
         gs_rect box = gs_cut_bottom(&r, h);
+        // The files to send with it, above it: each its name, a tap on it taking it off.
+        if (!preview && a->attached_count) {
+            gs_rect chips = gs_cut_bottom(&r, px * 2);
+            gs_cut_bottom(&r, 4);
+            float x = chips.x;
+            for (int i = 0; i < a->attached_count; i++) {
+                char label[160];
+                SDL_snprintf(label, sizeof label, "%s  \u00d7", a->attached_name[i]);
+                float w = SDL_min(gs_ui_text_width(ui, label, small) + 20, chips.w - (x - chips.x));
+                if (w < 40) break;
+                gs_rect chip = { x, chips.y + 2, w, chips.h - 4 };
+                gs_ui_round(ui, chip, chip.h / 2, RAISED);
+                gs_ui_text(ui, gs_inset(chip, 10), label, small, gs_ui_hovered(ui, chip) ? ACCENT : TEXT, 0);
+                if (gs_ui_clicked(ui, chip)) {
+                    SDL_memmove(a->attached[i], a->attached[i + 1], (size_t)(a->attached_count - i - 1) * sizeof a->attached[0]);
+                    SDL_memmove(a->attached_name[i], a->attached_name[i + 1], (size_t)(a->attached_count - i - 1) * sizeof a->attached_name[0]);
+                    a->attached_count--;
+                    break;
+                }
+                x += w + 6;
+            }
+        }
         if (!preview) compose_area = box;  // (the box and its send button)
         // Tucked away, the character at the box's left: held to talk, tapped to stop what is said, as big.
         if (small_one) {
@@ -1428,6 +1513,12 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
         }
         gs_rect send = gs_cut_right(&box, send_w);
         gs_cut_right(&box, 8);
+        // A button that picks files to send with the message, in the system's file dialog.
+        gs_rect clip = gs_cut_left(&box, clip_w);
+        gs_cut_left(&box, 6);
+        gs_ui_round(ui, clip, 6, RAISED);
+        gs_ui_text(ui, clip, "+", px * 1.3f, !preview && gs_ui_hovered(ui, clip) ? ACCENT : TEXT, 0);
+        if (!preview && gs_ui_clicked(ui, clip)) SDL_ShowOpenFileDialog(picked_files, NULL, main_window, NULL, 0, NULL, true);
         if (preview) {
             gs_ui_outline(ui, box, 4, 1, BORDER);
             gs_ui_text(ui, gs_inset(box, 8), "type a message", small, DIM, -1);
@@ -1447,7 +1538,7 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
                 gp_link_send(a->link, 'D', line, (uint32_t)SDL_strlen(line));
                 was_from = from, was_to = to, was_len = SDL_strlen(a->typed);
             }
-            bool any = a->typed[0] != 0;
+            bool any = a->typed[0] != 0 || a->attached_count;
             gs_ui_round(ui, send, 6, any ? ACCENT : RAISED);
             gs_ui_text(ui, send, "send", px, any ? BACKGROUND : DIM, 0);
             if ((gs_ui_clicked(ui, send) || (typing && gs_ui_key(ui, SDLK_RETURN, 0))) && any) send_typed(ui, a);
@@ -2016,7 +2107,7 @@ static gs_update *start_updates(SDL_Window *win) { (void)win; return NULL; }
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|compact|room|pick|table|tableview|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|compact|attach|room|pick|table|tableview|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -2054,6 +2145,9 @@ int main(int argc, char **argv) {
                  "transcribe", "12:53", false);
         if (!SDL_strcmp(argv[3], "table")) SDL_strlcpy(a.open, "transcribe", sizeof a.open);
         if (!SDL_strcmp(argv[3], "compact")) a.compact = true;
+        if (!SDL_strcmp(argv[3], "attach"))  // (two files picked to send with the next message)
+            SDL_strlcpy(a.attached_name[0], "screenshot.png", 128), SDL_strlcpy(a.attached_name[1], "notes.pdf", 128), a.attached_count = 2,
+            SDL_strlcpy(a.typed, "what do you make of these?", sizeof a.typed);
         if (!SDL_strcmp(argv[3], "room")) {  // (a room: each member's messages under its name and harness)
             static const char *const said[][3] = { { "priv-opus", "claude", "The trace buffer shader is the cause: with it off, both PRs pass the GPU suite." },
                                                    { "priv-astra", "codex", "Agreed. I'll rerun the Wine suite on 644916e to confirm." },
@@ -2116,6 +2210,7 @@ int main(int argc, char **argv) {
     SDL_SetBooleanProperty(p, SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN, true);
     SDL_SetBooleanProperty(p, SDL_PROP_WINDOW_CREATE_HIGH_PIXEL_DENSITY_BOOLEAN, true);
     SDL_Window *win = SDL_CreateWindowWithProperties(p);
+    main_window = win, picked_lock = SDL_CreateMutex();
     SDL_Renderer *ren = SDL_CreateRenderer(win, NULL);
     SDL_SetRenderVSync(ren, 1);
     gs_fontset *fonts = gs_fontset_system();
@@ -2250,6 +2345,7 @@ int main(int argc, char **argv) {
             }
 #endif
         take_frames(&a);
+        take_picked(&a);
         // A notification tapped opens its conversation.
         char opened[128];
         SDL_LockMutex(who_lock);
