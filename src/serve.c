@@ -899,7 +899,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 bool form = false;
                 const char *to = o ? gs_json_str(gs_json_get(o, "to"), "") : "", *action = o ? gs_json_str(gs_json_get(o, "action"), "") : "";
                 if (o && !gear_panetone_answer(to, action, "gear", label, sizeof label, &form, actions, sizeof actions, error, sizeof error))
-                    send_text(&s, 'F', error);
+                    send_text(&s, 'F', error), SDL_Log("answer %s to %s: %s", action, to, error);
                 else if (form) {  // (a form's answers as they now are, to every client, which show its choices)
                     gs_jval *c = gs_jval_object(), *list = gs_jval_array();
                     gs_jval_set(c, "to", gs_jval_str(to)), gs_jval_set(c, "action", gs_jval_str(action));
