@@ -96,7 +96,7 @@ typedef struct {
     // not in the count at the top, and a tap on that count does not go to them.
     char muted[CONVERSATIONS][128];
     int muted_count;
-    char typed[4000];     // the message being typed
+    char typed[65536];    // the message being typed
     char *said, *reply;   // what is being said now (always-on's live words), and the reply being spoken
     entry history[HISTORY];
     int count;
@@ -1748,6 +1748,12 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
             // (tucked away, what the character's line said shows in the empty box, when it is news)
             const char *placeholder = small_one && SDL_strcmp(now, "hold to talk") ? now : "type a message";
             gs_ui_textarea(ui, box, "compose", a->typed, sizeof a->typed, placeholder);
+            // (a paste that did not fit, said once, rather than cut off unseen; within a character of
+            // the end, as a character longer than what is left is not put in)
+            static bool said_full;
+            bool full = SDL_strlen(a->typed) + 4 >= sizeof a->typed;
+            if (full && !said_full) SDL_strlcpy(a->note, "the message is at its limit of 64 KB: what came after was not put in", sizeof a->note), a->note_for[0] = 0;
+            said_full = full;
             // Where the box's cursor is, sent to the computer's phone-debug.log each time it or the text
             // changes ('D'), for finding where a caret drawn at the end comes from.
             static int was_from = -1, was_to = -1;
@@ -2560,6 +2566,11 @@ int main(int argc, char **argv) {
                     if (a.picking && a.link && gp_link_status(a.link, NULL, 0) == GP_OPEN) gp_link_send(a.link, 'L', NULL, 0);
                     continue;
                 }
+#ifdef SDL_PLATFORM_ANDROID
+                // On the phone, Enter in the box to type in starts a new line, as in phones' chat apps; the send
+                // button sends. (The on-screen keyboard's Enter comes as a key, like Shift+Enter's new line.)
+                if (e.type == SDL_EVENT_KEY_DOWN && (e.key.key == SDLK_RETURN || e.key.key == SDLK_KP_ENTER) && gs_ui_focused(ui, "compose")) e.key.mod |= SDL_KMOD_SHIFT;
+#endif
                 bool taken = gs_ui_event(ui, &e);
                 // With a keyboard, Space held talks as the character held does (a tap stops what is being
                 // said, or in always-on sends now), unless a field has the keyboard; Escape stops a reply.
