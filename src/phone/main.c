@@ -1207,6 +1207,9 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
     if (chosen) open_conversation(a, chosen), done = true;
     if (done) a->picking = false, typed[0] = 0, selected = 0;
     gs_ui_modal_end(ui);
+#ifndef SDL_PLATFORM_ANDROID
+    if (chosen) gs_ui_focus(ui, "compose");  // (with a keyboard, typed into the conversation chosen at once)
+#endif
 }
 
 // The sentence of `text` heard now, as bytes [*start, *end) of it: the last whose speech has begun,
@@ -2410,7 +2413,7 @@ int main(int argc, char **argv) {
                 if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !a.setup && !a.viewing && (e.key.key == SDLK_F1 || e.key.key == SDLK_F2 || e.key.key == SDLK_F3)) {
                     char to[128];
                     if (e.key.key == SDLK_F3) { if (a.open[0]) toggle_muted(&a, a.open); }
-                    else if (unseen_conversation(&a, e.key.key == SDLK_F1, to, sizeof to)) a.picking = false, open_conversation(&a, to);
+                    else if (unseen_conversation(&a, e.key.key == SDLK_F1, to, sizeof to)) a.picking = false, open_conversation(&a, to), gs_ui_focus(ui, "compose");
                     continue;
                 }
                 // Alt+E opens the conversation list (and closes it), wherever the keyboard is.
