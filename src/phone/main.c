@@ -211,6 +211,14 @@ static char *actions_of(gs_jv o) {
     return out;
 }
 
+// Whether a question form's action, the id [id, end), closes the form (submit, chat or cancel, as
+// "wakf:REQUEST:submit"), rather than choosing an option ("wakf:REQUEST:QUESTION:OPTION").
+static bool form_closes(const char *id, const char *end) {
+    int colons = 0;
+    for (const char *c = id; c < end; c++) colons += *c == ':';
+    return colons < 3;
+}
+
 // The newest kept message of `who` with `text`, or NULL.
 static entry *kept_message(app *a, const char *who, const char *text, bool mine) {
     for (int i = a->count - 1; i >= 0; i--)
@@ -1374,6 +1382,16 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
         style.text = TEXT;  // (the rest of a message being heard stays as it was, the sentence brighter)
         gp_rich_marked(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, from, to, &a->mark_y);
     } else gp_rich(ui, (gs_rect){ x, at.y + head, w, 0 }, text, &style, true);
+    // (a Claude question form's options are chosen one by one, each marked ✓ by Panetone, and it stays
+    // open until it is submitted, chatted about or cancelled; any other question's first press ends it)
+    bool form = e->actions && !SDL_strncmp(e->actions, "wakf:", 5);
+    int chose = e->chose;
+    if (form && chose) {  // (an option press an earlier app kept as the answer does not close the form)
+        const char *x = e->actions;
+        for (int j = 1; j < chose && x; j++) x = (x = SDL_strchr(x, '\n')) ? x + 1 : NULL;
+        const char *tab = x ? SDL_strchr(x, '\t') : NULL;
+        if (tab && !form_closes(x, tab)) chose = 0;
+    }
     for (int k = 0; k < answers; k++) {
         const char *x = e->actions;
         for (int j = 0; j < k; j++) x = SDL_strchr(x, '\n') + 1;
@@ -1382,10 +1400,8 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
         char id[600], label[600];
         SDL_snprintf(id, sizeof id, "%.*s", (int)(tab - x), x), SDL_snprintf(label, sizeof label, "%.*s", (int)(end - tab - 1), tab + 1);
         gs_rect b = { at.x + pad, at.y + buttons_at - 4 + k * (button_h + 6), w, button_h };
-        // (a Claude question form's options are chosen one by one, each marked ✓ by Panetone, and stay
-        // open until it is submitted, chatted about or cancelled; any other question's first press ends it)
-        bool form = !SDL_strncmp(e->actions, "wakf:", 5), closing = !form || SDL_strchr(id + 5, ':') == SDL_strrchr(id, ':');
-        bool chosen = e->chose == k + 1 || (form && SDL_strstr(label, "\u2713 ")), open = !e->chose && !preview;
+        bool closing = !form || form_closes(x, tab);
+        bool chosen = chose == k + 1 || (form && SDL_strstr(label, "\u2713 ")), open = !chose && !preview;
         gs_ui_round(ui, b, 6, chosen ? (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.25f } : RAISED);
         gs_ui_outline(ui, b, 6, 1, chosen ? ACCENT : open && gs_ui_hovered(ui, b) ? ACCENT : BORDER);
         gs_ui_text(ui, gs_inset(b, 8), label, px, chosen ? BRIGHT : open ? TEXT : DIM, 0);
