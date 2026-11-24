@@ -1126,6 +1126,13 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
     gs_rect close = gs_cut_right(&head, gs_ui_text_width(ui, "close", px) + 16);
     gs_ui_text(ui, close, "close", px, gs_ui_hovered(ui, close) ? ACCENT : TEXT, 1);
     gs_ui_text(ui, head, "Conversations", px, DIM, -1);
+    // (with a keyboard, the search field has it from the frame the list opens, however it was opened, so
+    // typing searches at once; on the phone, where that would bring up the keyboard over the list, a tap does)
+    static Uint64 drawn_at;  // (newly open when it was not drawn just before)
+#ifndef SDL_PLATFORM_ANDROID
+    if (SDL_GetTicks() - drawn_at > 250) gs_ui_focus(ui, "pick");
+#endif
+    drawn_at = SDL_GetTicks();
     gs_ui_field(ui, gs_cut_top(&in, px * 2.4f), "pick", typed, sizeof typed, "search conversations and agents");
     gs_cut_top(&in, 8);
     bool done = gs_ui_clicked(ui, close) || gs_ui_key(ui, SDLK_AC_BACK, 0) || gs_ui_key(ui, SDLK_ESCAPE, 0) || tapped_outside;
@@ -2390,7 +2397,6 @@ int main(int argc, char **argv) {
                 if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_E && (e.key.mod & SDL_KMOD_ALT) && !e.key.repeat && !a.setup && !a.viewing) {
                     a.picking = !a.picking;
                     if (a.picking && a.link && gp_link_status(a.link, NULL, 0) == GP_OPEN) gp_link_send(a.link, 'L', NULL, 0);
-                    if (a.picking) gs_ui_focus(ui, "pick");  // (typed to search at once)
                     continue;
                 }
                 bool taken = gs_ui_event(ui, &e);
