@@ -27,6 +27,9 @@ void gp_link_close(gp_link *l);
 gp_link_state gp_link_status(gp_link *l, char *why, size_t size);  // why it failed, or what it is doing
 // Each connection starts by telling the computer the newest message's number ('K') the link has had,
 // which the frames' own 'K' advance, so the computer gives again what came after it.
+// The number of connections made so far, the one now among them: what the app told the computer
+// for one, such as the conversation it has open, it tells again when this changes.
+int gp_link_session(gp_link *l);
 // The server's key as seen, once connected: to pin it when it was learned.
 bool gp_link_host_key(gp_link *l, char *out, size_t size);
 void gp_link_send(gp_link *l, char type, const void *data, uint32_t len);

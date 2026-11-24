@@ -90,6 +90,7 @@ typedef struct {
     unread unread[CONVERSATIONS];
     long long seen;       // the newest message's number in the computer's log, kept in seen.txt
     bool first_sync;      // connected with no number kept: what the computer gives again is not unseen
+    int session;          // the link's connection the computer last greeted the app on ('H')
     int unread_count;
     // Conversations muted on this device (muted.txt): F1 and F2 pass them by, their unseen replies are
     // not in the count at the top, and a tap on that count does not go to them.
@@ -506,6 +507,7 @@ static void connect_link(app *a) {
     c.seen = a->seen;
     a->first_sync = a->seen == 0;
     a->link = gp_link_open(&c);
+    a->session = 0;  // (a new link counts its connections from 1)
     gp_link_on_frame(a->link, heard, NULL);
     // Online behind other apps too, as gink is (asked while in front, as Android wants).
     static bool kept;
@@ -607,6 +609,9 @@ static void take_frames(app *a) {
     while (a->link && gp_link_take(a->link, &type, &data, &len)) {
         switch (type) {
         case 'H': {
+            // (a new connection's greeting: what was told on the one before, the conversation open and
+            // always-on, is told again, since a computer started again has none of it)
+            if (gp_link_session(a->link) != a->session) a->session = gp_link_session(a->link), a->asked[0] = 0, a->always_sent = false;
             gs_json *doc = gs_json_parse(data, len);
             if (doc) {
                 SDL_strlcpy(a->target, gs_json_str(gs_json_get(gs_json_root(doc), "target"), ""), sizeof a->target);
@@ -624,8 +629,12 @@ static void take_frames(app *a) {
             if (a->always && !a->always_sent) gp_link_send(a->link, 'O', "1", 1), a->always_sent = true;
             // The conversation open sends to its agent, asked for once; with none open, the agent's.
             if (!a->open[0]) open_conversation(a, here(a));
-            else if (SDL_strcmp(a->open, here(a)) && SDL_strcmp(a->open, "read back") && SDL_strcmp(a->asked, a->open))
+            else if (SDL_strcmp(a->open, here(a)) && SDL_strcmp(a->open, "read back") && SDL_strcmp(a->asked, a->open)) {
                 gp_link_send(a->link, 'T', a->open, (uint32_t)SDL_strlen(a->open)), SDL_strlcpy(a->asked, a->open, sizeof a->asked);
+                char line[300];  // (to phone-debug.log: which conversation a greeting was answered with)
+                int n = SDL_snprintf(line, sizeof line, "greeted on connection %d as %s: sending to %s, which is open", a->session, here(a), a->open);
+                gp_link_send(a->link, 'D', line, (uint32_t)SDL_min(n, (int)sizeof line - 1));
+            }
             SDL_LockMutex(who_lock);
             SDL_strlcpy(who_now, here(a), sizeof who_now);
             SDL_UnlockMutex(who_lock);

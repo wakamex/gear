@@ -43,6 +43,7 @@ struct gp_link {
     size_t out_len, out_cap;
     frame *in;
     SDL_AtomicInt background;  // the app is behind others, told to the computer on each connection
+    SDL_AtomicInt sessions;    // connections made, counted before the first frame of each comes
     long long seen;            // the newest message's number come ('K'), told on each connection
     gp_link_heard *heard;      // told of each frame as it comes, on this thread
     void *heard_user;
@@ -173,6 +174,7 @@ static bool session(gp_link *l, char *why, size_t why_size) {
     SDL_LockMutex(l->lock);
     l->out_len = 0;
     SDL_UnlockMutex(l->lock);
+    SDL_AddAtomicInt(&l->sessions, 1);
     gp_link_send(l, 'B', SDL_GetAtomicInt(&l->background) ? "1" : "0", 1);
     char newest[32];
     SDL_LockMutex(l->lock);
@@ -275,6 +277,8 @@ void gp_link_close(gp_link *l) {
     SDL_free(l->pem), SDL_free(l->pub);
     SDL_free(l);
 }
+
+int gp_link_session(gp_link *l) { return SDL_GetAtomicInt(&l->sessions); }
 
 gp_link_state gp_link_status(gp_link *l, char *why, size_t size) {
     SDL_LockMutex(l->lock);
