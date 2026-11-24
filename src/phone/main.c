@@ -89,6 +89,10 @@ typedef struct {
     long long seen;       // the newest message's number in the computer's log, kept in seen.txt
     bool first_sync;      // connected with no number kept: what the computer gives again is not unseen
     int unread_count;
+    // Conversations muted on this device (muted.txt): F1 and F2 pass them by, their unseen replies are
+    // not in the count at the top, and a tap on that count does not go to them.
+    char muted[CONVERSATIONS][128];
+    int muted_count;
     char typed[4000];     // the message being typed
     char *said, *reply;   // what is being said now (always-on's live words), and the reply being spoken
     entry history[HISTORY];
@@ -291,6 +295,59 @@ static void load_unread(app *a) {
         if (n) *n = SDL_atoi(line);
     }
     SDL_free(text);
+}
+
+// ---- Muted conversations ----
+
+static bool is_muted(app *a, const char *who) {
+    for (int i = 0; i < a->muted_count; i++)
+        if (!SDL_strcmp(a->muted[i], who)) return true;
+    return false;
+}
+
+static void save_muted(app *a) {
+    char path[1100], text[CONVERSATIONS * 130] = "";
+    settings_path(a, path, sizeof path, "muted.txt");
+    for (int i = 0; i < a->muted_count; i++) SDL_strlcat(text, a->muted[i], sizeof text), SDL_strlcat(text, "\n", sizeof text);
+    SDL_SaveFile(path, text, SDL_strlen(text));
+}
+
+static void load_muted(app *a) {
+    char path[1100], *save = NULL;
+    settings_path(a, path, sizeof path, "muted.txt");
+    char *text = SDL_LoadFile(path, NULL);
+    for (char *line = text ? SDL_strtok_r(text, "\n", &save) : NULL; line && a->muted_count < CONVERSATIONS; line = SDL_strtok_r(NULL, "\n", &save))
+        SDL_strlcpy(a->muted[a->muted_count++], line, sizeof a->muted[0]);
+    SDL_free(text);
+}
+
+static void toggle_muted(app *a, const char *who) {
+    for (int i = 0; i < a->muted_count; i++)
+        if (!SDL_strcmp(a->muted[i], who)) {
+            SDL_memmove(a->muted[i], a->muted[i + 1], (size_t)(a->muted_count - i - 1) * sizeof a->muted[0]);
+            a->muted_count--, save_muted(a);
+            return;
+        }
+    if (a->muted_count < CONVERSATIONS) SDL_strlcpy(a->muted[a->muted_count++], who, sizeof a->muted[0]), save_muted(a);
+}
+
+// The conversation not muted with the newest unseen reply (`newest`), or with the oldest one still
+// unseen, as wakterm's F1 and F2 go to the tabs needing attention; false when none has one.
+static bool unseen_conversation(app *a, bool newest, char *out, size_t size) {
+    int best = -1;
+    for (int u = 0; u < a->unread_count; u++) {
+        if (!a->unread[u].n || is_muted(a, a->unread[u].who) || !SDL_strcmp(a->unread[u].who, a->open)) continue;
+        // (its unseen replies are its last n replies; where the newest or the oldest of them is)
+        int left = a->unread[u].n, at = -1;
+        for (int i = a->count - 1; i >= 0 && left > 0; i--) {
+            const entry *e = &a->history[i];
+            if (e->mine || e->quiet || SDL_strcmp(e->who, a->unread[u].who)) continue;
+            if (at < 0 || !newest) at = i;
+            left--;
+        }
+        if (at >= 0 && (best < 0 || (newest ? at > best : at < best))) best = at, SDL_strlcpy(out, a->unread[u].who, size);
+    }
+    return best >= 0;
 }
 
 // Shows the conversation `who`, its replies seen and its notification taken back, and sends to its
@@ -838,8 +895,9 @@ enum { AVATARS = 4, REST = 0, BLINK, SPEAK, LISTEN };
 static SDL_Texture *frames[AVATARS][4];
 static SDL_Texture *thinking[AVATARS][4];  // a character's four thinking frames, where it has them
 // The agent harnesses' logos (assets/harness), beside a room member's messages.
-static const char *const harnesses[] = { "claude", "codex", "gemini", "agy", "opencode", "devin", "zcode", "muse", "endchat" };
-enum { HARNESSES = 9 };
+// (and "muted", the struck-through bell beside a muted conversation, kept with them)
+static const char *const harnesses[] = { "claude", "codex", "gemini", "agy", "opencode", "devin", "zcode", "muse", "endchat", "muted" };
+enum { HARNESSES = 10 };
 static SDL_Texture *logos[HARNESSES];
 
 static SDL_Texture *logo_of(const char *harness) {
@@ -1031,7 +1089,7 @@ static bool next_unread(app *a, char *out, size_t size) {
     for (int k = 1; k <= n; k++) {
         const char *who = list[(at + k) % n].who;
         int *unseen = unread_of(a, who, false);
-        if (unseen && *unseen && SDL_strcmp(who, a->open)) return SDL_strlcpy(out, who, size), true;
+        if (unseen && *unseen && SDL_strcmp(who, a->open) && !is_muted(a, who)) return SDL_strlcpy(out, who, size), true;
     }
     return false;
 }
@@ -1088,8 +1146,8 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
                 SDL_snprintf(count_text, sizeof count_text, "%d", *unseen);
                 float d = small * 1.5f, w = SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10);
                 gs_rect badge = { row.x + row.w - w, row.y + (row.h - d) / 2, w, d };
-                gs_ui_round(ui, badge, d / 2, ACCENT);
-                gs_ui_text(ui, badge, count_text, small, BACKGROUND, 0);
+                gs_ui_round(ui, badge, d / 2, is_muted(a, c->who) ? RAISED : ACCENT);  // (a muted one's dim)
+                gs_ui_text(ui, badge, count_text, small, is_muted(a, c->who) ? DIM : BACKGROUND, 0);
                 row.w -= w + 8;
             }
             gs_rect top = gs_cut_top(&row, px * 1.4f);
@@ -1099,6 +1157,11 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
             // The conversation's name first; its agent's, dim, in what is left of the line (cut short to
             // fit, and left out with less than a few letters' room).
             float title_w = gs_ui_text(ui, top, c->who, px, !SDL_strcmp(c->who, a->open) ? ACCENT : unseen && *unseen ? BRIGHT : TEXT, -1);
+            if (is_muted(a, c->who) && logo_of("muted")) {  // (muted: a struck-through bell after its name)
+                float s = px * 1.0f;
+                gs_ui_texture(ui, (gs_rect){ top.x + title_w + 6, top.y + (top.h - s) / 2, s, s }, logo_of("muted"), NULL);
+                title_w += s + 8;
+            }
             gs_rect rest = { top.x + title_w + 12, top.y, top.w - title_w - 12, top.h };
             if (c->agent >= 0 && SDL_strcmp(c->who, a->agents[c->agent][0]) && rest.w >= small * 5)
                 gs_ui_text(ui, rest, a->agents[c->agent][0], small, DIM, 1);
@@ -1425,18 +1488,23 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
     gs_rect who = { top.x + 18, top.y, top.w - 18 - 12, top.h };  // (12 clear of the voice)
     // (with the count of replies unseen in the other conversations)
     int elsewhere = 0;
-    for (int i = 0; i < a->unread_count; i++) elsewhere += SDL_strcmp(a->unread[i].who, key) ? a->unread[i].n : 0;
+    for (int i = 0; i < a->unread_count; i++) elsewhere += SDL_strcmp(a->unread[i].who, key) && !is_muted(a, a->unread[i].who) ? a->unread[i].n : 0;
     char label[200], count_text[16] = "";
     if (elsewhere) SDL_snprintf(count_text, sizeof count_text, "%d", elsewhere);
     SDL_snprintf(label, sizeof label, "→ %s", key[0] ? key : "nobody: read back");
     // (the name cut short, when long, to leave the count its room)
-    bool to_next = false;
-    float d = small * 1.5f, badge_w = elsewhere ? SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10) : 0;
-    gs_rect name = { who.x, who.y, SDL_max(0, who.w - (elsewhere ? badge_w + 10 : 0)), who.h };
+    bool to_next = false, quiet = key[0] && is_muted(a, key) && logo_of("muted");
+    float d = small * 1.5f, badge_w = elsewhere ? SDL_max(d, gs_ui_text_width(ui, count_text, small) + 10) : 0, bell = quiet ? px + 8 : 0;
+    gs_rect name = { who.x, who.y, SDL_max(0, who.w - (elsewhere ? badge_w + 10 : 0) - bell), who.h };
     float label_w = gs_ui_text(ui, name, label, px, gs_ui_hovered(ui, who) ? ACCENT : BRIGHT, -1);
+    // (muted, on this device: a struck-through bell after its name)
+    if (quiet) {
+        gs_ui_texture(ui, (gs_rect){ who.x + SDL_min(label_w, name.w) + 6, who.y + (who.h - px) / 2, px, px }, logo_of("muted"), NULL);
+        label_w = SDL_min(label_w, name.w) + bell;
+    }
     if (elsewhere) {
         float w = badge_w;
-        gs_rect badge = { who.x + SDL_min(label_w, name.w) + 10, who.y + (who.h - d) / 2, w, d };
+        gs_rect badge = { who.x + (quiet ? label_w : SDL_min(label_w, name.w)) + 10, who.y + (who.h - d) / 2, w, d };
         gs_ui_round(ui, badge, d / 2, ACCENT);
         gs_ui_text(ui, badge, count_text, small, BACKGROUND, 0);
         // (a tap on the count opens the next conversation with replies unseen, as the swipe goes)
@@ -2107,7 +2175,7 @@ static gs_update *start_updates(SDL_Window *win) { (void)win; return NULL; }
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|compact|attach|room|pick|table|tableview|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|compact|attach|muted|mutedpick|room|pick|table|tableview|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -2121,7 +2189,7 @@ int main(int argc, char **argv) {
     load_settings(&a);
     bool keyed = load_key(&a);
     if (!shot) {
-        load_history(&a), load_unread(&a);
+        load_history(&a), load_unread(&a), load_muted(&a);
         char path[1100];
         settings_path(&a, path, sizeof path, "seen.txt");
         char *seen = SDL_LoadFile(path, NULL);
@@ -2145,6 +2213,8 @@ int main(int argc, char **argv) {
                  "transcribe", "12:53", false);
         if (!SDL_strcmp(argv[3], "table")) SDL_strlcpy(a.open, "transcribe", sizeof a.open);
         if (!SDL_strcmp(argv[3], "compact")) a.compact = true;
+        if (!SDL_strcmp(argv[3], "muted") || !SDL_strcmp(argv[3], "mutedpick"))  // (voice and personal muted)
+            SDL_strlcpy(a.muted[0], "voice", 128), SDL_strlcpy(a.muted[1], "personal", 128), a.muted_count = 2;
         if (!SDL_strcmp(argv[3], "attach"))  // (two files picked to send with the next message)
             SDL_strlcpy(a.attached_name[0], "screenshot.png", 128), SDL_strlcpy(a.attached_name[1], "notes.pdf", 128), a.attached_count = 2,
             SDL_strlcpy(a.typed, "what do you make of these?", sizeof a.typed);
@@ -2189,7 +2259,7 @@ int main(int argc, char **argv) {
                                           { "hearsay_claude", "hearsay" }, { "hyperliquid_participant_feed_re_claude", "re-opus" }, { "aeroplan_claude", "aeroplan" } };
         for (int i = 0; i < 7; i++) SDL_strlcpy(a.agents[i][0], names[i][0], 128), SDL_strlcpy(a.agents[i][1], names[i][1], 128);
         a.agent_count = 7, a.busy[0] = a.busy[2] = a.busy[4] = true;
-        a.picking = !SDL_strcmp(argv[3], "pick");
+        a.picking = !SDL_strcmp(argv[3], "pick") || !SDL_strcmp(argv[3], "mutedpick");
     }
     if (argc >= 3 && !SDL_strcmp(argv[1], "--say")) {
         if (argc >= 5) SDL_strlcpy(a.host, argv[3], sizeof a.host), SDL_strlcpy(a.user, argv[4], sizeof a.user);
@@ -2308,6 +2378,14 @@ int main(int argc, char **argv) {
                 debug_event(&e);
                 // (the oldest key or typed text of the frame, for timing what typing waits for)
                 if ((e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_KEY_DOWN) && !typed_at) typed_at = e.common.timestamp, frame_at = SDL_GetTicksNS();
+                // F1 and F2 go to the conversation with the newest unseen reply and with the oldest, as in
+                // wakterm, passing muted ones by; F3 mutes the open conversation, or unmutes it.
+                if (e.type == SDL_EVENT_KEY_DOWN && !e.key.repeat && !a.setup && !a.viewing && (e.key.key == SDLK_F1 || e.key.key == SDLK_F2 || e.key.key == SDLK_F3)) {
+                    char to[128];
+                    if (e.key.key == SDLK_F3) { if (a.open[0]) toggle_muted(&a, a.open); }
+                    else if (unseen_conversation(&a, e.key.key == SDLK_F1, to, sizeof to)) a.picking = false, open_conversation(&a, to);
+                    continue;
+                }
                 // Alt+E opens the conversation list (and closes it), wherever the keyboard is.
                 if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_E && (e.key.mod & SDL_KMOD_ALT) && !e.key.repeat && !a.setup && !a.viewing) {
                     a.picking = !a.picking;
