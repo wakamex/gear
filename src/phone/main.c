@@ -2416,6 +2416,13 @@ int main(int argc, char **argv) {
                     else if (unseen_conversation(&a, e.key.key == SDLK_F1, to, sizeof to)) a.picking = false, open_conversation(&a, to), gs_ui_focus(ui, "compose");
                     continue;
                 }
+                // Alt+Up and Alt+Down go to the conversation before and after the open one in the list, as a
+                // swipe does, wherever the keyboard is.
+                if (e.type == SDL_EVENT_KEY_DOWN && (e.key.key == SDLK_UP || e.key.key == SDLK_DOWN) && (e.key.mod & SDL_KMOD_ALT) && !a.setup && !a.viewing) {
+                    char to[128];
+                    if (beside(&a, e.key.key == SDLK_DOWN ? 1 : -1, to, sizeof to)) a.picking = false, open_conversation(&a, to), gs_ui_focus(ui, "compose");
+                    continue;
+                }
                 // Alt+E opens the conversation list (and closes it), wherever the keyboard is.
                 if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_E && (e.key.mod & SDL_KMOD_ALT) && !e.key.repeat && !a.setup && !a.viewing) {
                     a.picking = !a.picking;
