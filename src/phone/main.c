@@ -51,7 +51,8 @@ static const char *const read_names[] = { "replies to me", "this conversation", 
 // that a long conversation lays out only what is near the screen
 // actions: a question's answers, pressed as its Telegram buttons are, "ID\tLABEL\n" each, or NULL;
 // chose: the one pressed, from 1, or 0 for none yet
-typedef struct { char *text, *actions; char who[128]; char at[8]; bool mine, quiet, unfolded, laid_unfolded; float laid_w, laid_h; int chose; } entry;
+// speaker, harness: in a room, the member that posted it and its agent's harness ("claude"), or ""
+typedef struct { char *text, *actions; char who[128]; char at[8]; bool mine, quiet, unfolded, laid_unfolded; float laid_w, laid_h; int chose; char speaker[128], harness[32]; } entry;
 enum { HISTORY = 2000, CONVERSATIONS = 64 };
 typedef struct { char who[128]; int n; } unread;  // the replies in a conversation not yet seen
 
@@ -246,6 +247,8 @@ static void load_history(app *a) {
             remember(a, text, gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""), gs_json_bool(gs_json_get(o, "mine"), false));
             e = &a->history[a->count - 1];
             e->quiet = gs_json_bool(gs_json_get(o, "quiet"), false), e->actions = actions_of(o);
+            SDL_strlcpy(e->speaker, gs_json_str(gs_json_get(o, "speaker"), ""), sizeof e->speaker);
+            SDL_strlcpy(e->harness, gs_json_str(gs_json_get(o, "harness"), ""), sizeof e->harness);
         }
         gs_json_free(doc);
     }
@@ -304,9 +307,11 @@ static void open_conversation(app *a, const char *who) {
 // counted unseen when its conversation is not the one open.
 // A quiet one (Panetone's receipt for a send, or its notice) is shown but not counted unseen, nor is
 // one `caught_up` on (the log given to an app that had none of it, its first time).
-static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine, bool quiet, bool caught_up) {
+static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine, bool quiet, bool caught_up, const char *speaker, const char *harness) {
     remember(a, text, who, at, mine);
     a->history[a->count - 1].quiet = quiet;
+    SDL_strlcpy(a->history[a->count - 1].speaker, speaker, sizeof a->history[a->count - 1].speaker);
+    SDL_strlcpy(a->history[a->count - 1].harness, harness, sizeof a->history[a->count - 1].harness);
     // (an answer in the conversation the note is about ends its "waiting for")
     if (!mine && !quiet && *a->note_for && !SDL_strcmp(who, a->note_for)) a->note[0] = 0;
     if (!SDL_strcmp(who, a->open)) a->fresh = true;
@@ -319,6 +324,8 @@ static void add_message_at(app *a, const char *text, const char *who, const char
     gs_jval_set(o, "who", gs_jval_str(who));
     gs_jval_set(o, "mine", gs_jval_bool(mine));
     if (quiet) gs_jval_set(o, "quiet", gs_jval_bool(true));
+    if (*speaker) gs_jval_set(o, "speaker", gs_jval_str(speaker));
+    if (*harness) gs_jval_set(o, "harness", gs_jval_str(harness));
     gs_jval_set(o, "text", gs_jval_str(text));
     char *line = gs_jval_write(o, false), path[1100];
     gs_jval_free(o);
@@ -333,7 +340,7 @@ static void add_message(app *a, const char *text, const char *who, bool mine) {
     SDL_DateTime d;
     char at[8] = "";
     if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(at, sizeof at, "%02d:%02d", d.hour, d.minute);
-    add_message_at(a, text, who, at, mine, false, false);
+    add_message_at(a, text, who, at, mine, false, false, "", "");
 }
 
 // ---- Notifications ----
@@ -528,7 +535,9 @@ static void take_frames(app *a) {
                 for (int i = a->count - 1; i >= 0 && i >= a->count - 200; i--)
                     if (a->history[i].mine == mine && !SDL_strcmp(a->history[i].who, who) && !SDL_strcmp(a->history[i].text, text)) had = true;
                 bool again = gs_json_bool(gs_json_get(o, "again"), false);
-                if (!had) add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine, quiet, again && a->first_sync);
+                if (!had)
+                    add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine, quiet, again && a->first_sync,
+                                   gs_json_str(gs_json_get(o, "speaker"), ""), gs_json_str(gs_json_get(o, "harness"), ""));
                 // (its answers to press, on it as new or on the one had, such as a reply come as 'R')
                 entry *with = gs_json_count(gs_json_get(o, "actions")) ? kept_message(a, who, text, mine) : NULL;
                 if (with && !with->actions) with->actions = actions_of(o), with->laid_w = 0, save_answers(a, with);
@@ -825,6 +834,16 @@ static const char *const avatars[] = { "tomato", "fox", "girl", "robot" };
 enum { AVATARS = 4, REST = 0, BLINK, SPEAK, LISTEN };
 static SDL_Texture *frames[AVATARS][4];
 static SDL_Texture *thinking[AVATARS][4];  // a character's four thinking frames, where it has them
+// The agent harnesses' logos (assets/harness), beside a room member's messages.
+static const char *const harnesses[] = { "claude", "codex", "gemini", "agy", "opencode", "devin", "zcode", "muse", "endchat" };
+enum { HARNESSES = 9 };
+static SDL_Texture *logos[HARNESSES];
+
+static SDL_Texture *logo_of(const char *harness) {
+    for (int i = 0; i < HARNESSES; i++)
+        if (!SDL_strcmp(harnesses[i], harness)) return logos[i];
+    return NULL;
+}
 
 static void load_avatars(SDL_Renderer *ren) {
     static const char *const states[] = { "rest", "blink", "speak", "listen" };
@@ -840,6 +859,16 @@ static void load_avatars(SDL_Renderer *ren) {
             SDL_SetTextureScaleMode(frames[i][k], SDL_SCALEMODE_LINEAR);
             SDL_DestroySurface(img);
         }
+    for (int i = 0; i < HARNESSES; i++) {
+        char path[1100];
+        SDL_snprintf(path, sizeof path, "%savatars/harness-%s.png", SDL_GetBasePath(), harnesses[i]);
+        SDL_Surface *img = SDL_LoadPNG(path);
+        if (!img) SDL_snprintf(path, sizeof path, "%sharness-%s.png", SDL_GetBasePath(), harnesses[i]), img = SDL_LoadPNG(path);
+        if (!img) continue;
+        logos[i] = SDL_CreateTextureFromSurface(ren, img);
+        SDL_SetTextureScaleMode(logos[i], SDL_SCALEMODE_LINEAR);
+        SDL_DestroySurface(img);
+    }
     // (and its thinking frames, NAME-think1.png to NAME-think4.png, where they are)
     for (int i = 0; i < AVATARS; i++)
         for (int k = 0; k < 4; k++) {
@@ -1152,13 +1181,16 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
     if (!e->mine) gs_ui_fill(ui, (gs_rect){ at.x + 3, at.y, at.w - 3, h - 4 }, (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.06f });
     float mark = head - 4, x = at.x + pad;
     int which = avatar_index(a->avatar);
-    if (!e->mine && frames[which][REST]) gs_ui_texture(ui, (gs_rect){ x, at.y + 2, mark, mark }, frames[which][REST], NULL);
+    // (in a room, the logo of the member's agent's harness, or the chosen character)
+    SDL_Texture *logo = e->mine ? NULL : logo_of(e->harness);
+    if (logo) gs_ui_texture(ui, (gs_rect){ x, at.y + 2, mark, mark }, logo, NULL);
+    else if (!e->mine && frames[which][REST]) gs_ui_texture(ui, (gs_rect){ x, at.y + 2, mark, mark }, frames[which][REST], NULL);
     else {
         gs_ui_circle(ui, x + mark / 2, at.y + 2 + mark / 2, mark / 2, RAISED);
         gs_ui_text(ui, (gs_rect){ x, at.y + 2, mark, mark }, "you", small * 0.6f, DIM, 0);
     }
     char label[200];
-    SDL_snprintf(label, sizeof label, "%s", e->mine ? "you" : e->who);
+    SDL_snprintf(label, sizeof label, "%s", e->mine ? "you" : *e->speaker ? e->speaker : e->who);
     gs_rect line = { x + mark + 6, at.y, w - mark - 6, head };
     gs_ui_text(ui, line, label, small, e->mine ? DIM : ACCENT, -1);
     // (what is being said now has no time yet, nor a speaker)
@@ -1984,7 +2016,7 @@ static gs_update *start_updates(SDL_Window *win) { (void)win; return NULL; }
 
 int main(int argc, char **argv) {
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "Portrait");
-    // `gear-phone --shot FILE setup|talk|compact|pick|table|tableview|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
+    // `gear-phone --shot FILE setup|talk|compact|room|pick|table|tableview|question|swipe|type|speaking|pronounce`: a screen drawn to a picture, without a display.
     const char *shot = argc >= 4 && !SDL_strcmp(argv[1], "--shot") ? argv[2] : NULL;
     if (shot) SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "offscreen"), SDL_SetHint(SDL_HINT_RENDER_DRIVER, "software");
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
@@ -2022,6 +2054,16 @@ int main(int argc, char **argv) {
                  "transcribe", "12:53", false);
         if (!SDL_strcmp(argv[3], "table")) SDL_strlcpy(a.open, "transcribe", sizeof a.open);
         if (!SDL_strcmp(argv[3], "compact")) a.compact = true;
+        if (!SDL_strcmp(argv[3], "room")) {  // (a room: each member's messages under its name and harness)
+            static const char *const said[][3] = { { "priv-opus", "claude", "The trace buffer shader is the cause: with it off, both PRs pass the GPU suite." },
+                                                   { "priv-astra", "codex", "Agreed. I'll rerun the Wine suite on 644916e to confirm." },
+                                                   { "priv-neon", "agy", "Done: 68 and 77 pass, with and without diagnostics." } };
+            for (int i = 0; i < 3; i++) {
+                remember(&a, said[i][2], "priv-room", "12:3", false);
+                SDL_strlcpy(a.history[a.count - 1].speaker, said[i][0], 128), SDL_strlcpy(a.history[a.count - 1].harness, said[i][1], 32);
+            }
+            SDL_strlcpy(a.open, "priv-room", sizeof a.open);
+        }
         if (!SDL_strcmp(argv[3], "tableview"))  // (the transcribe conversation's table at its full size)
             for (int i = 0; i < a.count; i++) {
                 const char *at = SDL_strstr(a.history[i].text, "| Recording");

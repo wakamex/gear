@@ -29,7 +29,9 @@ typedef struct frame { struct frame *next; char type; Uint32 len; char *data; in
 
 // A message shown to the phone, numbered and kept (in hub-log.jsonl, so a restart keeps it too), for
 // giving again to a phone that missed it.
-typedef struct { long long seq; char *text, *actions; char who[128]; char at[8]; bool mine; bool quiet; } logged;  // actions: a question's answers, "ID\tLABEL\n" each, or NULL
+// actions: a question's answers, "ID\tLABEL\n" each, or NULL; speaker and harness: in a room, the member that
+// posted it and its agent's harness, or ""
+typedef struct { long long seq; char *text, *actions; char who[128]; char at[8]; bool mine; bool quiet; char speaker[128], harness[32]; } logged;
 enum { LOG = 1000 };
 
 // A client: the phone, or the desktop's app, each connected to the hub at once. Its frames are read on
@@ -352,6 +354,8 @@ typedef struct { const char *target; gear_transcript *transcript; } delivery;
 static delivery out_to;
 
 static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, const char *actions, bool shown);
+// The room member and harness the next message logged is from (log_message clears them).
+static char next_speaker[128], next_harness[32];
 static void send_seq(server *s, long long seq);
 static long long log_seq;  // the newest message's number in the log
 static const char *conversation_of(const char *tab) { return *tab ? tab : "read back"; }
@@ -396,6 +400,8 @@ static char *log_line(const logged *l) {
     if (l->mine) gs_jval_set(o, "mine", gs_jval_bool(true));
     if (l->quiet) gs_jval_set(o, "quiet", gs_jval_bool(true));
     gs_jval_set(o, "text", gs_jval_str(l->text));
+    if (*l->speaker) gs_jval_set(o, "speaker", gs_jval_str(l->speaker));
+    if (*l->harness) gs_jval_set(o, "harness", gs_jval_str(l->harness));
     if (l->actions && *l->actions) {
         gs_jval *list = gs_jval_array();
         for (const char *a = l->actions; *a;) {
@@ -419,6 +425,7 @@ static logged *log_add(long long seq, const char *who, const char *at, bool mine
     if (log_count == LOG) SDL_free(log_of[0].text), SDL_free(log_of[0].actions), SDL_memmove(log_of, log_of + 1, (LOG - 1) * sizeof *log_of), log_count--;
     logged *l = &log_of[log_count++];
     l->seq = seq, l->mine = mine, l->quiet = quiet, l->text = SDL_strdup(text), l->actions = actions && *actions ? SDL_strdup(actions) : NULL;
+    l->speaker[0] = l->harness[0] = 0;
     SDL_strlcpy(l->who, who, sizeof l->who), SDL_strlcpy(l->at, at, sizeof l->at);
     if (seq > log_seq) log_seq = seq;
     return l;
@@ -442,9 +449,13 @@ static void load_log(void) {
             SDL_snprintf(one, sizeof one, "%s\t%s\n", gs_json_str(gs_json_get(a, "id"), ""), gs_json_str(gs_json_get(a, "label"), ""));
             if (SDL_strlen(actions) + SDL_strlen(one) < sizeof actions) SDL_strlcat(actions, one, sizeof actions);
         }
-        if (text)
-            log_add((long long)gs_json_num(gs_json_get(o, "seq"), 0), gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""),
-                    gs_json_bool(gs_json_get(o, "mine"), false), gs_json_bool(gs_json_get(o, "quiet"), false), text, actions), lines++;
+        if (text) {
+            logged *l = log_add((long long)gs_json_num(gs_json_get(o, "seq"), 0), gs_json_str(gs_json_get(o, "who"), ""), gs_json_str(gs_json_get(o, "at"), ""),
+                                gs_json_bool(gs_json_get(o, "mine"), false), gs_json_bool(gs_json_get(o, "quiet"), false), text, actions);
+            SDL_strlcpy(l->speaker, gs_json_str(gs_json_get(o, "speaker"), ""), sizeof l->speaker);
+            SDL_strlcpy(l->harness, gs_json_str(gs_json_get(o, "harness"), ""), sizeof l->harness);
+            lines++;
+        }
         gs_json_free(doc);
     }
     SDL_free(all);
@@ -470,6 +481,8 @@ static void log_message(server *s, const char *who, const char *at, bool mine, b
     char now[8];
     if (!*at) stamp(now), at = now;
     logged *l = log_add(log_seq + 1, who, at, mine, quiet, text, actions);
+    SDL_strlcpy(l->speaker, next_speaker, sizeof l->speaker), SDL_strlcpy(l->harness, next_harness, sizeof l->harness);
+    next_speaker[0] = next_harness[0] = 0;
     char *line = log_line(l);
     SDL_IOStream *io = SDL_IOFromFile(log_path, "ab");
     if (io) SDL_WriteIO(io, line, SDL_strlen(line)), SDL_WriteIO(io, "\n", 1), SDL_CloseIO(io);
@@ -489,6 +502,44 @@ static void replay(server *s, long long seen) {
         SDL_free(line), SDL_free(again);
         send_seq(s, log_of[i].seq);
     }
+}
+
+// ---- Rooms ----
+
+// Whether the route titled `route` is a room of member routes, a route with no agent of its own,
+// asked of Panetone at most every five minutes for each route.
+static bool room_route(const char *route) {
+    enum { KNOWN = 128 };  // (more than the user's routes, so each is asked once in five minutes)
+    static struct { char title[128]; bool room; Uint64 at; } known[KNOWN];
+    static int next;
+    for (int i = 0; i < KNOWN; i++)
+        if (known[i].at && !SDL_strcmp(known[i].title, route) && SDL_GetTicks() - known[i].at < 300000) return known[i].room;
+    int agents = 1;
+    bool room = gear_panetone_route(route, &agents) && agents == 0;
+    int i = next++ % KNOWN;
+    SDL_strlcpy(known[i].title, route, sizeof known[i].title), known[i].room = room, known[i].at = SDL_GetTicks();
+    return room;
+}
+
+// A room member's post, "NAME: text" with NAME its agent's name, as that member's: *speaker the member's
+// route (its agent's tab, found once for each agent), and the text after the name. NULL when `text`
+// is not of that form.
+static const char *member_post(const char *text, char *speaker, size_t size) {
+    const char *colon = SDL_strstr(text, ": ");
+    if (!colon || colon == text || colon - text >= 100) return NULL;
+    for (const char *c = text; c < colon; c++)
+        if (!SDL_isalnum((unsigned char)*c) && *c != '_' && *c != '-' && *c != '.') return NULL;
+    char name[128];
+    SDL_snprintf(name, sizeof name, "%.*s", (int)(colon - text), text);
+    static struct { char name[128], tab[128]; } known[64];
+    static int next;
+    for (int i = 0; i < 64; i++)
+        if (!SDL_strcmp(known[i].name, name)) { SDL_strlcpy(speaker, known[i].tab, size); return colon + 2; }
+    int i = next++ % 64;
+    SDL_strlcpy(known[i].name, name, sizeof known[i].name);
+    tab_of(name, known[i].tab, sizeof known[i].tab);
+    SDL_strlcpy(speaker, known[i].tab, size);
+    return colon + 2;
 }
 
 // ---- The hub ----
@@ -832,7 +883,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 // (no agent by that name or tab: a Panetone route of that title, such as a room of agents,
                 // which has no tab of its own and is sent to as any route is)
                 if (!gear_agent_find(f->data, &a, error, sizeof error)) {
-                    if (!gear_panetone_route(f->data)) { send_text(&s, 'F', error); s.only = -1; break; }
+                    if (!gear_panetone_route(f->data, NULL)) { send_text(&s, 'F', error); s.only = -1; break; }
                     a = (gear_agent){ 0 };
                     SDL_strlcpy(a.name, f->data, sizeof a.name), SDL_strlcpy(a.tab, f->data, sizeof a.tab);
                 }
@@ -919,6 +970,14 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
         // Panetone's posts, to the phone or kept for it: what the agent sent to now posts to end its
         // turn is its reply, shown and spoken (as text alone to a phone in the background).
         for (gear_post p; feed && gear_feed_next(feed, *target ? target_tab : "", &p); SDL_free(p.text)) {
+            // (in a room, each post shown as its speaker's, without the "NAME: " Panetone puts before it: a
+            // member's with its agent's harness, and Panetone's or a person's with none)
+            char speaker[128] = "";
+            const char *said = room_route(p.who) ? member_post(p.text, speaker, sizeof speaker) : NULL;
+            if (said) {
+                SDL_memmove(p.text, said, SDL_strlen(said) + 1);
+                SDL_strlcpy(next_speaker, speaker, sizeof next_speaker), SDL_strlcpy(next_harness, p.harness, sizeof next_harness);
+            }
             if (p.kind == GEAR_POST_REPLY) {
                 // The reply as 'R' to the client talking to its agent alone, whose conversation it is; the
                 // others, which may have another conversation open, get it as a message of its route ('Z'),
@@ -932,6 +991,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 }
                 if (s.talker >= 0 && !s.clients[s.talker].background) speak(&s, p.text);
             } else log_message(&s, p.who, p.at, p.kind == GEAR_POST_MINE, p.quiet, p.text, p.actions, true);
+            next_speaker[0] = next_harness[0] = 0;  // (not left for another message when this one was only spoken)
         }
         SDL_Delay(10);
     }

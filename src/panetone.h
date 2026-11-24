@@ -23,8 +23,9 @@ bool gear_panetone_say(const char *route, const char *text, const char *via, cha
 bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, char *error, size_t error_size);
 
 // Whether Panetone has a route titled `route` (an agent's tab, or a room with no tab of its own, which
-// `panetone say` reaches all the same).
-bool gear_panetone_route(const char *route);
+// `panetone say` reaches all the same), and when `agents` is given, how many live agents it has of its
+// own (none for a room of member routes).
+bool gear_panetone_route(const char *route, int *agents);
 
 typedef enum {
     GEAR_POST_MESSAGE,  // a post to show: an agent's message, or Panetone's receipt or notice (quiet)
@@ -40,6 +41,7 @@ typedef struct {
     char *text;  // SDL_free it
     // A question's answers, to be pressed as its Telegram buttons are: "ID\tLABEL\n" for each, or ""
     char actions[1536];
+    char harness[32];  // the harness of the agent that posted it ("claude", "codex"), or ""
 } gear_post;
 
 typedef struct gear_feed gear_feed;

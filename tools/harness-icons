@@ -1,0 +1,11 @@
+#!/bin/sh
+# Renders assets/harness/NAME.svg, each agent harness's logo, to assets/avatars/harness-NAME.png, the
+# 96 px pictures the app shows beside a room member's messages: in their own colours, and the
+# one-colour ones (currentColor) in the app's text colour, to show on its dark background.
+#   tools/harness-icons
+set -eu
+cd "$(dirname "$0")/.."
+for svg in assets/harness/*.svg; do
+    name=$(basename "$svg" .svg)
+    sed 's/currentColor/#b6aa99/g' "$svg" | magick -background none -density 600 svg:- -resize 96x96 -gravity center -extent 96x96 "assets/avatars/harness-$name.png"
+done

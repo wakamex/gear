@@ -35,7 +35,7 @@ bool gear_panetone_say(const char *route, const char *text, const char *via, cha
     return ok;
 }
 
-bool gear_panetone_route(const char *route) {
+bool gear_panetone_route(const char *route, int *agents) {
     const char *argv[] = { panetone(), "route", "inspect", route, NULL };
     size_t len = 0;
     int code = -1;
@@ -44,6 +44,7 @@ bool gear_panetone_route(const char *route) {
     gs_json *doc = gs_json_parse(out, strcspn(out, "\n"));
     gs_jv r = doc ? gs_json_root(doc) : NULL;
     bool ok = r && gs_json_bool(gs_json_get(r, "ok"), false) && !SDL_strcasecmp(gs_json_str(gs_json_path(r, "result.route.title"), ""), route);
+    if (ok && agents) *agents = gs_json_count(gs_json_path(r, "result.live.agents"));
     gs_json_free(doc);
     SDL_free(out);
     return ok;
@@ -86,6 +87,7 @@ typedef struct line {
     char *text;
     char who[128], at[8], kind[16], via[32], id[64], final_id[64];
     char actions[1536];  // its answers to press: "ID\tLABEL\n" each
+    char harness[32];    // of the agent that posted it, or ""
     long long seq;
 } line;
 
@@ -114,6 +116,7 @@ static line *parse(const char *json, size_t n) {
     SDL_strlcpy(p->via, gs_json_str(gs_json_get(o, "via"), ""), sizeof p->via);
     SDL_strlcpy(p->id, gs_json_str(gs_json_get(o, "id"), ""), sizeof p->id);
     SDL_strlcpy(p->final_id, gs_json_str(gs_json_get(o, "final_id"), ""), sizeof p->final_id);
+    SDL_strlcpy(p->harness, gs_json_str(gs_json_path(o, "from.harness"), ""), sizeof p->harness);
     for (gs_jv a = gs_json_first(gs_json_get(o, "actions")); a; a = gs_json_next(a)) {
         char one[600];
         SDL_snprintf(one, sizeof one, "%s\t%s\n", gs_json_str(gs_json_get(a, "id"), ""), gs_json_str(gs_json_get(a, "label"), ""));
@@ -220,8 +223,9 @@ void gear_feed_close(gear_feed *f) {
 
 // `text` handed out as a post from the line `l`'s route and time.
 static void post_of(const line *l, gear_post_kind kind, bool quiet, bool shown, char *text, gear_post *out) {
-    *out = (gear_post){ kind, quiet, shown, "", "", text, "" };
+    *out = (gear_post){ kind, quiet, shown, "", "", text, "", "" };
     SDL_strlcpy(out->actions, l->actions, sizeof out->actions);
+    SDL_strlcpy(out->harness, l->harness, sizeof out->harness);
     SDL_strlcpy(out->who, l->who, sizeof out->who), SDL_strlcpy(out->at, l->at, sizeof out->at);
 }
 
