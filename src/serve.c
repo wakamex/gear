@@ -376,6 +376,23 @@ static const char *mime_of(const char *name) {
     return "application/octet-stream";
 }
 
+// The ending a file's first bytes show it to need, for a name without one (Android's file dialog gives
+// some files only a number), or "" when they show none known.
+static const char *ending_of(const unsigned char *b, size_t n) {
+    if (n >= 8 && !SDL_memcmp(b, "\x89PNG\r\n\x1a\n", 8)) return ".png";
+    if (n >= 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF) return ".jpg";
+    if (n >= 4 && !SDL_memcmp(b, "GIF8", 4)) return ".gif";
+    if (n >= 12 && !SDL_memcmp(b, "RIFF", 4) && !SDL_memcmp(b + 8, "WEBP", 4)) return ".webp";
+    if (n >= 12 && !SDL_memcmp(b, "RIFF", 4) && !SDL_memcmp(b + 8, "WAVE", 4)) return ".wav";
+    if (n >= 5 && !SDL_memcmp(b, "%PDF-", 5)) return ".pdf";
+    if (n >= 12 && !SDL_memcmp(b + 4, "ftypheic", 8)) return ".heic";
+    if (n >= 12 && !SDL_memcmp(b + 4, "ftypM4A", 7)) return ".m4a";
+    if (n >= 8 && !SDL_memcmp(b + 4, "ftyp", 4)) return ".mp4";
+    if (n >= 4 && !SDL_memcmp(b, "OggS", 4)) return ".ogg";
+    if (n >= 4 && !SDL_memcmp(b, "PK\x03\x04", 4)) return ".zip";
+    return "";
+}
+
 // A file a client sent ('F': its name, a zero byte, its bytes), kept on this computer in gear's data
 // folder (attachments/DATE/TIME-NAME), and its line, "[attached TYPE: PATH]" as Panetone gives an agent
 // a file sent from Telegram, added to what goes with the client's next message.
@@ -386,6 +403,8 @@ static void keep_file(server *s, client *c, const char *data, Uint32 len) {
     for (size_t i = 0, n = 0; i < name_len && n + 1 < sizeof name; i++)  // (no folders, nor a name to hide, nor spaces in the path the agent reads)
         name[n++] = SDL_strchr("/\\:*?\"<>| ", data[i]) || (unsigned char)data[i] < 32 ? '_' : data[i], name[n] = 0;
     if (!*name || *name == '.') SDL_strlcpy(name, "file", sizeof name);
+    if (!SDL_strcmp(mime_of(name), "application/octet-stream"))  // (named by what it is, when its name does not say)
+        SDL_strlcat(name, ending_of((const unsigned char *)data + name_len + 1, len - name_len - 1), sizeof name);
     SDL_Time now;
     SDL_DateTime d;
     SDL_GetCurrentTime(&now), SDL_TimeToDateTime(now, &d, true);
