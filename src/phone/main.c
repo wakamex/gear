@@ -55,6 +55,7 @@ static const char *const read_names[] = { "replies to me", "this conversation", 
 typedef struct { char *text, *actions; char who[128]; char at[8]; bool mine, quiet, unfolded, laid_unfolded; float laid_w, laid_h; int chose; char speaker[128], harness[32]; } entry;
 enum { HISTORY = 2000, CONVERSATIONS = 64 };
 typedef struct { char who[128]; int n; } unread;  // the replies in a conversation not yet seen
+typedef struct { int start, end; double at; } spoken_line;  // a sentence spoken ('L')
 
 typedef struct {
     // Where gear runs, kept in settings.txt; the phone's key, kept with gs_secret.
@@ -114,10 +115,15 @@ typedef struct {
     // The sentences of what is being spoken ('L'): the bytes of the message each was read from, and
     // where in its speech it starts; the one heard now is marked, and the conversation follows it
     // until a finger moves it.
-    struct { int start, end; double at; } lines[512];
+    spoken_line lines[512];
     int line_count;
     const char *lines_of;  // the message (a history entry's text) those sentences are of
     double lines_base;     // where its speech starts in the player's count of seconds
+    // Replies whose speech came while another's still played, in order: each, with its sentences, is
+    // what is being spoken once the player reaches where its speech starts.
+    struct { const char *text; double base; spoken_line lines[512]; int line_count; } coming[4];
+    int coming_count;
+    bool lines_coming;  // the sentences coming now are the last of those's
     bool following;
     // New messages waiting to be read aloud (the history's texts), each once nothing else is.
     const char *to_read[32];
@@ -557,7 +563,20 @@ static void speech_note(app *a, const char *how, const char *text) {
 static void stop_speaking(app *a) {
     gs_stream_flush(a->play);
     SDL_ClearAudioStream(a->conv);
-    a->saying = NULL, a->line_count = 0, a->lines_of = NULL;
+    a->saying = NULL, a->line_count = 0, a->lines_of = NULL, a->coming_count = 0, a->lines_coming = false;
+}
+
+// A reply whose speech comes while another's still plays, from `base` in the player's count of seconds:
+// queued, or its start updated when it is already; false when the queue is full.
+static bool speak_after(app *a, const char *text, double base) {
+    int i = 0;
+    while (i < a->coming_count && a->coming[i].text != text) i++;
+    if (i == a->coming_count) {
+        if (i == (int)SDL_arraysize(a->coming)) return false;
+        a->coming[i].text = text, a->coming[i].line_count = 0, a->coming_count++;
+    }
+    a->coming[i].base = base;
+    return true;
 }
 
 // A message's speaker tapped: the message spoken, in place of what was; tapped while it is spoken, stopped.
@@ -662,10 +681,14 @@ static void take_frames(app *a) {
         case 'R':
             set_text(&a->reply, data), a->reply_done = false, a->note[0] = 0, a->audio_at = SDL_GetTicks();
             add_message(a, data, here(a), false);
-            // (spoken as it comes; followed unless the page is being read further back)
-            if (!SDL_GetAtomicInt(&behind)) a->saying = a->history[a->count - 1].text, a->following = chat_at_end;
             speech_note(a, "the reply, spoken by the computer", a->history[a->count - 1].text);
             a->reply_base = gs_stream_position(a->play) + speech_left(a);
+            // (spoken as it comes, or after what still plays; followed unless the page is being read
+            // further back)
+            if (!SDL_GetAtomicInt(&behind)) {
+                if (a->saying && speech_left(a) > 0.05) speak_after(a, a->history[a->count - 1].text, a->reply_base);
+                else a->saying = a->history[a->count - 1].text, a->following = chat_at_end;
+            }
             break;
         case 'I': stop_speaking(a), a->mood = IDLE; break;  // talked over: the computer stopped it
         // (what is happening in the conversation sent to; what failed in the one open)
@@ -678,23 +701,30 @@ static void take_frames(app *a) {
                 // A speech's first sentence: of the message whose text it names, its speech starting
                 // after what the player holds now. (Its reply may have come while another still played.)
                 Uint32 of = (Uint32)gs_json_num(gs_json_get(gs_json_root(doc), "of"), 0);
-                a->lines_of = NULL, a->line_count = 0;
-                for (int i = a->count - 1; i >= 0 && !a->lines_of; i--)
-                    if (text_id(a->history[i].text) == of) a->lines_of = a->history[i].text;
-                a->lines_base = gs_stream_position(a->play) + speech_left(a);
-                if (a->lines_of) a->saying = a->lines_of;  // (its square, to stop it)
-                if (!a->lines_of) {
+                const char *text = NULL;
+                for (int i = a->count - 1; i >= 0 && !text; i--)
+                    if (text_id(a->history[i].text) == of) text = a->history[i].text;
+                // (behind another's speech still playing: marked once that has been heard)
+                a->lines_coming = text && a->saying && a->saying != text && speech_left(a) > 0.05 && speak_after(a, text, gs_stream_position(a->play) + speech_left(a));
+                if (!a->lines_coming) {
+                    a->lines_of = text, a->line_count = 0;
+                    a->lines_base = gs_stream_position(a->play) + speech_left(a);
+                    if (text) a->saying = text;  // (its square, to stop it)
+                }
+                if (!text) {
                     char why[64];
                     SDL_snprintf(why, sizeof why, "first sentence of no message here (%u)", (unsigned)of);
                     speech_note(a, why, NULL);
                 }
             }
-            if (doc && a->lines_of && a->line_count < (int)SDL_arraysize(a->lines)) {
+            spoken_line *lines = a->lines_coming ? a->coming[a->coming_count - 1].lines : a->lines;
+            int *count = a->lines_coming ? &a->coming[a->coming_count - 1].line_count : &a->line_count;
+            if (doc && (a->lines_coming || a->lines_of) && *count < (int)SDL_arraysize(a->lines)) {
                 gs_jv o = gs_json_root(doc);
-                a->lines[a->line_count].start = (int)gs_json_num(gs_json_get(o, "start"), 0);
-                a->lines[a->line_count].end = (int)gs_json_num(gs_json_get(o, "end"), 0);
-                a->lines[a->line_count].at = gs_json_num(gs_json_get(o, "at"), 0);
-                a->line_count++;
+                lines[*count].start = (int)gs_json_num(gs_json_get(o, "start"), 0);
+                lines[*count].end = (int)gs_json_num(gs_json_get(o, "end"), 0);
+                lines[*count].at = gs_json_num(gs_json_get(o, "at"), 0);
+                ++*count;
             }
             gs_json_free(doc);
             break;
@@ -734,12 +764,20 @@ static void take_frames(app *a) {
     // would otherwise count as speech still to play.
     if (!a->reply_done && a->audio_at && SDL_GetTicks() - a->audio_at > 2000 && SDL_GetAudioStreamQueued(a->conv) > 0) SDL_FlushAudioStream(a->conv);
     feed_speech(a);
+    // A reply queued behind another's speech: what is being spoken once the player reaches its start.
+    while (a->coming_count && gs_stream_position(a->play) >= a->coming[0].base) {
+        a->saying = a->lines_of = a->coming[0].text, a->lines_base = a->coming[0].base, a->following = chat_at_end;
+        a->line_count = a->coming[0].line_count;
+        SDL_memcpy(a->lines, a->coming[0].lines, (size_t)a->line_count * sizeof *a->lines);
+        SDL_memmove(a->coming, a->coming + 1, (size_t)--a->coming_count * sizeof *a->coming);
+        if (!a->coming_count) a->lines_coming = false;  // (its sentences still to come are now the current's)
+    }
     // Played out, and the computer has said it is done, or sent nothing for 2 s: it makes speech far
     // faster than it plays, so its silence means the reply is over, even when its "done" ('D') never
     // came (a connection that broke while the app was behind others).
     if (speech_left(a) <= 0 && (a->reply_done || SDL_GetTicks() - a->audio_at > 2000)) {
         if (a->mood == SPEAKING) a->mood = IDLE;
-        a->saying = NULL;
+        a->saying = NULL, a->coming_count = 0, a->lines_coming = false;
     }
     if (a->mood == THINKING && a->reply && a->reply_done) a->mood = IDLE;
     // The next new message to read, once nothing is being said or heard.
