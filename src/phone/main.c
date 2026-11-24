@@ -67,6 +67,7 @@ typedef struct {
     char *viewing;        // a table shown at its full size over the rest (its Markdown), or NULL
     // Files to send with the next message, picked with the system's file dialog: where each is, and its name
     char attached[8][1100], attached_name[8][128];
+    bool attached_made[8];  // a file the app made (a pasted image), removed once sent or taken off
     int attached_count;
     float view_x, view_y; // how far it is moved, across and down
     // The computer's settings, as its greeting ('H') gives them, changed with 'S': the recognition model,
@@ -1479,28 +1480,60 @@ static void picked_files(void *user, const char *const *files, int filter) {
     SDL_UnlockMutex(picked_lock);
 }
 
+// A file to go with the next message, by its path or Android content address; `made` when the app made
+// it, to be removed once sent.
+static void attach(app *a, const char *path, bool made) {
+    if (a->attached_count == 8) { SDL_strlcpy(a->note, "8 files at most go with a message", sizeof a->note), a->note_for[0] = 0; return; }
+    SDL_strlcpy(a->attached[a->attached_count], path, sizeof a->attached[0]);
+    a->attached_made[a->attached_count] = made;
+    // (its name: the last part of its path, or of an Android content address)
+    const char *name = path, *slash;
+    while ((slash = SDL_strpbrk(name, "/\\")) && slash[1]) name = slash + 1;
+    char decoded[128];
+    size_t n = 0;
+    for (const char *c = name; *c && n + 1 < sizeof decoded; c++) {  // (%3A and the like, as content addresses have)
+        if (*c == '%' && SDL_isxdigit((unsigned char)c[1]) && SDL_isxdigit((unsigned char)c[2])) {
+            char hexs[3] = { c[1], c[2], 0 };
+            decoded[n++] = (char)SDL_strtol(hexs, NULL, 16), c += 2;
+        } else decoded[n++] = *c;
+    }
+    decoded[n] = 0;
+    const char *colon = SDL_strrchr(decoded, ':'), *last = SDL_strrchr(decoded, '/');
+    const char *shown = last ? last + 1 : colon ? colon + 1 : decoded;
+    SDL_strlcpy(a->attached_name[a->attached_count++], *shown ? shown : "file", sizeof a->attached_name[0]);
+}
+
 static void take_picked(app *a) {
     SDL_LockMutex(picked_lock);
-    for (int i = 0; i < picked_count && a->attached_count < 8; i++) {
-        SDL_strlcpy(a->attached[a->attached_count], picked[i], sizeof a->attached[0]);
-        // (its name: the last part of its path, or of an Android content address)
-        const char *name = picked[i], *slash;
-        while ((slash = SDL_strpbrk(name, "/\\")) && slash[1]) name = slash + 1;
-        char decoded[128];
-        size_t n = 0;
-        for (const char *c = name; *c && n + 1 < sizeof decoded; c++) {  // (%3A and the like, as content addresses have)
-            if (*c == '%' && SDL_isxdigit((unsigned char)c[1]) && SDL_isxdigit((unsigned char)c[2])) {
-                char hexs[3] = { c[1], c[2], 0 };
-                decoded[n++] = (char)SDL_strtol(hexs, NULL, 16), c += 2;
-            } else decoded[n++] = *c;
-        }
-        decoded[n] = 0;
-        const char *colon = SDL_strrchr(decoded, ':'), *last = SDL_strrchr(decoded, '/');
-        const char *shown = last ? last + 1 : colon ? colon + 1 : decoded;
-        SDL_strlcpy(a->attached_name[a->attached_count++], *shown ? shown : "file", sizeof a->attached_name[0]);
-    }
+    for (int i = 0; i < picked_count; i++) attach(a, picked[i], false);
     picked_count = 0;
     SDL_UnlockMutex(picked_lock);
+}
+
+// An image on the clipboard, such as a screenshot or one copied in a browser, saved as a PNG in the app's
+// folder under pasted/ and attached. False when the clipboard holds text, which a paste puts in as text,
+// or no image.
+static bool paste_image(app *a) {
+    if (SDL_HasClipboardText()) return false;
+    char path[1100];
+    settings_path(a, path, sizeof path, "pasted");
+    SDL_CreateDirectory(path);
+    SDL_snprintf(path + SDL_strlen(path), sizeof path - SDL_strlen(path), "/%llu.png", (unsigned long long)SDL_GetTicksNS());
+    size_t len = 0;
+    bool saved = false;
+    void *png = SDL_GetClipboardData("image/png", &len);
+    if (png && len) saved = SDL_SaveFile(path, png, len);
+    else {  // (Windows' own screenshots come as a bitmap alone)
+        void *bmp = SDL_GetClipboardData("image/bmp", &len);
+        SDL_Surface *image = bmp && len ? SDL_LoadBMP_IO(SDL_IOFromConstMem(bmp, len), true) : NULL;
+        if (image) saved = SDL_SavePNG(image, path), SDL_DestroySurface(image);
+        SDL_free(bmp);
+    }
+    SDL_free(png);
+    if (!saved) return false;
+    attach(a, path, true);
+    SDL_strlcpy(a->attached_name[a->attached_count - 1], "pasted.png", sizeof a->attached_name[0]);
+    return true;
 }
 
 // Each file picked, to the computer before the message they go with ('F': the name, a zero byte, the
@@ -1517,6 +1550,8 @@ static bool send_files(app *a) {
         gp_link_send(a->link, 'F', frame, (uint32_t)(name_len + 1 + len));
         SDL_free(frame), SDL_free(data);
     }
+    for (int i = 0; i < a->attached_count; i++)
+        if (a->attached_made[i]) SDL_RemovePath(a->attached[i]);
     a->attached_count = 0;
     return true;
 }
@@ -1629,7 +1664,9 @@ static void talk_screen(gs_ui *ui, app *a, gs_rect area, float t, const char *ke
                 gs_ui_text(ui, gs_inset(chip, 10), label, small, gs_ui_hovered(ui, chip) ? ACCENT : TEXT, 0);
                 if (gs_ui_clicked(ui, chip)) {
                     SDL_memmove(a->attached[i], a->attached[i + 1], (size_t)(a->attached_count - i - 1) * sizeof a->attached[0]);
+                    if (a->attached_made[i]) SDL_RemovePath(a->attached[i]);
                     SDL_memmove(a->attached_name[i], a->attached_name[i + 1], (size_t)(a->attached_count - i - 1) * sizeof a->attached_name[0]);
+                    SDL_memmove(a->attached_made + i, a->attached_made + i + 1, (size_t)(a->attached_count - i - 1) * sizeof a->attached_made[0]);
                     a->attached_count--;
                     break;
                 }
@@ -2249,6 +2286,7 @@ int main(int argc, char **argv) {
     // Paused by Android (behind other apps, the phone locked), the app runs on, so a reply or message
     // being spoken plays to its end; it draws nothing until it is back (in the loop below).
     SDL_SetHint(SDL_HINT_ANDROID_BLOCK_ON_PAUSE, "0");
+    SDL_SetHint(SDL_HINT_ANDROID_TEXT_INPUT_IMAGES, "1");  // (an image from the keyboard comes as a dropped file)
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO)) return 1;
     static app a;
     char *pref = SDL_GetPrefPath("wakamex", "gear-phone");
@@ -2461,6 +2499,12 @@ int main(int argc, char **argv) {
                     if (beside(&a, e.key.key == SDLK_DOWN ? 1 : -1, to, sizeof to)) a.picking = false, open_conversation(&a, to), gs_ui_focus(ui, "compose");
                     continue;
                 }
+                // A file dropped on the window, or an image the phone's keyboard puts in, goes with the next
+                // message; so does an image pasted (Ctrl+V or Shift+Insert) from the clipboard.
+                if (e.type == SDL_EVENT_DROP_FILE && e.drop.data) { attach(&a, e.drop.data, false); continue; }
+                if (e.type == SDL_EVENT_KEY_DOWN && !a.setup && !a.viewing && !a.picking &&
+                    ((e.key.key == SDLK_V && (e.key.mod & SDL_KMOD_CTRL)) || (e.key.key == SDLK_INSERT && (e.key.mod & SDL_KMOD_SHIFT))) && paste_image(&a))
+                    continue;
                 // Alt+E opens the conversation list (and closes it), wherever the keyboard is.
                 if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_E && (e.key.mod & SDL_KMOD_ALT) && !e.key.repeat && !a.setup && !a.viewing) {
                     a.picking = !a.picking;
