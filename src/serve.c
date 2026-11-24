@@ -551,6 +551,95 @@ static void send_seq(server *s, long long seq) {
 // A message for the phone's conversation `who`, logged, and sent as 'Z' when a phone is connected
 // and `shown`, followed by its number ('K'). (A reply also goes as 'R', and the user's message as 'M',
 // before their numbers.)
+// ---- What is unseen and muted, the same on every client ----
+
+// Each conversation's replies not yet seen on any client, and the conversations muted, kept in
+// unseen.txt ("COUNT WHO" lines) and muted.txt in gear's data folder and sent to every client ('U')
+// whenever they change, so a reply seen or a conversation muted on one is so on all.
+enum { SHARED = 256 };
+static struct { char who[128]; int n; } unseen[SHARED];
+static int unseen_count;
+static char muted[SHARED][128];
+static int muted_count;
+
+static void shared_path(const char *name, char *out, size_t size) {
+    char *pref = SDL_GetPrefPath("wakamex", "gear");
+    SDL_snprintf(out, size, "%s%s", pref ? pref : "", name);
+    SDL_free(pref);
+}
+
+static void load_shared(void) {
+    char path[1100], *save = NULL;
+    shared_path("unseen.txt", path, sizeof path);
+    char *text = SDL_LoadFile(path, NULL);
+    for (char *line = text ? SDL_strtok_r(text, "\n", &save) : NULL; line && unseen_count < SHARED; line = SDL_strtok_r(NULL, "\n", &save)) {
+        char *space = SDL_strchr(line, ' ');
+        if (space) unseen[unseen_count].n = SDL_atoi(line), SDL_strlcpy(unseen[unseen_count++].who, space + 1, sizeof unseen[0].who);
+    }
+    SDL_free(text), save = NULL;
+    shared_path("muted.txt", path, sizeof path);
+    text = SDL_LoadFile(path, NULL);
+    for (char *line = text ? SDL_strtok_r(text, "\n", &save) : NULL; line && muted_count < SHARED; line = SDL_strtok_r(NULL, "\n", &save))
+        SDL_strlcpy(muted[muted_count++], line, sizeof muted[0]);
+    SDL_free(text);
+}
+
+// Kept, and sent to every client: {"unseen": {WHO: COUNT}, "muted": [WHO]}.
+static void share(server *s) {
+    char path[1100], *text = SDL_malloc(SHARED * 140), *out = text;
+    *text = 0;
+    for (int i = 0; i < unseen_count; i++)
+        if (unseen[i].n) out += SDL_snprintf(out, (size_t)(text + SHARED * 140 - out), "%d %s\n", unseen[i].n, unseen[i].who);
+    shared_path("unseen.txt", path, sizeof path);
+    SDL_SaveFile(path, text, SDL_strlen(text));
+    out = text, *text = 0;
+    for (int i = 0; i < muted_count; i++) out += SDL_snprintf(out, (size_t)(text + SHARED * 140 - out), "%s\n", muted[i]);
+    shared_path("muted.txt", path, sizeof path);
+    SDL_SaveFile(path, text, SDL_strlen(text));
+    SDL_free(text);
+    gs_jval *o = gs_jval_object(), *counts = gs_jval_object(), *list = gs_jval_array();
+    for (int i = 0; i < unseen_count; i++)
+        if (unseen[i].n) gs_jval_set(counts, unseen[i].who, gs_jval_num(unseen[i].n));
+    for (int i = 0; i < muted_count; i++) gs_jval_push(list, gs_jval_str(muted[i]));
+    gs_jval_set(o, "unseen", counts), gs_jval_set(o, "muted", list);
+    char *json = gs_jval_write(o, false);
+    gs_jval_free(o);
+    if (json) send_text(s, 'U', json);
+    SDL_free(json);
+}
+
+static int *unseen_of(const char *who) {
+    for (int i = 0; i < unseen_count; i++)
+        if (!SDL_strcmp(unseen[i].who, who)) return &unseen[i].n;
+    if (unseen_count == SHARED) return NULL;
+    SDL_strlcpy(unseen[unseen_count].who, who, sizeof unseen[0].who), unseen[unseen_count].n = 0;
+    return &unseen[unseen_count++].n;
+}
+
+// The conversation a client has open: its agent's route, or the hub's when it chose none.
+static const char *open_in(const client *c) { return conversation_of(*c->tab ? c->tab : target_tab); }
+
+// Whether a client in front of the user has `who` open, which sees its replies as they come.
+static bool in_view(server *s, const char *who) {
+    for (int i = 0; i < CLIENTS; i++)
+        if (s->clients[i].live && !s->clients[i].background && !SDL_strcmp(open_in(&s->clients[i]), who)) return true;
+    return false;
+}
+
+static void seen(server *s, const char *who) {
+    int *n = unseen_of(who);
+    if (n && *n) *n = 0, share(s);
+}
+
+static void mute(server *s, const char *who, bool on) {
+    for (int i = 0; i < muted_count; i++)
+        if (!SDL_strcmp(muted[i], who)) {
+            if (!on) SDL_memmove(muted[i], muted[i + 1], (size_t)(muted_count - i - 1) * sizeof muted[0]), muted_count--, share(s);
+            return;
+        }
+    if (on && muted_count < SHARED) SDL_strlcpy(muted[muted_count++], who, sizeof muted[0]), share(s);
+}
+
 static void log_message(server *s, const char *who, const char *at, bool mine, bool quiet, const char *text, const char *actions, bool shown) {
     char now[8];
     if (!*at) stamp(now), at = now;
@@ -563,6 +652,12 @@ static void log_message(server *s, const char *who, const char *at, bool mine, b
     if (shown) send_text(s, 'Z', line);
     SDL_free(line);
     send_seq(s, l->seq);
+    // (an agent's message no client in front of the user has open: unseen until one opens it)
+    int *n;
+    if (!mine && !quiet && !in_view(s, who) && (n = unseen_of(who))) {
+        int only = s->only, skip = s->skip;
+        s->only = s->skip = -1, ++*n, share(s), s->only = only, s->skip = skip;
+    }
 }
 
 // The messages after `seen`, to a phone that has had those up to it ('K'), as 'Z' and their numbers.
@@ -693,6 +788,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
         SDL_snprintf(seq_path, sizeof seq_path, "%shub-feed-seq", pref ? pref : "");
         SDL_free(pref);
         load_log();
+        load_shared();
     }
     // Everything Panetone posts to the user's channels, from where the hub last stopped (hub-feed-seq),
     // shown on the phone as Telegram shows it.
@@ -765,6 +861,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 SDL_strlcpy(c->target, target, sizeof c->target), SDL_strlcpy(c->tab, target_tab, sizeof c->tab);
                 s.only = i;
                 hello(&s, c->target, c->tab, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
+                share(&s);  // (what is unseen and muted, as the other clients have it)
                 s.only = -1;
             }
         }
@@ -867,7 +964,17 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 SDL_LockMutex(s.lock);
                 from->background = f->data[0] == '1';
                 SDL_UnlockMutex(s.lock);
+                if (!from->background) seen(&s, open_in(from));  // (in front again: what it has open is seen)
                 break;
+            case 'G': {  // what is seen and muted: {"seen": WHO}, or {"muted": WHO, "on": true or false}
+                gs_json *doc = gs_json_parse(f->data, f->len);
+                gs_jv o = doc ? gs_json_root(doc) : NULL;
+                const char *who = o ? gs_json_str(gs_json_get(o, "seen"), NULL) : NULL;
+                if (who && *who) seen(&s, who);
+                if (o && (who = gs_json_str(gs_json_get(o, "muted"), NULL)) && *who) mute(&s, who, gs_json_bool(gs_json_get(o, "on"), true));
+                gs_json_free(doc);
+                break;
+            }
             case 'N':  // always-on: send what has been said now
                 if (pipe) {
                     char *now = gear_pipeline_take(pipe);
@@ -994,6 +1101,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 }
                 hello(&s, from->target, from->tab, voice == GEAR_MODEL_VOICE_MARY ? "mary" : "alba");
                 s.only = -1;
+                if (!from->background) seen(&s, open_in(from));
                 break;
             }
             case 'S': {  // a setting changed: {"countdown": SECONDS} or {"hear": "next"}, told to every client

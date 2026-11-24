@@ -26,6 +26,8 @@
 //   'O' always-on, "1" or "0": while on, 'A' goes through gear's own listener, which finds the messages
 //       (pauses, then the countdown) and sends them itself, and 'E' is not used
 //   'N' always-on: send what has been said now, without waiting for the countdown
+//   'G' what is seen and muted: {"seen": WHO}, the conversation opened, its replies seen; or
+//       {"muted": WHO, "on": true or false}; answered, to every client, with 'U'
 //   'B' the phone's app is behind other apps ("1") or in front ("0"): behind, new replies come as text
 //       alone, and what is being spoken goes on
 //   'Q' always-on, the phone's playback, before each 'A': "1 SECONDS" while it plays the reply, that
@@ -57,6 +59,8 @@
 //   'J' {"word", "say": as taught or "", "dictionary": CMUdict's way respelled ("proh-tahn") or ""}
 //   'Y' the words taught: [{"word", "say"}]
 //   'S' what is happening, for the client to show ("hearing", "waiting for NAME")
+//   'U' what is unseen and muted, the same on every client: {"unseen": {WHO: COUNT}, "muted": [WHO]},
+//       on connecting and whenever it changes
 //   'F' what went wrong, for the client to show
 #pragma once
 

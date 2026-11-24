@@ -89,7 +89,6 @@ typedef struct {
     char note_for[128];   // the conversation the note is about ("waiting for X", a failure), or "" for any
     unread unread[CONVERSATIONS];
     long long seen;       // the newest message's number in the computer's log, kept in seen.txt
-    bool first_sync;      // connected with no number kept: what the computer gives again is not unseen
     int session;          // the link's connection the computer last greeted the app on ('H')
     int unread_count;
     // Conversations muted on this device (muted.txt): F1 and F2 pass them by, their unseen replies are
@@ -341,11 +340,17 @@ static bool is_muted(app *a, const char *who) {
     return false;
 }
 
+static SDL_Mutex *who_lock;
+static char muted_now[CONVERSATIONS * 130];  // the muted conversations, a line each, for notifications (heard)
+
 static void save_muted(app *a) {
     char path[1100], text[CONVERSATIONS * 130] = "";
     settings_path(a, path, sizeof path, "muted.txt");
     for (int i = 0; i < a->muted_count; i++) SDL_strlcat(text, a->muted[i], sizeof text), SDL_strlcat(text, "\n", sizeof text);
     SDL_SaveFile(path, text, SDL_strlen(text));
+    SDL_LockMutex(who_lock);
+    SDL_strlcpy(muted_now, text, sizeof muted_now);
+    SDL_UnlockMutex(who_lock);
 }
 
 static void load_muted(app *a) {
@@ -355,16 +360,29 @@ static void load_muted(app *a) {
     for (char *line = text ? SDL_strtok_r(text, "\n", &save) : NULL; line && a->muted_count < CONVERSATIONS; line = SDL_strtok_r(NULL, "\n", &save))
         SDL_strlcpy(a->muted[a->muted_count++], line, sizeof a->muted[0]);
     SDL_free(text);
+    save_muted(a);  // (and for notifications)
+}
+
+// Tells the computer, which tells every client ('G', answered with 'U').
+static void tell_shared(app *a, const char *key, const char *who, int on) {
+    if (!a->link || gp_link_status(a->link, NULL, 0) != GP_OPEN) return;
+    gs_jval *o = gs_jval_object();
+    gs_jval_set(o, key, gs_jval_str(who));
+    if (on >= 0) gs_jval_set(o, "on", gs_jval_bool(on));
+    char *json = gs_jval_write(o, false);
+    gs_jval_free(o);
+    if (json) gp_link_send(a->link, 'G', json, (uint32_t)SDL_strlen(json));
+    SDL_free(json);
 }
 
 static void toggle_muted(app *a, const char *who) {
     for (int i = 0; i < a->muted_count; i++)
         if (!SDL_strcmp(a->muted[i], who)) {
             SDL_memmove(a->muted[i], a->muted[i + 1], (size_t)(a->muted_count - i - 1) * sizeof a->muted[0]);
-            a->muted_count--, save_muted(a);
+            a->muted_count--, save_muted(a), tell_shared(a, "muted", who, false);
             return;
         }
-    if (a->muted_count < CONVERSATIONS) SDL_strlcpy(a->muted[a->muted_count++], who, sizeof a->muted[0]), save_muted(a);
+    if (a->muted_count < CONVERSATIONS) SDL_strlcpy(a->muted[a->muted_count++], who, sizeof a->muted[0]), save_muted(a), tell_shared(a, "muted", who, true);
 }
 
 // The conversation not muted with the newest unseen reply (`newest`), or with the oldest one still
@@ -393,17 +411,16 @@ static void open_conversation(app *a, const char *who) {
     int *n = unread_of(a, who, false);
     if (n && *n) *n = 0, save_unread(a);
     gs_notify_close(who);
+    tell_shared(a, "seen", who, -1);
     save_settings(a);
     a->asked[0] = 0;
     if (a->link && gp_link_status(a->link, NULL, 0) == GP_OPEN && SDL_strcmp(who, here(a)) && SDL_strcmp(who, "read back"))
         gp_link_send(a->link, 'T', who, (uint32_t)SDL_strlen(who)), SDL_strlcpy(a->asked, who, sizeof a->asked);
 }
 
-// A message of a conversation, kept and shown: what the user sent (to `who`), or an agent's reply,
-// counted unseen when its conversation is not the one open.
-// A quiet one (Panetone's receipt for a send, or its notice) is shown but not counted unseen, nor is
-// one `caught_up` on (the log given to an app that had none of it, its first time).
-static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine, bool quiet, bool caught_up, const char *speaker, const char *harness) {
+// A message of a conversation, kept and shown: what the user sent (to `who`), or an agent's reply.
+// (The computer counts the replies unseen, for every client alike: 'U'.)
+static void add_message_at(app *a, const char *text, const char *who, const char *at, bool mine, bool quiet, const char *speaker, const char *harness) {
     remember(a, text, who, at, mine);
     a->history[a->count - 1].quiet = quiet;
     SDL_strlcpy(a->history[a->count - 1].speaker, speaker, sizeof a->history[a->count - 1].speaker);
@@ -411,10 +428,6 @@ static void add_message_at(app *a, const char *text, const char *who, const char
     // (an answer in the conversation the note is about ends its "waiting for")
     if (!mine && !quiet && *a->note_for && !SDL_strcmp(who, a->note_for)) a->note[0] = 0;
     if (!SDL_strcmp(who, a->open)) a->fresh = true;
-    else if (!mine && !quiet && !caught_up) {
-        int *n = unread_of(a, who, true);
-        if (n) ++*n, save_unread(a);
-    }
     gs_jval *o = gs_jval_object();
     gs_jval_set(o, "at", gs_jval_str(at));
     gs_jval_set(o, "who", gs_jval_str(who));
@@ -436,7 +449,7 @@ static void add_message(app *a, const char *text, const char *who, bool mine) {
     SDL_DateTime d;
     char at[8] = "";
     if (SDL_GetCurrentTime(&now) && SDL_TimeToDateTime(now, &d, true)) SDL_snprintf(at, sizeof at, "%02d:%02d", d.hour, d.minute);
-    add_message_at(a, text, who, at, mine, false, false, "", "");
+    add_message_at(a, text, who, at, mine, false, "", "");
 }
 
 // ---- Notifications ----
@@ -444,7 +457,6 @@ static void add_message(app *a, const char *text, const char *who, bool mine) {
 // While the app is behind others its loop is paused, so the link's own thread tells of a reply, or of
 // what an agent posted, with a notification; a tap brings the app back.
 static SDL_AtomicInt behind;
-static SDL_Mutex *who_lock;
 static char who_now[128];  // the conversation sent to now, for a reply's notification
 static char tapped[128];   // the conversation of a notification tapped, for the app to open
 
@@ -460,10 +472,20 @@ static void heard(char type, const char *data, uint32_t len, void *user) {
     } else {
         gs_json *doc = gs_json_parse(data, len);
         if (!doc) return;
-        SDL_strlcpy(title, gs_json_str(gs_json_get(gs_json_root(doc), "who"), "gear"), sizeof title);
-        SDL_strlcpy(body, gs_json_str(gs_json_get(gs_json_root(doc), "text"), ""), sizeof body);
+        gs_jv o = gs_json_root(doc);
+        bool shown = !gs_json_bool(gs_json_get(o, "mine"), false) && !gs_json_bool(gs_json_get(o, "quiet"), false);  // (not the user's, nor Panetone's notice)
+        SDL_strlcpy(title, gs_json_str(gs_json_get(o, "who"), "gear"), sizeof title);
+        SDL_strlcpy(body, gs_json_str(gs_json_get(o, "text"), ""), sizeof body);
         gs_json_free(doc);
+        if (!shown) return;
     }
+    // (none for a muted conversation: a line of muted_now)
+    bool quiet = false;
+    size_t n = SDL_strlen(title);
+    SDL_LockMutex(who_lock);
+    for (const char *x = muted_now; *x && !quiet; x = SDL_strchr(x, '\n') + 1) quiet = !SDL_strncmp(x, title, n) && x[n] == '\n';
+    SDL_UnlockMutex(who_lock);
+    if (quiet) return;
     gs_notify_show(title, title, body);  // (one for each conversation, its newest message)
 }
 
@@ -505,7 +527,6 @@ static void connect_link(app *a) {
     c.key_pem = a->pem, c.key_public = pub;
     SDL_strlcpy(c.host_key, a->host_key, sizeof c.host_key);
     c.seen = a->seen;
-    a->first_sync = a->seen == 0;
     a->link = gp_link_open(&c);
     a->session = 0;  // (a new link counts its connections from 1)
     gp_link_on_frame(a->link, heard, NULL);
@@ -651,9 +672,8 @@ static void take_frames(app *a) {
                 bool had = false;
                 for (int i = a->count - 1; i >= 0 && i >= a->count - 200; i--)
                     if (a->history[i].mine == mine && !SDL_strcmp(a->history[i].who, who) && !SDL_strcmp(a->history[i].text, text)) had = true;
-                bool again = gs_json_bool(gs_json_get(o, "again"), false);
                 if (!had)
-                    add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine, quiet, again && a->first_sync,
+                    add_message_at(a, text, who, gs_json_str(gs_json_get(o, "at"), ""), mine, quiet,
                                    gs_json_str(gs_json_get(o, "speaker"), ""), gs_json_str(gs_json_get(o, "harness"), ""));
                 // (its answers to press, on it as new or on the one had, such as a reply come as 'R')
                 entry *with = gs_json_count(gs_json_get(o, "actions")) ? kept_message(a, who, text, mine) : NULL;
@@ -764,6 +784,26 @@ static void take_frames(app *a) {
             for (gs_jv x = doc ? gs_json_first(gs_json_root(doc)) : NULL; x && a->taught_count < 200; x = gs_json_next(x), a->taught_count++) {
                 SDL_strlcpy(a->taught[a->taught_count][0], gs_json_str(gs_json_get(x, "word"), ""), 128);
                 SDL_strlcpy(a->taught[a->taught_count][1], gs_json_str(gs_json_get(x, "say"), ""), 128);
+            }
+            gs_json_free(doc);
+            break;
+        }
+        case 'U': {  // what is unseen and muted, the same on every client
+            gs_json *doc = gs_json_parse(data, len);
+            gs_jv o = doc ? gs_json_root(doc) : NULL;
+            if (o) {
+                for (int i = 0; i < a->unread_count; i++) a->unread[i].n = 0;
+                for (gs_jv x = gs_json_first(gs_json_get(o, "unseen")); x; x = gs_json_next(x)) {
+                    int *n = unread_of(a, gs_json_key(x), true);
+                    if (n) *n = (int)gs_json_num(x, 0);
+                }
+                for (int i = 0; i < a->unread_count; i++)
+                    if (!a->unread[i].n) gs_notify_close(a->unread[i].who);  // (seen on another client)
+                save_unread(a), trim_unread(a);
+                a->muted_count = 0;
+                for (gs_jv x = gs_json_first(gs_json_get(o, "muted")); x && a->muted_count < CONVERSATIONS; x = gs_json_next(x))
+                    SDL_strlcpy(a->muted[a->muted_count++], gs_json_str(x, ""), sizeof a->muted[0]);
+                save_muted(a);
             }
             gs_json_free(doc);
             break;
@@ -1205,6 +1245,11 @@ static int topic_rank(app *a, const topic *c, const char *typed) {
 static gs_rect picker_area;
 static bool tapped_outside;
 
+// The finger or button down now: where and when it went down, whether it has moved, and whether a
+// long press has already been taken from it (which is then not a tap too).
+static struct { float x, y; Uint64 at; bool down, moved, held; } finger;
+enum { LONG_PRESS_MS = 500 };
+
 // The conversations, narrowed by what is typed in the field above them and scrolled with a finger: each
 // with its unseen replies and its newest message. A tap opens one, Enter the first, and back or "close"
 // leaves the list.
@@ -1244,7 +1289,10 @@ static void picker(gs_ui *ui, app *a, gs_rect area) {
         for (int k = rows.first; k < rows.end; k++) {
             const topic *c = &shown[k];
             gs_rect row = gs_inset((gs_rect){ in.x, rows.y + k * row_h, in.w, row_h }, 8);
-            if (k == selected && rows.activated) chosen = c->who;
+            // (held on for half a second: muted, or unmuted, and not opened)
+            if (finger.down && !finger.moved && !finger.held && SDL_GetTicks() - finger.at >= LONG_PRESS_MS && gs_rect_contains(row, finger.x, finger.y))
+                toggle_muted(a, c->who), finger.held = true;
+            if (k == selected && rows.activated && !finger.held) chosen = c->who;
             int *unseen = unread_of(a, c->who, false);
             if (unseen && *unseen) {
                 char count_text[16];
@@ -2519,6 +2567,7 @@ int main(int argc, char **argv) {
                 if (e.type == SDL_EVENT_MOUSE_BUTTON_DOWN && e.button.button == SDL_BUTTON_LEFT) {
                     window_points(win, ui, e.button.x, e.button.y, &press_x, &press_y);
                     down = went_down = true, moved = false;
+                    finger.x = press_x, finger.y = press_y, finger.at = SDL_GetTicks(), finger.down = true, finger.moved = finger.held = false;
                     if (!a.setup && !a.picking && !a.viewing && !gs_rect_contains(chat_area, press_x, press_y) && !gs_rect_contains(grip_area, press_x, press_y)) swipe_down(&sw, press_x, press_y);
                     drag_x = press_x, drag_y = press_y;
                 }
@@ -2530,12 +2579,13 @@ int main(int argc, char **argv) {
                 if (e.type == SDL_EVENT_MOUSE_MOTION && down) {
                     float x, y;
                     window_points(win, ui, e.motion.x, e.motion.y, &x, &y);
-                    if ((x - press_x) * (x - press_x) + (y - press_y) * (y - press_y) > 12 * 12) moved = true;
+                    if ((x - press_x) * (x - press_x) + (y - press_y) * (y - press_y) > 12 * 12) moved = finger.moved = true;
                     if (a.viewing) a.view_x -= x - drag_x, a.view_y -= y - drag_y;  // (a table at full size, dragged)
                     drag_x = x, drag_y = y;
                     if (!a.viewing) swipe_move(&sw, &a, x, y, last_area);
                 }
-                if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) down = false, went_up = true, swipe_up(&sw, &a);
+                if (e.type == SDL_EVENT_MOUSE_BUTTON_UP && e.button.button == SDL_BUTTON_LEFT) down = finger.down = false, went_up = true, swipe_up(&sw, &a);
+                if (e.type == SDL_EVENT_KEY_DOWN) finger.held = false;  // (Enter on the list opens again)
                 debug_event(&e);
                 // (the oldest key or typed text of the frame, for timing what typing waits for)
                 if ((e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_KEY_DOWN) && !typed_at) typed_at = e.common.timestamp, frame_at = SDL_GetTicksNS();
