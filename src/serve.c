@@ -81,6 +81,7 @@ typedef struct {
     int reply16_len, reply16_cap;
     bool phone_playing;
     bool stopping;     // a stop was sent: reports of playing are old until the phone says it is quiet
+    bool asked;        // the talking client sent a message since the last speech began
     double phone_at;   // seconds of the reply played, as last reported
     long since_at;     // microphone samples since that report
 } server;
@@ -242,7 +243,7 @@ static void speak_as(server *s, const char *reply, bool as_written) {
     char *spoken = as_written ? gear_speakable_map(reply, &from) : gear_pronounce_reply_map(reply, &from);
     SDL_LockMutex(s->lock);
     // A new reply: its reference starts empty, as the phone's count of what it has played does.
-    s->reply16_len = 0, s->phone_at = 0, s->since_at = 0;
+    s->reply16_len = 0, s->phone_at = 0, s->since_at = 0, s->asked = false;
     SDL_ClearAudioStream(s->to16);
     SDL_free(s->speak), SDL_free(s->speak_from);
     s->speak = spoken, s->speak_from = from, s->speak_of = text_id(reply);
@@ -436,6 +437,7 @@ static void deliver_text(server *s, const char *said) {
     // (as 'M' to the client it came from, the talking one; the others get it as a message of its
     // conversation, 'Z', so it goes there and not into the conversation they have open)
     if (s->talker >= 0) s->only = s->talker, send_text(s, 'M', text), s->only = -1;
+    s->asked = true;
     s->skip = s->talker;
     log_message(s, conversation_of(target_tab), "", true, false, text, NULL, true);
     s->skip = -1;
@@ -1058,6 +1060,10 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
                 // The reply as 'R' to the client talking to its agent alone, whose conversation it is; the
                 // others, which may have another conversation open, get it as a message of its route ('Z'),
                 // as does the talking client too when it has answers to press, which 'Z' carries.
+                // A reply to a message sent while something older was still being said stops that, so the
+                // answer is heard at once rather than after it; replies with no message between them queue.
+                if (s.asked && s.talker >= 0 && !s.clients[s.talker].background && phone_busy(&s)) phone_stop(&s);
+                s.asked = false;
                 if (!p.shown) {
                     if (s.talker >= 0) s.only = s.talker, send_text(&s, 'R', p.text), s.only = -1;
                     s.skip = *p.actions ? -1 : s.talker;
