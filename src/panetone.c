@@ -58,7 +58,7 @@ bool gear_panetone_answer(const char *route, const char *action, const char *via
     int code = -1;
     char *out = gear_host_run(argv, NULL, &len, &code);
     if (!out) { SDL_snprintf(error, error_size, "could not run panetone: %s", SDL_GetError()); return false; }
-    // {"ok": true, "result": {"answered": LABEL}}, or {"ok": false, "error": {"code", "message"}}
+    // {"ok": true, "result": {"answered": LABEL, "form": {...} for a question form}}, or {"ok": false, "error": {"code", "message"}}
     // with code question_closed, unknown_action or answer_failed
     gs_json *doc = gs_json_parse(out, strcspn(out, "\n"));
     gs_jv r = doc ? gs_json_root(doc) : NULL;
@@ -66,9 +66,10 @@ bool gear_panetone_answer(const char *route, const char *action, const char *via
     if (ok) {
         gs_jv result = gs_json_get(r, "result");
         SDL_strlcpy(label, gs_json_str(gs_json_get(result, "answered"), ""), label_size);
-        // (a form's answers as they now are, as the feed gives a question's)
-        gs_jv list = gs_json_get(result, "actions");
-        *form = list != NULL;
+        // (a form's answers as they now are, as the feed gives a question's: {"form": {"text", "actions",
+        // "closed"}}, with no actions once it is closed)
+        gs_jv list = gs_json_get(gs_json_get(result, "form"), "actions");
+        *form = gs_json_get(result, "form") != NULL;
         for (gs_jv a = gs_json_first(list); a; a = gs_json_next(a)) {
             char one[600];
             SDL_snprintf(one, sizeof one, "%s\t%s\n", gs_json_str(gs_json_get(a, "id"), ""), gs_json_str(gs_json_get(a, "label"), ""));
