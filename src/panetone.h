@@ -19,8 +19,11 @@ bool gear_panetone_say(const char *route, const char *text, const char *via, cha
 
 // Presses one of a question's answers (an id of its post's actions) in the route titled `route`, as its
 // Telegram button does, as the user through `via`: the label pressed in `label`, or false with the
-// reason in `error` (the question already answered or closed among them).
-bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, char *error, size_t error_size);
+// reason in `error` (the question already answered or closed among them). For a question form, whose
+// options are chosen one by one before it is submitted, `*form` is set and `actions` holds its answers
+// as they now are ("ID\tLABEL\n" each, the chosen marked; none once it is closed).
+bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, bool *form, char *actions, size_t actions_size,
+                          char *error, size_t error_size);
 
 // Whether Panetone has a route titled `route` (an agent's tab, or a room with no tab of its own, which
 // `panetone say` reaches all the same), and when `agents` is given, how many live agents it has of its

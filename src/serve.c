@@ -895,9 +895,26 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'C': {  // one of a question's answers pressed: {"to": ROUTE, "action": ID}
                 gs_json *doc = gs_json_parse(f->data, f->len);
                 gs_jv o = doc ? gs_json_root(doc) : NULL;
-                char label[600], error[600];
-                if (o && !gear_panetone_answer(gs_json_str(gs_json_get(o, "to"), ""), gs_json_str(gs_json_get(o, "action"), ""), "gear", label, sizeof label, error, sizeof error))
+                char label[600], error[600], actions[1536];
+                bool form = false;
+                const char *to = o ? gs_json_str(gs_json_get(o, "to"), "") : "", *action = o ? gs_json_str(gs_json_get(o, "action"), "") : "";
+                if (o && !gear_panetone_answer(to, action, "gear", label, sizeof label, &form, actions, sizeof actions, error, sizeof error))
                     send_text(&s, 'F', error);
+                else if (form) {  // (a form's answers as they now are, to every client, which show its choices)
+                    gs_jval *c = gs_jval_object(), *list = gs_jval_array();
+                    gs_jval_set(c, "to", gs_jval_str(to)), gs_jval_set(c, "action", gs_jval_str(action));
+                    for (char *x = actions, *tab, *end; (tab = SDL_strchr(x, '\t')) && (end = SDL_strchr(tab, '\n')); x = end + 1) {
+                        *tab = *end = 0;
+                        gs_jval *one = gs_jval_object();
+                        gs_jval_set(one, "id", gs_jval_str(x)), gs_jval_set(one, "label", gs_jval_str(tab + 1));
+                        gs_jval_push(list, one);
+                    }
+                    gs_jval_set(c, "actions", list);
+                    char *json = gs_jval_write(c, false);
+                    gs_jval_free(c);
+                    if (json) send_text(&s, 'C', json);
+                    SDL_free(json);
+                }
                 gs_json_free(doc);
                 break;
             }

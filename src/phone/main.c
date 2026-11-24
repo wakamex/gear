@@ -751,6 +751,28 @@ static void take_frames(app *a) {
             gs_json_free(doc);
             break;
         }
+        case 'C': {  // a question form's answers after one was pressed, here or on another client
+            gs_json *doc = gs_json_parse(data, len);
+            gs_jv o = doc ? gs_json_root(doc) : NULL;
+            char pressed[620];
+            SDL_snprintf(pressed, sizeof pressed, "%s\t", o ? gs_json_str(gs_json_get(o, "action"), "") : "");
+            for (int i = a->count - 1; o && i >= 0; i--) {
+                entry *e = &a->history[i];
+                const char *at = e->actions ? SDL_strstr(e->actions, pressed) : NULL;
+                if (!at || (at != e->actions && at[-1] != '\n')) continue;
+                char *now = actions_of(o);
+                if (now) SDL_free(e->actions), e->actions = now;
+                else {  // (closed: the button that closed it lit, the rest dimmed)
+                    int k = 1;
+                    for (const char *x = e->actions; x < at; x++) k += *x == '\n';
+                    e->chose = k;
+                }
+                e->laid_w = 0, save_answers(a, e);
+                break;
+            }
+            gs_json_free(doc);
+            break;
+        }
         case 'D': a->reply_done = true, SDL_FlushAudioStream(a->conv); break;  // (the resampler gives up the last it held back)
         case 'P': {
             SDL_PutAudioStreamData(a->conv, data, (int)len);  // (handed to the player as it plays: feed_speech)
@@ -1360,7 +1382,10 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
         char id[600], label[600];
         SDL_snprintf(id, sizeof id, "%.*s", (int)(tab - x), x), SDL_snprintf(label, sizeof label, "%.*s", (int)(end - tab - 1), tab + 1);
         gs_rect b = { at.x + pad, at.y + buttons_at - 4 + k * (button_h + 6), w, button_h };
-        bool chosen = e->chose == k + 1, open = !e->chose && !preview;
+        // (a Claude question form's options are chosen one by one, each marked ✓ by Panetone, and stay
+        // open until it is submitted, chatted about or cancelled; any other question's first press ends it)
+        bool form = !SDL_strncmp(e->actions, "wakf:", 5), closing = !form || SDL_strchr(id + 5, ':') == SDL_strrchr(id, ':');
+        bool chosen = e->chose == k + 1 || (form && SDL_strstr(label, "\u2713 ")), open = !e->chose && !preview;
         gs_ui_round(ui, b, 6, chosen ? (SDL_FColor){ 0.77f, 0.53f, 0.17f, 0.25f } : RAISED);
         gs_ui_outline(ui, b, 6, 1, chosen ? ACCENT : open && gs_ui_hovered(ui, b) ? ACCENT : BORDER);
         gs_ui_text(ui, gs_inset(b, 8), label, px, chosen ? BRIGHT : open ? TEXT : DIM, 0);
@@ -1371,8 +1396,7 @@ static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool l
             gs_jval_free(o);
             gp_link_send(a->link, 'C', json, (uint32_t)SDL_strlen(json));
             SDL_free(json);
-            ((entry *)e)->chose = k + 1;
-            save_answers(a, e);
+            if (closing) ((entry *)e)->chose = k + 1, save_answers(a, e);
         }
     }
     return h;

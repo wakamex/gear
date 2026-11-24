@@ -42,6 +42,8 @@
 //       "end": the bytes of it the sentence was read from, "at": seconds into its speech where the
 //       sentence starts}, for showing what is heard
 //   'D' the reply has been spoken
+//   'C' a question form's answers after one was pressed ('C' above): {"to", "action": the one pressed,
+//       "actions" [{"id", "label"}] as they now are, the chosen marked, or none once the form is closed}
 //   'Z' a message to show and not speak: {"seq", "who", "at", "text", "mine" when the user's, "again" when given
 //       again after 'K', "quiet" for Panetone's own notice, "actions" [{"id", "label"}] for a question's
 //       answers to press with 'C'}: a

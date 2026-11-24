@@ -50,7 +50,9 @@ bool gear_panetone_route(const char *route, int *agents) {
     return ok;
 }
 
-bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, char *error, size_t error_size) {
+bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, bool *form, char *actions, size_t actions_size,
+                          char *error, size_t error_size) {
+    *form = false, *actions = 0;
     const char *argv[] = { panetone(), "answer", "--to", route, "--action", action, "--as", via, NULL };
     size_t len = 0;
     int code = -1;
@@ -61,8 +63,18 @@ bool gear_panetone_answer(const char *route, const char *action, const char *via
     gs_json *doc = gs_json_parse(out, strcspn(out, "\n"));
     gs_jv r = doc ? gs_json_root(doc) : NULL;
     bool ok = r && gs_json_bool(gs_json_get(r, "ok"), false);
-    if (ok) SDL_strlcpy(label, gs_json_str(gs_json_get(gs_json_get(r, "result"), "answered"), ""), label_size);
-    else {
+    if (ok) {
+        gs_jv result = gs_json_get(r, "result");
+        SDL_strlcpy(label, gs_json_str(gs_json_get(result, "answered"), ""), label_size);
+        // (a form's answers as they now are, as the feed gives a question's)
+        gs_jv list = gs_json_get(result, "actions");
+        *form = list != NULL;
+        for (gs_jv a = gs_json_first(list); a; a = gs_json_next(a)) {
+            char one[600];
+            SDL_snprintf(one, sizeof one, "%s\t%s\n", gs_json_str(gs_json_get(a, "id"), ""), gs_json_str(gs_json_get(a, "label"), ""));
+            if (!SDL_strchr(gs_json_str(gs_json_get(a, "id"), ""), '\t') && SDL_strlen(actions) + SDL_strlen(one) < actions_size) SDL_strlcat(actions, one, actions_size);
+        }
+    } else {
         const char *why = r ? gs_json_str(gs_json_get(gs_json_get(r, "error"), "code"), NULL) : NULL;
         if (why && !SDL_strcmp(why, "question_closed")) SDL_snprintf(error, error_size, "%s's question was already answered or closed", route);
         else if (why && !SDL_strcmp(why, "unknown_action")) SDL_snprintf(error, error_size, "%s no longer offers that answer", route);
