@@ -829,11 +829,18 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'T': {
                 gear_agent a;
                 s.only = f->from;  // (an answer, the greeting, to the client asking alone)
-                if (!gear_agent_find(f->data, &a, error, sizeof error)) { send_text(&s, 'F', error); s.only = -1; break; }
+                // (no agent by that name or tab: a Panetone route of that title, such as a room of agents,
+                // which has no tab of its own and is sent to as any route is)
+                if (!gear_agent_find(f->data, &a, error, sizeof error)) {
+                    if (!gear_panetone_route(f->data)) { send_text(&s, 'F', error); s.only = -1; break; }
+                    a = (gear_agent){ 0 };
+                    SDL_strlcpy(a.name, f->data, sizeof a.name), SDL_strlcpy(a.tab, f->data, sizeof a.tab);
+                }
                 // Each client sends to the agent of the conversation it has open; the hub's own is the
                 // voice client's. (The agent before goes on answering in its own conversation, through the feed.)
                 SDL_strlcpy(from->target, a.name, sizeof from->target);
-                tab_of(a.name, from->tab, sizeof from->tab);
+                if (*a.tab) SDL_strlcpy(from->tab, a.tab, sizeof from->tab);
+                else tab_of(a.name, from->tab, sizeof from->tab);
                 if (f->from == s.talker) {
                     SDL_strlcpy(target, a.name, sizeof target);
                     SDL_strlcpy(target_tab, from->tab, sizeof target_tab);

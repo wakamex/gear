@@ -35,6 +35,20 @@ bool gear_panetone_say(const char *route, const char *text, const char *via, cha
     return ok;
 }
 
+bool gear_panetone_route(const char *route) {
+    const char *argv[] = { panetone(), "route", "inspect", route, NULL };
+    size_t len = 0;
+    int code = -1;
+    char *out = gear_host_run(argv, NULL, &len, &code);
+    if (!out) return false;
+    gs_json *doc = gs_json_parse(out, strcspn(out, "\n"));
+    gs_jv r = doc ? gs_json_root(doc) : NULL;
+    bool ok = r && gs_json_bool(gs_json_get(r, "ok"), false) && !SDL_strcasecmp(gs_json_str(gs_json_path(r, "result.route.title"), ""), route);
+    gs_json_free(doc);
+    SDL_free(out);
+    return ok;
+}
+
 bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, char *error, size_t error_size) {
     const char *argv[] = { panetone(), "answer", "--to", route, "--action", action, "--as", via, NULL };
     size_t len = 0;

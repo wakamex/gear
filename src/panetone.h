@@ -22,6 +22,10 @@ bool gear_panetone_say(const char *route, const char *text, const char *via, cha
 // reason in `error` (the question already answered or closed among them).
 bool gear_panetone_answer(const char *route, const char *action, const char *via, char *label, size_t label_size, char *error, size_t error_size);
 
+// Whether Panetone has a route titled `route` (an agent's tab, or a room with no tab of its own, which
+// `panetone say` reaches all the same).
+bool gear_panetone_route(const char *route);
+
 typedef enum {
     GEAR_POST_MESSAGE,  // a post to show: an agent's message, or Panetone's receipt or notice (quiet)
     GEAR_POST_MINE,     // the user's own message, sent through another client
