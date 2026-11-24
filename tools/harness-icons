@@ -7,5 +7,5 @@ set -eu
 cd "$(dirname "$0")/.."
 for svg in assets/harness/*.svg; do
     name=$(basename "$svg" .svg)
-    sed 's/currentColor/#b6aa99/g' "$svg" | magick -background none -density 600 svg:- -resize 96x96 -gravity center -extent 96x96 "assets/avatars/harness-$name.png"
+    sed 's/currentColor/#b6aa99/g' "$svg" | magick -background none -density 600 svg:- -resize 96x96 -gravity center -extent 96x96 -define png:exclude-chunks=date,time "assets/avatars/harness-$name.png"
 done
