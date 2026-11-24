@@ -179,8 +179,13 @@ static void save_settings(app *a) {
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
+static void trim_unread(app *a);
+
 static void remember(app *a, const char *text, const char *who, const char *at, bool mine) {
-    if (a->count == HISTORY) SDL_free(a->history[0].text), SDL_free(a->history[0].actions), SDL_memmove(a->history, a->history + 1, (HISTORY - 1) * sizeof *a->history), a->count--;
+    // (the oldest going, a count may now be more than its conversation's replies kept)
+    bool full = a->count == HISTORY;
+    if (full) SDL_free(a->history[0].text), SDL_free(a->history[0].actions), SDL_memmove(a->history, a->history + 1, (HISTORY - 1) * sizeof *a->history), a->count--;
+    if (full && a->unread_count) trim_unread(a);
     entry *e = &a->history[a->count++];
     *e = (entry){ 0 };  // (a slot taken again after the oldest went holds a copy of the one before it)
     e->text = SDL_strdup(text), e->mine = mine;
@@ -285,6 +290,20 @@ static void save_unread(app *a) {
     SDL_SaveFile(path, text, SDL_strlen(text));
 }
 
+// Each count no larger than the conversation's replies still kept: one whose replies have all gone out
+// of the history (its last HISTORY messages) was counted and could not be opened from the list or
+// gone to with the count.
+static void trim_unread(app *a) {
+    bool changed = false;
+    for (int u = 0; u < a->unread_count; u++) {
+        int kept = 0;
+        for (int i = 0; i < a->count && kept < a->unread[u].n; i++)
+            if (!a->history[i].mine && !a->history[i].quiet && !SDL_strcmp(a->history[i].who, a->unread[u].who)) kept++;
+        if (kept < a->unread[u].n) a->unread[u].n = kept, changed = true;
+    }
+    if (changed) save_unread(a);
+}
+
 static void load_unread(app *a) {
     char path[1100], *save = NULL;
     settings_path(a, path, sizeof path, "unread.txt");
@@ -295,6 +314,7 @@ static void load_unread(app *a) {
         if (n) *n = SDL_atoi(line);
     }
     SDL_free(text);
+    trim_unread(a);
 }
 
 // ---- Muted conversations ----
