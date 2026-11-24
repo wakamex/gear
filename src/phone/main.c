@@ -2308,6 +2308,13 @@ int main(int argc, char **argv) {
                 debug_event(&e);
                 // (the oldest key or typed text of the frame, for timing what typing waits for)
                 if ((e.type == SDL_EVENT_TEXT_INPUT || e.type == SDL_EVENT_KEY_DOWN) && !typed_at) typed_at = e.common.timestamp, frame_at = SDL_GetTicksNS();
+                // Alt+E opens the conversation list (and closes it), wherever the keyboard is.
+                if (e.type == SDL_EVENT_KEY_DOWN && e.key.key == SDLK_E && (e.key.mod & SDL_KMOD_ALT) && !e.key.repeat && !a.setup && !a.viewing) {
+                    a.picking = !a.picking;
+                    if (a.picking && a.link && gp_link_status(a.link, NULL, 0) == GP_OPEN) gp_link_send(a.link, 'L', NULL, 0);
+                    if (a.picking) gs_ui_focus(ui, "pick");  // (typed to search at once)
+                    continue;
+                }
                 bool taken = gs_ui_event(ui, &e);
                 // With a keyboard, Space held talks as the character held does (a tap stops what is being
                 // said, or in always-on sends now), unless a field has the keyboard; Escape stops a reply.
