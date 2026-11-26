@@ -143,7 +143,18 @@ static bool fetch_one(const char *dir, const gear_model_file *f, sink *s, SDL_At
         char hex[65];
         gs_sha256_final(&s->hash, digest);
         gs_sha256_hex(digest, hex);
-        if (s->have == f->bytes && !SDL_strcmp(hex, f->sha256)) return SDL_RenamePath(part, dest);
+        if (s->have == f->bytes && !SDL_strcmp(hex, f->sha256)) {
+            // Into place, tried for up to 10 s: on Windows an antivirus holds a file just written open
+            // while it scans it, and a rename then fails (Defender did so for a 24 MB download).
+            for (Uint64 began = SDL_GetTicks(); !SDL_RenamePath(part, dest);) {
+                if (SDL_GetTicks() - began >= 10000) {
+                    SDL_snprintf(error, error_size, "Could not move %s into place: %s", f->name, SDL_GetError());
+                    return false;
+                }
+                SDL_Delay(250);
+            }
+            return true;
+        }
         // Short of its length the connection broke, and the part stays for the next try. At its
         // length, or past it (a server that ignored the range), the bytes are wrong.
         if (s->have < f->bytes) { SDL_snprintf(error, error_size, "Downloading %s failed: the connection broke", f->name); return false; }
