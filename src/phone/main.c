@@ -52,7 +52,7 @@ static const char *const read_names[] = { "replies to me", "this conversation", 
 // actions: a question's answers, pressed as its Telegram buttons are, "ID\tLABEL\n" each, or NULL;
 // chose: the one pressed, from 1, or 0 for none yet
 // speaker, harness: in a room, the member that posted it and its agent's harness ("claude"), or ""
-typedef struct { char *text, *actions; char who[128]; char at[8]; bool mine, quiet, unfolded, laid_unfolded; float laid_w, laid_h; int chose; char speaker[128], harness[32]; } entry;
+typedef struct { char *text, *actions; char who[128]; char at[8]; bool mine, quiet, unfolded, laid_unfolded; float laid_w, laid_h; int chose; char speaker[128], harness[32]; Uint64 place; } entry;
 enum { HISTORY = 2000, CONVERSATIONS = 64 };
 typedef struct { char who[128]; int n; } unread;  // the replies in a conversation not yet seen
 typedef struct { int start, end; double at; } spoken_line;  // a sentence spoken ('L')
@@ -195,6 +195,8 @@ static void remember(app *a, const char *text, const char *who, const char *at, 
     if (full && a->unread_count) trim_unread(a);
     entry *e = &a->history[a->count++];
     *e = (entry){ 0 };  // (a slot taken again after the oldest went holds a copy of the one before it)
+    static Uint64 places;
+    e->place = ++places;  // (its order down the page, which stays as the oldest go: gp_rich_order)
     e->text = SDL_strdup(text), e->mine = mine;
     SDL_strlcpy(e->who, who, sizeof e->who), SDL_strlcpy(e->at, at, sizeof e->at);
 }
@@ -1368,6 +1370,7 @@ static bool preview;
 // dimmed. Returns its height; draws nothing when `draw` is false.
 static float message_block(gs_ui *ui, app *a, gs_rect at, const entry *e, bool live, bool draw) {
     float head = small * 1.7f, pad = 8, w = at.w - pad - 4;
+    gp_rich_order(e->place);
     const char *text = e->text;
     // Panetone's receipt or notice: dim, without a mark, a header or a speaker, folded to its first
     // line ("…" when there is more), which a tap unfolds and folds again.

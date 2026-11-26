@@ -26,7 +26,10 @@ void gp_rich_table_view(gs_ui *ui, gs_rect area, const char *md, const gp_rich_s
 // Selecting and links: a finger held still on a message's text for half a second and dragged selects
 // (across messages too), and a tap on a web address opens it. The texts of a frame are drawn between
 // gp_rich_begin and gp_rich_end; gp_rich_selection is what is selected in them, in order (NULL for
-// nothing), and gp_rich_unselect drops it.
+// nothing), those scrolled away and not drawn now included, and gp_rich_unselect drops it. Before
+// drawing each message, gp_rich_order gives its place in the conversation (any number that grows
+// down the page), which orders what is selected in it among the rest.
+void gp_rich_order(Uint64 place);
 void gp_rich_begin(gs_ui *ui);
 void gp_rich_end(gs_ui *ui);
 const char *gp_rich_selection(void);

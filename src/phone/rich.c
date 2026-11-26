@@ -304,39 +304,42 @@ static layout *lay_out(gs_ui *ui, const char *text, float width, const gp_rich_s
 // ---- Selecting and links ----
 
 // What is selected in the paragraphs pressed (by id: the text's address and the piece's place), kept
-// between frames; the group spans every message, so a selection can run from one into the next. A
-// paragraph never pressed keeps no place here, as a conversation draws more paragraphs each frame than
-// the table holds.
-enum { PICKED = 128 };
-typedef struct { char id[40]; int from, to; Uint64 frame; } picked;
-static picked picks[PICKED];
-static Uint64 frame;
-static char *selection;  // what is selected across the frame's texts, in order, or NULL
+// between frames with the text chosen in each and its place on the page; the group spans every
+// message, so a selection can run from one into the next, past those no longer drawn. A paragraph
+// never pressed or selected keeps no place here.
+typedef struct { char id[40]; int from, to; Uint64 frame, place; char *chosen; } picked;
+static picked *picks;
+static int pick_count, pick_cap;
+static Uint64 frame, message_place;
+static char *selection;  // what is selected, in order down the page, or NULL
 static bool began;       // a new selection began in the messages this frame
-static size_t selection_len;
 
 static picked *find_pick(const char *id) {
-    for (int i = 0; i < PICKED; i++)
-        if (picks[i].id[0] && !SDL_strcmp(picks[i].id, id)) return &picks[i];
+    for (int i = 0; i < pick_count; i++)
+        if (!SDL_strcmp(picks[i].id, id)) return &picks[i];
     return NULL;
 }
 
 static picked *new_pick(const char *id) {
-    int oldest = 0;
-    for (int i = 0; i < PICKED; i++) {
-        if (!picks[i].id[0]) { oldest = i; break; }
-        if (picks[i].frame < picks[oldest].frame) oldest = i;
-    }
-    picked *p = &picks[oldest];
+    if (pick_count == pick_cap) picks = SDL_realloc(picks, (size_t)(pick_cap = pick_cap ? pick_cap * 2 : 64) * sizeof *picks);
+    picked *p = &picks[pick_count++];
     SDL_zerop(p);
     SDL_strlcpy(p->id, id, sizeof p->id);
     return p;
 }
 
+static void drop_pick(int i) { SDL_free(picks[i].chosen), picks[i] = picks[--pick_count]; }
+
+void gp_rich_order(Uint64 place) { message_place = place; }
+
 void gp_rich_begin(gs_ui *ui) {
     frame++;
-    SDL_free(selection), selection = NULL, selection_len = 0;
     gs_ui_select_group(ui, "messages");
+}
+
+static int by_place(const void *a, const void *b) {
+    Uint64 x = ((const picked *)a)->place, y = ((const picked *)b)->place;
+    return x < y ? -1 : x > y;
 }
 
 void gp_rich_end(gs_ui *ui) {
@@ -344,8 +347,20 @@ void gp_rich_end(gs_ui *ui) {
     // A new selection began: the texts not drawn this frame give up theirs.
     began = gs_ui_select_began(ui, "messages");
     if (began)
-        for (int i = 0; i < PICKED; i++)
-            if (picks[i].frame != frame) picks[i].id[0] = 0;
+        for (int i = pick_count - 1; i >= 0; i--)
+            if (picks[i].frame != frame) drop_pick(i);
+    // What is selected, each paragraph's on a line of its own, in order down the page.
+    SDL_qsort(picks, (size_t)pick_count, sizeof *picks, by_place);
+    size_t n = 0;
+    for (int i = 0; i < pick_count; i++) n += picks[i].chosen ? SDL_strlen(picks[i].chosen) + 1 : 0;
+    SDL_free(selection), selection = NULL;
+    if (!n) return;
+    selection = SDL_malloc(n), *selection = 0;
+    for (int i = 0; i < pick_count; i++)
+        if (picks[i].chosen) {
+            if (*selection) SDL_strlcat(selection, "\n", n);
+            SDL_strlcat(selection, picks[i].chosen, n);
+        }
 }
 
 const char *gp_rich_selection(void) { return selection; }
@@ -353,23 +368,20 @@ const char *gp_rich_selection(void) { return selection; }
 bool gp_rich_began(void) { return began; }
 
 void gp_rich_unselect(void) {
-    for (int i = 0; i < PICKED; i++) picks[i].id[0] = 0;
+    while (pick_count) drop_pick(pick_count - 1);
+    SDL_free(selection), selection = NULL;
 }
 
-static void add_selected(const char *text, int from, int to) {
-    if (from > to) { int t = from; from = to, to = t; }
-    if (from == to) return;
-    size_t n = (size_t)(to - from);
-    selection = SDL_realloc(selection, selection_len + n + 2);
-    if (selection_len) selection[selection_len++] = '\n';
-    SDL_memcpy(selection + selection_len, text + from, n);
-    selection_len += n;
-    selection[selection_len] = 0;
+// The pair a paragraph was given, kept with the text it chooses (none when nothing is).
+static void keep_selected(picked *p, const char *text, int from, int to, int piece) {
+    p->from = from, p->to = to, p->frame = frame, p->place = message_place << 20 | (Uint64)piece;
+    int lo = SDL_min(from, to), hi = SDL_max(from, to);
+    SDL_free(p->chosen), p->chosen = lo < hi ? SDL_strndup(text + lo, (size_t)(hi - lo)) : NULL;
 }
 
 // A paragraph, selectable, its web addresses links (a tap opens one), and the bytes [a, b) of it
 // marked as the sentence heard (from - 1 for none).
-static void paragraph(gs_ui *ui, gs_rect r, const char *id, const char *text, const gp_rich_style *s, int a, int b) {
+static void paragraph(gs_ui *ui, gs_rect r, const char *id, int piece, const char *text, const gp_rich_style *s, int a, int b) {
     enum { MOST = 32 };
     gs_ui_styled links[MOST];
     gs_ui_text_span spans[2 * MOST + 4];
@@ -383,11 +395,7 @@ static void paragraph(gs_ui *ui, gs_rect r, const char *id, const char *text, co
     gs_ui_text_spans(ui, r, id, text, s->px, s->text, NULL, 0, spans, n, &from, &to, &clicked);
     // (a place once gs_ui has set the pair, a press, where a drag keeps its start; until a new
     // selection begins elsewhere, or the oldest gives way)
-    if (p || from || to) {
-        if (!p) p = new_pick(id);
-        p->from = from, p->to = to, p->frame = frame;
-    }
-    add_selected(text, from, to);
+    if (p || from || to) keep_selected(p ? p : new_pick(id), text, from, to, piece);
     if (clicked >= 0 && link_of[clicked] >= 0) {
         const gs_ui_styled *l = &links[link_of[clicked]];
         char url[1024];
@@ -467,7 +475,7 @@ float gp_rich_marked(gs_ui *ui, gs_rect at, const char *text, const gp_rich_styl
             gs_ui_text_span span = { a - p->from, b - p->from, 0, s->marked, s->mark, false };
             char id[40];
             SDL_snprintf(id, sizeof id, "%p.%d", (const void *)text, i);
-            paragraph(ui, (gs_rect){ at.x, y, at.w, p->height }, id, p->text, s, span.start, span.end);
+            paragraph(ui, (gs_rect){ at.x, y, at.w, p->height }, id, i, p->text, s, span.start, span.end);
             if (mark_y && !placed) {
                 // The line the mark starts on: below the text before it, less a line when that text
                 // runs on into the line.
@@ -479,7 +487,7 @@ float gp_rich_marked(gs_ui *ui, gs_rect at, const char *text, const gp_rich_styl
         } else {
             char id[40];
             SDL_snprintf(id, sizeof id, "%p.%d", (const void *)text, i);
-            paragraph(ui, (gs_rect){ at.x, y, at.w, p->height }, id, p->text, s, 0, 0);
+            paragraph(ui, (gs_rect){ at.x, y, at.w, p->height }, id, i, p->text, s, 0, 0);
         }
         y += p->height + gap;
     }
