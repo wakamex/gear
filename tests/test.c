@@ -465,6 +465,11 @@ static void test_speakable(void) {
     speaks("## Summary\nAll tests pass", "Summary. All tests pass.");
     speaks("Call `gear_listen_new` and then gs_voice_frame.", "Call gear listen new and then gs voice frame.");
     speaks("Keep it and/or drop half of 1/2 in tmp/live.", "Keep it and or drop half of 1/2 in tmp live.");
+    // (zeros at a decimal's end, one kept; words joined by slashes; vs)
+    speaks("Got 1.000 vs 0.000 and 1.500 on unseen/edited/unlearned facts in repo/src/phone.",
+           "Got one point zero versus zero point zero and one point five on unseen edited unlearned facts in repo src phone.");
+    speaks("Clean MLP segregation vs. 4B excision failure (Vs at the start too).",
+           "Clean MLP segregation versus four B excision failure (versus at the start too).");
     speaks("[The README](README.md) explains it, and *so* does _the brief_.", "The README explains it, and so does the brief.");
     speaks("It was in ~/.config/gear/settings.json and C:\\Users\\me\\gear.exe", "It was in settings and gear.");
     speaks("First line\nsecond line of the same paragraph.\n\nNew paragraph",

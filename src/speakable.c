@@ -231,7 +231,13 @@ static size_t say_number(buf *b, const char *s) {
         puts_(b, " point ");
         bool version = s[used + 1 + f] == '.' && digit(s[used + 2 + f]);
         if (version || (used && SDL_strchr(s, '.') != s + used)) say_integer(b, (unsigned long long)SDL_atoi(s + used + 1));
-        else say_digits(b, s + used + 1, f);
+        else {
+            // (without the zeros at its end, one kept: 1.000 as "one point zero", 1.500 as "one point
+            // five"; a run of zeros said one by one sent Pocket TTS into saying "zero" over and over)
+            size_t said = f;
+            while (said > 1 && s[used + said] == '0') said--;
+            say_digits(b, s + used + 1, said);
+        }
         used += 1 + f;
     }
     return used;
@@ -410,6 +416,14 @@ static bool token(buf *b, const char *t, size_t n, bool after_number) {
     if (m >= sizeof word) { put(b, t + head, n - head); return false; }
     SDL_memcpy(word, w, m);
     word[m] = 0;
+    // vs as "versus", which Pocket TTS said as "vest" and "vers"; the period of "vs." is the
+    // abbreviation's, which left would end the sentence there
+    if (!SDL_strcasecmp(word, "vs")) {
+        size_t from = tail < n && t[tail] == '.' ? tail + 1 : tail;
+        puts_(b, "versus");
+        put(b, t + from, n - from);
+        return false;
+    }
     if (!SDL_strcmp(word, "read") && !head && read_is_past(b, t + n)) {
         puts_(b, "red");
         put(b, t + tail, n - tail);
@@ -433,12 +447,13 @@ static bool token(buf *b, const char *t, size_t n, bool after_number) {
         // A path: two or more separators, or one that starts it, read as its last part.
         int slashes = 0;
         for (const char *p = word; *p; p++) slashes += *p == '/' || *p == '\\';
-        // One separator is a path when it starts the word or the last part looks like a file
-        // (src/listen.c), not when it joins words (and/or, 1/2).
+        // Separators make a path when one starts the word, the last part looks like a file
+        // (src/listen.c) or they are a backslash (C:\Users\me), not when they join words (and/or,
+        // 1/2, unseen/edited/unlearned), which are said as words.
         const char *last = SDL_strrchr(word, '/');
         const char *dot = last ? SDL_strrchr(last, '.') : NULL;
         bool file = dot && dot > last + 1 && SDL_isalpha((unsigned char)dot[1]);
-        bool path = slashes >= 2 || (slashes == 1 && (word[0] == '/' || word[0] == '~' || word[0] == '.' || file));
+        bool path = slashes && (word[0] == '/' || word[0] == '~' || word[0] == '.' || file || SDL_strchr(word, '\\'));
         const char *name = word;
         if (path) {
             const char *a = SDL_strrchr(word, '/'), *c = SDL_strrchr(word, '\\');
