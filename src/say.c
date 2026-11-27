@@ -83,6 +83,8 @@ static int run(void *user) {
         pt_tts_default_params(&p);
         p.text = l->text;
         p.voice = s->voice;
+        // (a seed of the speech model's log given again, GEAR_SEED, to hear what it said once)
+        if (SDL_getenv("GEAR_SEED")) p.seed = (uint32_t)SDL_strtoul(SDL_getenv("GEAR_SEED"), NULL, 10);
         p.on_chunk = on_chunk;
         p.user_data = &j;
         if (pt_synthesize(s->ctx, &p, NULL) && SDL_GetAtomicInt(&s->generation) == j.generation) SDL_Log("gear: synthesis failed: %s", pt_last_error());

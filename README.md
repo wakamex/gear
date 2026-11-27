@@ -84,6 +84,8 @@ gear say "Some reply." reply.wav             # the reply as the player plays it
 gear interrupt "Some reply." talking.wav out.wav  # a reply while talking.wav plays as the microphone
 ```
 
+`GEAR_SEED` gives `gear say` the speech model's seed, so a sentence the hub spoke can be heard again as it was: the hub's log has each sentence's seed (`[TTS] ... seed N`), and `gear read` shows the words it was given.
+
 `zig build test` runs the tests. The listener and file tests always run; with `GEAR_MODELS` set to a folder holding the models, the end-to-end tests also transcribe `tests/utterance.wav` (LibriSpeech test-clean 1089-134686-0010, CC-BY-4.0) through the pipeline and check that talking two seconds into a reply stops it; built with `-Decho=true`, they also check the echo canceller with a simulated loudspeaker. With `GEAR_AGENT` naming an agent kept for tests, they send it a message through Wakterm and check its reply; without it they still check, against the real `wakterm` and an agent that does not exist, that a refused message is reported as refused.
 
 ## Decisions
