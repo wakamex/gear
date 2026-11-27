@@ -475,6 +475,9 @@ static void test_speakable(void) {
     speaks("Block 139 failed at 575, and 7,445 s is 83.5% of the 0.34 budget.",
            "Block one hundred thirty nine failed at five hundred seventy five, and seven thousand four hundred forty five "
            "seconds is eighty three point five percent of the zero point three four budget.");
+    // (a UUID, uppercase hex and a long token are codes too, said as their first six characters)
+    speaks("Run e9d1b09c-fb2f-41c7-a0c2-0d5890062409 and 6AD685E5 with AAKdSJwB3IB7Nlr2TNaF3 set; 6ad685e5-fix stays.",
+           "Run e nine d one b zero and six a d six eight five with a a k d s j set; six a d six eight five fix stays.");
     speaks("Pin 6ad685e5 for v0.5.0, port-0073, 41 GiB and 1.55x on w3sim.",
            "Pin six a d six eight five for v zero point five point zero, port zero zero seven three, forty one gigabytes and one "
            "point five five times on w three sim.");

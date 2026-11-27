@@ -119,7 +119,7 @@ static const char *unit_word(const char *u, size_t n) {
 }
 
 static bool digit(char c) { return c >= '0' && c <= '9'; }
-static bool hex(char c) { return digit(c) || (c >= 'a' && c <= 'f'); }
+static bool hex(char c) { return digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
 
 static size_t digits(const char *s) {
     size_t n = 0;
@@ -127,14 +127,26 @@ static size_t digits(const char *s) {
     return n;
 }
 
-// A commit hash or other hex code (seven or more, with a digit and a letter): its first six
-// characters, spelled, are enough to tell it apart (four were not: 6ad68495 and 6ad68651).
+// A code: a commit hash or other hex code (seven or more, with a digit and a letter, in either case),
+// with any hex groups joined on by hyphens, as a UUID's are (e9d1b09c-fb2f-41c7-a0c2-0d5890062409);
+// or a long run of letters and digits (sixteen or more, with two of each), such as a token. Its
+// first six characters, spelled, are enough to tell it apart (four were not: 6ad68495 and 6ad68651).
+// Said whole, a UUID was 24 words, which made its sentence too long for Pocket TTS, which then
+// skipped it and never found the sentence's end.
 enum { HASH_SAID = 6 };
 static size_t hash_length(const char *s) {
-    size_t n = 0;
-    bool d = false, l = false;
-    while (hex(s[n])) { d |= digit(s[n]); l |= !digit(s[n]); n++; }
-    return n >= 7 && d && l && !word_char(s[n]) ? n : 0;
+    size_t n = 0, d = 0, l = 0;
+    while (hex(s[n])) d += digit(s[n]), l += !digit(s[n]), n++;
+    if (n >= 7 && d && l && !word_char(s[n])) {
+        for (size_t g; s[n] == '-';) {
+            for (g = 0; hex(s[n + 1 + g]); g++) {}
+            if (!g || word_char(s[n + 1 + g])) break;
+            n += 1 + g;
+        }
+        return n;
+    }
+    for (n = d = l = 0; SDL_isalnum((unsigned char)s[n]); n++) d += digit(s[n]), l += !digit(s[n]);
+    return n >= 16 && d >= 2 && l >= 2 && !word_char(s[n]) ? n : 0;
 }
 
 // $0.70 as "seventy cents", $8.50 as "eight dollars and fifty cents"; returns the characters taken
@@ -254,8 +266,9 @@ static bool say_word(buf *b, const char *w, bool after_number) {
             const char *code = p[0] == '0' && p[1] == 'x' ? p + 2 : p;
             for (int i = 0; i < HASH_SAID; i++) {
                 if (i) puts_(b, " ");
-                if (digit(code[i])) puts_(b, ones[code[i] - '0']);
-                else put(b, code + i, 1);
+                char c = (char)SDL_tolower((unsigned char)code[i]);
+                if (digit(c)) puts_(b, ones[c - '0']);
+                else put(b, &c, 1);
             }
             p += h;
             number = false;
