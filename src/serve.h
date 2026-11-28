@@ -11,7 +11,9 @@
 //   'W' the same as 'U' without the words taught ('Y'): how the speech says it by itself
 //   'J' a word, to ask how it is said: answered with 'J'
 //   'D' a line for finding a fault (UTF-8), kept in phone-debug.log in gear's data folder
-//   'F' a file for the next message: its name, a zero byte, its bytes (8 MB at most); kept in gear's data
+//   'P' a piece of a file of more than 4 MB, sent in pieces of 4 MB: its name, a zero byte, the piece's
+//       bytes; the last piece comes as 'F', which keeps the whole (GEAR_FILE_MOST at most)
+//   'F' a file for the next message: its name, a zero byte, its bytes (4 MB at most, or the last piece); kept in gear's data
 //       folder under attachments/DATE/, and named in the message, "[attached TYPE: PATH]", as Panetone
 //       names a file sent from Telegram
 //   'C' {"to": the route, "action": one of a question's answers (from 'Z''s "actions")}: pressed, as
@@ -65,6 +67,10 @@
 #pragma once
 
 #include <stdbool.h>
+
+// The largest file a client may send for a message ('P' and 'F'), and the pieces a larger than one
+// frame is sent in (the app's FILE_MOST and FILE_PIECE are the same).
+enum { GEAR_FILE_MOST = 100 * 1024 * 1024, GEAR_FILE_PIECE = 4 * 1024 * 1024 };
 
 // Serves one client on standard input and output; with `hub`, stays running and serves whichever
 // client connects to its socket ($XDG_RUNTIME_DIR/gear-hub.sock), the newest taking over, its log of

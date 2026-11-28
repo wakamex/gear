@@ -1637,17 +1637,25 @@ static bool paste_image(app *a) {
 }
 
 // Each file picked, to the computer before the message they go with ('F': the name, a zero byte, the
-// file), as much of it as a frame holds.
+// file); one over FILE_PIECE in pieces of that size, each but the last as 'P' (serve.h's
+// GEAR_FILE_MOST and GEAR_FILE_PIECE).
+enum { FILE_MOST = 100 * 1024 * 1024, FILE_PIECE = 4 * 1024 * 1024 };
 static bool send_files(app *a) {
     for (int i = 0; i < a->attached_count; i++) {
         size_t len = 0;
         void *data = SDL_LoadFile(a->attached[i], &len);
         if (!data) { SDL_snprintf(a->note, sizeof a->note, "could not read %s: %s", a->attached_name[i], SDL_GetError()), a->note_for[0] = 0; return false; }
+        if (len > FILE_MOST) { SDL_free(data); SDL_snprintf(a->note, sizeof a->note, "%s is over 100 MB", a->attached_name[i]), a->note_for[0] = 0; return false; }
         size_t name_len = SDL_strlen(a->attached_name[i]);
-        if (len + name_len + 1 > 8 * 1024 * 1024 - 64) { SDL_free(data); SDL_snprintf(a->note, sizeof a->note, "%s is over 8 MB", a->attached_name[i]), a->note_for[0] = 0; return false; }
-        char *frame = SDL_malloc(name_len + 1 + len);
-        SDL_memcpy(frame, a->attached_name[i], name_len + 1), SDL_memcpy(frame + name_len + 1, data, len);
-        gp_link_send(a->link, 'F', frame, (uint32_t)(name_len + 1 + len));
+        char *frame = SDL_malloc(name_len + 1 + SDL_min(len, (size_t)FILE_PIECE));
+        SDL_memcpy(frame, a->attached_name[i], name_len + 1);
+        for (size_t at = 0;;) {
+            size_t n = SDL_min(len - at, (size_t)FILE_PIECE);
+            SDL_memcpy(frame + name_len + 1, (char *)data + at, n);
+            at += n;
+            gp_link_send(a->link, at < len ? 'P' : 'F', frame, (uint32_t)(name_len + 1 + n));
+            if (at >= len) break;
+        }
         SDL_free(frame), SDL_free(data);
     }
     for (int i = 0; i < a->attached_count; i++)

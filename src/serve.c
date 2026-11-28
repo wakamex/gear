@@ -50,6 +50,8 @@ typedef struct {
     char target[128];    // the agent its open conversation sends to ('T'), or "" for the hub's
     char tab[128];       // and that agent's route, found once when it is chosen
     char *files;         // the files it sent ('F') for its next message, a line each, or NULL
+    char *upload;        // the pieces of a large file come so far ('P'): its name, a zero byte, its bytes
+    size_t upload_len;
 } client;
 
 typedef struct {
@@ -889,6 +891,7 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
 #endif
             c->from = NULL, c->fd = -1;
             SDL_free(c->files), c->files = NULL;  // (files sent for a message that never came)
+            SDL_free(c->upload), c->upload = NULL, c->upload_len = 0;
             if (i == s.talker) {
                 int next = -1;
                 for (int j = 0; j < CLIENTS; j++)
@@ -1028,9 +1031,21 @@ int gear_serve(const char *models, int hear_threads, int say_threads, bool hub) 
             case 'M':  // a message typed: sent as one said (with the files sent before it, if only those)
                 if (*f->data || from->files) deliver_text(&s, f->data);
                 break;
-            case 'F':  // a file for the client's next message: kept here, and named in it
-                keep_file(&s, from, f->data, f->len);
+            case 'P':  // a piece of a large file, the rest to come; its last piece comes as 'F'
+            case 'F': {  // a file for the client's next message: kept here, and named in it
+                size_t name_len = SDL_strnlen(f->data, f->len);
+                if (name_len >= f->len) break;
+                // (a piece: its bytes added to those come before, its name the first time)
+                bool first = !from->upload;
+                size_t add = first ? f->len : f->len - name_len - 1, total = from->upload_len + add;
+                if (f->type == 'F' && first) { keep_file(&s, from, f->data, f->len); break; }
+                if (total > (size_t)GEAR_FILE_MOST + 256) { SDL_free(from->upload), from->upload = NULL, from->upload_len = 0; send_text(&s, 'F', "a file over 100 MB was not kept"); break; }
+                from->upload = SDL_realloc(from->upload, total);
+                SDL_memcpy(from->upload + from->upload_len, first ? f->data : f->data + name_len + 1, add);
+                from->upload_len = total;
+                if (f->type == 'F') keep_file(&s, from, from->upload, (Uint32)from->upload_len), SDL_free(from->upload), from->upload = NULL, from->upload_len = 0;
                 break;
+            }
             case 'D': {  // a line from the phone, for finding a fault: kept in phone-debug.log
                 char *pref = SDL_GetPrefPath("wakamex", "gear"), at[8], file[1100];
                 SDL_snprintf(file, sizeof file, "%sphone-debug.log", pref ? pref : "");
